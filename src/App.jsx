@@ -360,7 +360,7 @@ function roleColor(r) {
   }[r]||"#64748b";
 }
 function roleMultiplier(r) {
-  return {TOP6:1.2, BOT6:0.75, SCRATCHED:0, D1:1.15, D2:1.0, D3:0.75, STARTER:0, BACKUP:0}[r]??0;
+  return {TOP6:1.2, MID6:1.0, BOT6:0.75, SCRATCHED:0, D1:1.15, D2:1.0, D3:0.75, STARTER:0, BACKUP:0}[r]??1.0;
 }
 function RoleBadge({role}) { const c=roleColor(role||"BOT6"); return <span style={{fontSize:9,padding:"1px 5px",borderRadius:3,background:`${c}20`,color:c,fontWeight:500}}>{role||"—"}</span>; }
 function rolesForPos(pos) {
