@@ -354,21 +354,25 @@ function Seg({options,value,onChange,accent="#3b82f6"}) {
 const SEL = {padding:"4px 8px",fontSize:11,background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",color:"var(--color-text-primary)"};
 function roleColor(r) {
   return {
-    TOP6:"#10b981", BOT6:"#f59e0b", SCRATCHED:"#ef4444",
+    TOP6:"#10b981", MID6:"#64748b", BOT6:"#f59e0b", SCRATCHED:"#ef4444",
     D1:"#3b82f6", D2:"#60a5fa", D3:"#93c5fd",
     STARTER:"#a78bfa", BACKUP:"#7c3aed",
   }[r]||"#64748b";
 }
+// v13: All role multipliers temporarily set to 1.0 while bugs are shaken out.
+// SCRATCHED still forces 0 (player is removed from pool everywhere anyway).
+// STARTER/BACKUP stay 0 because goalies are excluded from skater markets by design.
+// Re-attach differential weights (TOP6 1.2, BOT6 0.75, etc.) after validating upload pipeline.
 function roleMultiplier(r) {
-  return {TOP6:1.2, MID6:1.0, BOT6:0.75, SCRATCHED:0, D1:1.15, D2:1.0, D3:0.75, STARTER:0, BACKUP:0}[r]??1.0;
+  return {TOP6:1.0, MID6:1.0, BOT6:1.0, SCRATCHED:0, D1:1.0, D2:1.0, D3:1.0, STARTER:0, BACKUP:0}[r]??1.0;
 }
-function RoleBadge({role}) { const c=roleColor(role||"BOT6"); return <span style={{fontSize:9,padding:"1px 5px",borderRadius:3,background:`${c}20`,color:c,fontWeight:500}}>{role||"—"}</span>; }
+function RoleBadge({role}) { const c=roleColor(role||"MID6"); return <span style={{fontSize:9,padding:"1px 5px",borderRadius:3,background:`${c}20`,color:c,fontWeight:500}}>{role||"—"}</span>; }
 function rolesForPos(pos) {
-  if(!pos) return ["TOP6","BOT6","SCRATCHED"];
+  if(!pos) return ["TOP6","MID6","BOT6","SCRATCHED"];
   const p=pos.toUpperCase();
   if(p==="G") return ["STARTER","BACKUP","SCRATCHED"];
   if(p==="D") return ["D1","D2","D3","SCRATCHED"];
-  return ["TOP6","BOT6","SCRATCHED"];
+  return ["TOP6","MID6","BOT6","SCRATCHED"];
 }
 function SyncBadge({status}) {
   const m={idle:["#6b7280","Offline"],syncing:["#f59e0b","Syncing…"],ok:["#10b981","Synced"],err:["#ef4444","Sync Error"]};
@@ -1205,7 +1209,15 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             </div>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
               <thead><tr style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
-                {["G","Home","H Win%","Total","OT%","Score","Result"].map(h=><th key={h} style={{padding:"3px 3px",color:"var(--color-text-tertiary)",fontWeight:500,textAlign:"left",fontSize:9,cursor:h==="OT%"?"help":"default"}} title={h==="OT%"?"P(game goes to OT). NHL playoff avg ~22%. Affects OT markets only, not series outcome.":undefined}>{h}</th>)}
+                {[
+                  ["G",""],
+                  ["Host","Which team hosts this game (2-2-1-1-1 rotation based on series home team)"],
+                  ["Host Win%","Win probability for the host team of THIS game (NOT the series home team). For a road game, this is the road team's win probability at home."],
+                  ["Total","Expected total goals for this game"],
+                  ["OT%","P(game goes to OT). NHL playoff avg ~22%. Affects OT markets only, not series outcome."],
+                  ["Score",""],
+                  ["Result",""]
+                ].map(([h,tip])=><th key={h} style={{padding:"3px 3px",color:"var(--color-text-tertiary)",fontWeight:500,textAlign:"left",fontSize:9,cursor:tip?"help":"default"}} title={tip||undefined}>{h}</th>)}
               </tr></thead>
               <tbody>{effG.map((g,i)=>{
                 const isHome=HOME_PATTERN[i+1];
@@ -2410,6 +2422,80 @@ function GameStatImporter({players,setPlayers,allSeries}) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// PLAYOFF TOTALS VERIFICATION TABLE (v13)
+// Shows every player with pGP>0 or any recorded playoff stat. Lets user
+// confirm Game Stat Import actually landed. Primary debug tool for import issues.
+// ═══════════════════════════════════════════════════════════════════════════════
+function PlayoffTotalsTable({players,dark}) {
+  const [filterTeam,setFilterTeam]=useState("ALL");
+  const [sortBy,setSortBy]=useState("pts");
+
+  const rows=useMemo(()=>{
+    if(!players) return [];
+    return players
+      .filter(p=>(p.pGP||0)>0 || (p.pG||0)>0 || (p.pA||0)>0 || (p.pSOG||0)>0)
+      .filter(p=>filterTeam==="ALL"||p.team===filterTeam)
+      .map(p=>({...p,pPts:(p.pG||0)+(p.pA||0)}))
+      .sort((a,b)=>{
+        if(sortBy==="team") return a.team.localeCompare(b.team)||b.pPts-a.pPts;
+        if(sortBy==="pts") return b.pPts-a.pPts;
+        if(sortBy==="g") return (b.pG||0)-(a.pG||0);
+        if(sortBy==="sog") return (b.pSOG||0)-(a.pSOG||0);
+        return 0;
+      });
+  },[players,filterTeam,sortBy]);
+
+  const teams=useMemo(()=>{
+    if(!players) return [];
+    return [...new Set(players.filter(p=>(p.pGP||0)>0).map(p=>p.team))].sort();
+  },[players]);
+
+  if(!players) return <div style={{fontSize:11,color:"var(--color-text-tertiary)"}}>Load skaters.csv first.</div>;
+  if(rows.length===0) return <div style={{fontSize:11,color:"var(--color-text-tertiary)"}}>No playoff game stats imported yet. After you paste a Hockey Reference box score above, matched players will appear here.</div>;
+
+  return <div>
+    <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:8,fontSize:10,flexWrap:"wrap"}}>
+      <span style={{color:"var(--color-text-secondary)"}}>{rows.length} players with playoff stats</span>
+      <select value={filterTeam} onChange={e=>setFilterTeam(e.target.value)}
+        style={{fontSize:10,padding:"2px 5px",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-primary)"}}>
+        <option value="ALL">All teams</option>
+        {teams.map(t=><option key={t} value={t}>{t}</option>)}
+      </select>
+      <select value={sortBy} onChange={e=>setSortBy(e.target.value)}
+        style={{fontSize:10,padding:"2px 5px",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-primary)"}}>
+        <option value="pts">Sort: Points</option>
+        <option value="g">Sort: Goals</option>
+        <option value="sog">Sort: SOG</option>
+        <option value="team">Sort: Team</option>
+      </select>
+    </div>
+    <div style={{maxHeight:280,overflowY:"auto",overflowX:"auto"}}>
+      <table style={{width:"100%",borderCollapse:"collapse",fontSize:10}}>
+        <thead style={{position:"sticky",top:0,background:dark?"#131625":"#fff",zIndex:1}}>
+          <tr style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+            {["Player","Team","GP","G","A","Pts","SOG","PIM"].map(h=>(
+              <th key={h} style={{padding:"3px 6px",color:"var(--color-text-tertiary)",fontWeight:500,textAlign:h==="Player"||h==="Team"?"left":"right",fontSize:9}}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>{rows.map((p,i)=>(
+          <tr key={p.name+p.team} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)")}}>
+            <td style={{padding:"2px 6px"}}>{p.name}</td>
+            <td style={{padding:"2px 6px"}}><span style={{fontSize:8,padding:"1px 4px",borderRadius:2,background:"rgba(59,130,246,0.12)",color:"#60a5fa"}}>{p.team}</span></td>
+            <td style={{padding:"2px 6px",textAlign:"right",fontFamily:"var(--font-mono)"}}>{p.pGP||0}</td>
+            <td style={{padding:"2px 6px",textAlign:"right",fontFamily:"var(--font-mono)",color:(p.pG||0)>0?"#4ade80":"var(--color-text-tertiary)",fontWeight:(p.pG||0)>0?500:400}}>{p.pG||0}</td>
+            <td style={{padding:"2px 6px",textAlign:"right",fontFamily:"var(--font-mono)",color:(p.pA||0)>0?"#4ade80":"var(--color-text-tertiary)"}}>{p.pA||0}</td>
+            <td style={{padding:"2px 6px",textAlign:"right",fontFamily:"var(--font-mono)",fontWeight:500}}>{p.pPts}</td>
+            <td style={{padding:"2px 6px",textAlign:"right",fontFamily:"var(--font-mono)",color:"var(--color-text-secondary)"}}>{p.pSOG||0}</td>
+            <td style={{padding:"2px 6px",textAlign:"right",fontFamily:"var(--font-mono)",color:"var(--color-text-tertiary)"}}>{p.pPIM||0}</td>
+          </tr>
+        ))}</tbody>
+      </table>
+    </div>
+  </div>;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // UPLOAD TAB
 // ═══════════════════════════════════════════════════════════════════════════════
 function UploadTab({players,setPlayers,goalies,setGoalies,exportState,importState,syncStatus,allSeries,dark}) {
@@ -2447,7 +2533,7 @@ function UploadTab({players,setPlayers,goalies,setGoalies,exportState,importStat
           const give=parseFloat(c[idx("I_F_giveaways")])||0;
           const posVal=c[idx("position")]?.trim()||"F";
           const name=c[idx("name")]?.trim();if(!name)continue;
-          const defRole=posVal==="D"?"D2":posVal==="G"?"BACKUP":"BOT6";
+          const defRole=posVal==="D"?"D2":posVal==="G"?"BACKUP":"MID6";
           parsed.push({name,team,pos:posVal,gp:Math.round(gp),g,a,pts:g+a,sog,hit,blk,tk,pim,tsa,give,
             g_pg:+(g/gp).toFixed(4),a_pg:+(a/gp).toFixed(4),pts_pg:+((g+a)/gp).toFixed(4),
             sog_pg:+(sog/gp).toFixed(4),hit_pg:+(hit/gp).toFixed(4),blk_pg:+(blk/gp).toFixed(4),
@@ -2506,6 +2592,10 @@ function UploadTab({players,setPlayers,goalies,setGoalies,exportState,importStat
           {/* Series + Game selector */}
           <GameStatImporter players={players} setPlayers={setPlayers} allSeries={allSeries}/>
         </Card>
+        <Card style={{marginBottom:14}}>
+          <SH title="Live Playoff Totals" sub="Post-import verification — any player with pGP > 0 appears here"/>
+          <PlayoffTotalsTable players={players} dark={dark}/>
+        </Card>
       </div>
 
       <div>
@@ -2514,7 +2604,7 @@ function UploadTab({players,setPlayers,goalies,setGoalies,exportState,importStat
           <div style={{marginBottom:8,fontSize:12,color:"var(--color-text-secondary)"}}>{players?`${players.length} skaters loaded`:"No skater data"}</div>
           <button onClick={()=>playerFileRef.current?.click()} style={{padding:"6px 16px",fontSize:12,borderRadius:"var(--border-radius-md)",background:"#3b82f6",color:"white",border:"none",cursor:"pointer"}}>{players?"Re-load skaters.csv":"Load skaters.csv"}</button>
           {players&&<div style={{marginTop:10,display:"flex",gap:4,flexWrap:"wrap"}}>
-            {["TOP6","BOT6","D1","D2","D3","STARTER","BACKUP","SCRATCHED"].map(r=>{
+            {["TOP6","MID6","BOT6","D1","D2","D3","STARTER","BACKUP","SCRATCHED"].map(r=>{
               const cnt=players.filter(p=>p.lineRole===r).length;
               if(!cnt) return null;
               const c=roleColor(r);
@@ -2580,7 +2670,7 @@ function RolesTab({players,setPlayers,dark}) {
 
   if(!players) return <Card><div style={{color:"var(--color-text-secondary)",fontSize:12,padding:8}}>Load player data first</div></Card>;
 
-  const ALL_ROLES=["TOP6","BOT6","D1","D2","D3","STARTER","BACKUP","SCRATCHED"];
+  const ALL_ROLES=["TOP6","MID6","BOT6","D1","D2","D3","STARTER","BACKUP","SCRATCHED"];
 
   return <div>
     <Card style={{marginBottom:12}}>
