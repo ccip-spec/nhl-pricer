@@ -117,7 +117,10 @@ function computeSeriesGoalsLambda(effG) {
     if (hw===4||aw===4) { lambda += prob * goalsAcc; return; }
     if (gi>=7) return;
     const g = effG[gi];
-    const gl = g.expTotal || 5.5;
+    // Use actual score total if game is played and scores entered, else expTotal
+    const actualTotal = (g.result && g.homeScore!=null && g.awayScore!=null)
+      ? (Number(g.homeScore)+Number(g.awayScore)) : (g.expTotal || 5.5);
+    const gl = actualTotal;
     if (g.result==="home") rec(gi+1, hw+1, aw, prob, goalsAcc+gl);
     else if (g.result==="away") rec(gi+1, hw, aw+1, prob, goalsAcc+gl);
     else { rec(gi+1, hw+1, aw, prob*g.winPct, goalsAcc+gl); rec(gi+1, hw, aw+1, prob*(1-g.winPct), goalsAcc+gl); }
@@ -148,18 +151,31 @@ function computeOTSeriesDist(effG, outcomes, kMax=8) {
 
 // Spread: home wins - away wins differential
 // homeCover(line) = P(homeWins - awayWins > line) from outcomes
-function computeSpread(outcomes) {
-  const lines = [-3.5,-2.5,-1.5,-0.5]; // home perspective
-  return lines.map(line => {
-    let pHome=0, pAway=0;
-    for (const [k,prob] of Object.entries(outcomes)) {
-      const [hw,aw] = k.split("-").map(Number);
-      const diff = hw - aw;
-      if (diff > line) pHome += prob;
-      else pAway += prob;
+function computeSpread(outcomes, homeAbbr, awayAbbr) {
+  // Lines from home perspective (-3.5 to -0.5) then away perspective (-1.5 to -3.5)
+  const homeLines = [-3.5,-2.5,-1.5,-0.5];
+  const awayLines = [-0.5,-1.5,-2.5,-3.5]; // away -0.5 = away wins series, -3.5 = away wins 4-0
+  const rows = [];
+  // Home favoured lines
+  for(const line of homeLines){
+    let pHome=0,pAway=0;
+    for(const [k,prob] of Object.entries(outcomes)){
+      const [hw,aw]=k.split("-").map(Number);
+      if(hw-aw>line) pHome+=prob; else pAway+=prob;
     }
-    return { line, pHome, pAway };
-  });
+    rows.push({homeLabel:`${homeAbbr||"H"} ${line>0?"+":""}${line}`, awayLabel:`${awayAbbr||"A"} ${-line>0?"+":""}${-line}`, pHome, pAway, line});
+  }
+  // Away favoured lines (symmetric)
+  for(const line of [-1.5,-2.5,-3.5]){
+    let pAway=0,pHome=0;
+    for(const [k,prob] of Object.entries(outcomes)){
+      const [hw,aw]=k.split("-").map(Number);
+      const diff=aw-hw; // away differential
+      if(diff>Math.abs(line)) pAway+=prob; else pHome+=prob;
+    }
+    rows.push({homeLabel:`${homeAbbr||"H"} +${Math.abs(line)}`, awayLabel:`${awayAbbr||"A"} -${Math.abs(line)}`, pHome, pAway, line:null, awayLine:line});
+  }
+  return rows;
 }
 
 // Parlay: G1 winner x series winner (4 combos)
@@ -255,7 +271,10 @@ function parseHR(text) {
   }
   if (hi===-1) return {error:"No header found — need Player column"};
   const al = { Player:["Player","Skater","Name"], Team:["Team","Tm"], GP:["GP","GamesPlayed"],
-    G:["G","Goals"], A:["A","Assists"], SOG:["SOG","S","Shots"], HIT:["HIT","H","Hits"], BLK:["BLK","B","Blocked","BS"] };
+    G:["G","Goals"], A:["A","Assists"], SOG:["SOG","S","Shots"],
+    HIT:["HIT","H","Hits"], BLK:["BLK","B","Blocked","BS"],
+    TK:["TK","Takeaways","Take","TAKE"], PIM:["PIM","PenMin"],
+    TSA:["TSA","SA","ShotAtt","Attempts"], GV:["GV","Give","Giveaways","GIVE"] };
   const cm = {};
   for (const [k,alts] of Object.entries(al)) {
     for (const a of alts) { const idx=headers.findIndex(h=>h.toLowerCase()===a.toLowerCase()); if(idx!==-1){cm[k]=idx;break;} }
@@ -269,7 +288,11 @@ function parseHR(text) {
     players.push({ name:c[cm.Player], team:cm.Team!==undefined?(c[cm.Team]||"").toUpperCase():"",
       gp:cm.GP!==undefined?parseInt(c[cm.GP])||0:1, g, a, pts:g+a,
       sog:cm.SOG!==undefined?parseInt(c[cm.SOG])||0:0, hit:cm.HIT!==undefined?parseInt(c[cm.HIT])||0:0,
-      blk:cm.BLK!==undefined?parseInt(c[cm.BLK])||0:0 });
+      blk:cm.BLK!==undefined?parseInt(c[cm.BLK])||0:0,
+      tk:cm.TK!==undefined?parseInt(c[cm.TK])||0:0,
+      pim:cm.PIM!==undefined?parseInt(c[cm.PIM])||0:0,
+      tsa:cm.TSA!==undefined?parseInt(c[cm.TSA])||0:0,
+      give:cm.GV!==undefined?parseInt(c[cm.GV])||0:0 });
   }
   return {players};
 }
@@ -311,12 +334,13 @@ function TH({cols}) {
   </tr></thead>;
 }
 function OR({label,tp,ap,showTrue}) {
-  return <tr style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+  const zero = ap!=null && ap < 0.0001;
+  return <tr style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:zero?0.4:1}}>
     <td style={{padding:"5px 8px"}}>{label}</td>
     {showTrue&&<td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{tp!=null?(tp*100).toFixed(1)+"%":"—"}</td>}
     <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11}}>{ap!=null?(ap*100).toFixed(1)+"%":"—"}</td>
-    <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:12,fontWeight:500,color:ap&&ap>=0.5?"#4ade80":"var(--color-text-primary)"}}>{ap!=null?fmt(ap):"—"}</td>
-    <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{ap!=null?toDec(ap).toFixed(2):"—"}</td>
+    <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:12,fontWeight:500,color:ap&&ap>=0.5?"#4ade80":"var(--color-text-primary)"}}>{zero?"—":ap!=null?fmt(ap):"—"}</td>
+    <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{zero?"—":ap!=null?toDec(ap).toFixed(2):"—"}</td>
   </tr>;
 }
 function Seg({options,value,onChange,accent="#3b82f6"}) {
@@ -328,8 +352,24 @@ function Seg({options,value,onChange,accent="#3b82f6"}) {
   </div>;
 }
 const SEL = {padding:"4px 8px",fontSize:11,background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",color:"var(--color-text-primary)"};
-function roleColor(r) { return {TOP6:"#10b981",MID6:"#3b82f6",BOT6:"#f59e0b",SCRATCHED:"#ef4444"}[r]||"#3b82f6"; }
-function RoleBadge({role}) { const c=roleColor(role||"MID6"); return <span style={{fontSize:9,padding:"1px 5px",borderRadius:3,background:`${c}20`,color:c,fontWeight:500}}>{role||"MID6"}</span>; }
+function roleColor(r) {
+  return {
+    TOP6:"#10b981", BOT6:"#f59e0b", SCRATCHED:"#ef4444",
+    D1:"#3b82f6", D2:"#60a5fa", D3:"#93c5fd",
+    STARTER:"#a78bfa", BACKUP:"#7c3aed",
+  }[r]||"#64748b";
+}
+function roleMultiplier(r) {
+  return {TOP6:1.2, BOT6:0.75, SCRATCHED:0, D1:1.15, D2:1.0, D3:0.75, STARTER:0, BACKUP:0}[r]??1.0;
+}
+function RoleBadge({role}) { const c=roleColor(role||"BOT6"); return <span style={{fontSize:9,padding:"1px 5px",borderRadius:3,background:`${c}20`,color:c,fontWeight:500}}>{role||"—"}</span>; }
+function rolesForPos(pos) {
+  if(!pos) return ["TOP6","BOT6","SCRATCHED"];
+  const p=pos.toUpperCase();
+  if(p==="G") return ["STARTER","BACKUP","SCRATCHED"];
+  if(p==="D") return ["D1","D2","D3","SCRATCHED"];
+  return ["TOP6","BOT6","SCRATCHED"];
+}
 function SyncBadge({status}) {
   const m={idle:["#6b7280","Offline"],syncing:["#f59e0b","Syncing…"],ok:["#10b981","Synced"],err:["#ef4444","Sync Error"]};
   const [color,label]= m[status]||m.idle;
@@ -400,7 +440,7 @@ export default function App() {
   },[matchups]);
 
   const computeLambda = useCallback((p,stat,scope)=>{
-    const rm=p.lineRole==="TOP6"?1.15:p.lineRole==="BOT6"?0.75:p.lineRole==="SCRATCHED"?0:1.0;
+    const rm=roleMultiplier(p.lineRole);
     if(rm===0)return 0.0001;
     // stat key mapping: tsa->tsa_pg, give->give_pg, tk->take_pg, else stat_pg
     const pgKey=stat==="tk"?"take_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
@@ -427,7 +467,7 @@ export default function App() {
     return pool.map((p,i)=>({...p,lambda:lambdas[i],trueProb:raw[i],adjProb:adj[i]})).sort((a,b)=>b.adjProb-a.adjProb).slice(0,lTopN);
   },[players,lStat,lScope,globals,computeLambda,matchups,advancement,lTopN]);
 
-  function exportState(){const s={players,goalies,matchups,allSeries,advancement,globals,margins};const b=new Blob([JSON.stringify(s,null,2)],{type:"application/json"});const a=document.createElement("a");a.href=URL.createObjectURL(b);a.download="nhl_pricer_backup.json";a.click();}
+  function exportState(){const s={players,goalies,matchups,allSeries,advancement,globals,margins};return JSON.stringify(s,null,2);}
   function importState(text){try{const s=JSON.parse(text);if(s.players){setPlayers(s.players);scheduleSync("players",s.players);}if(s.goalies){setGoalies(s.goalies);scheduleSync("goalies",s.goalies);}if(s.matchups){setMatchups(s.matchups);}if(s.allSeries){setAllSeries(s.allSeries);}if(s.advancement){setAdvancement(s.advancement);}if(s.globals)setGlobals(s.globals);if(s.margins)setMargins(s.margins);return{ok:true};}catch(e){return{ok:false,error:e.message};}}
 
   const STATS=[
@@ -467,7 +507,7 @@ export default function App() {
           players={players} goalies={goalies} margins={margins} setMargins={setMargins}
           globals={globals} showTrue={showTrue} dark={dark} onEnterGame={setGameModal}/>}
         {tab==="upload"&&<UploadTab players={players} setPlayers={setP} goalies={goalies} setGoalies={setG}
-          exportState={exportState} importState={importState} syncStatus={syncStatus} dark={dark}/>}
+          exportState={exportState} importState={importState} syncStatus={syncStatus} allSeries={allSeries} dark={dark}/>}
         {tab==="compare"&&<CompareTab leaderMarket={leaderMarket} STATS={STATS} lStat={lStat} setLStat={setLStat} lScope={lScope} setLScope={setLScope} dark={dark}/>}
         {tab==="roles"&&<RolesTab players={players} setPlayers={setP} dark={dark}/>}
         {tab==="settings"&&<SettingsTab globals={globals} setGlobals={setGlobals}
@@ -1068,9 +1108,9 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
 
   // Spread market
   const spreadMkt=useMemo(()=>{
-    const rows=computeSpread(outcomes);
+    const rows=computeSpread(outcomes,s.homeAbbr,s.awayAbbr);
     return rows.map(r=>{const [ah,aa]=applyMargin([r.pHome,r.pAway],margins.spread);return {...r,ah,aa};});
-  },[effKey,margins.spread,outcomes]);
+  },[effKey,margins.spread,outcomes,s.homeAbbr,s.awayAbbr]);
 
   // Total goals O/U
   const totalGoalsMkt=useMemo(()=>{
@@ -1117,7 +1157,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
   },[effKey,margins.parlay,outcomes]);
 
   const MKTS=[
-    {id:"winner",l:"Winner"},{id:"eightway",l:"8-Way"},{id:"length",l:"Length"},
+    {id:"winner",l:"Winner"},{id:"eightway",l:"Correct Score"},{id:"length",l:"Length"},
     {id:"spread",l:"Spread"},{id:"totalgoals",l:"Total Goals"},{id:"shutouts",l:"Shutouts"},
     {id:"winorder",l:"Win Order"},{id:"score3",l:"Score @G3"},
     {id:"ot",l:"OT/Game"},{id:"otseries",l:"OT Series"},
@@ -1162,23 +1202,40 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             </div>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
               <thead><tr style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
-                {["G","Home","Win%","Total","pOT","Res"].map(h=><th key={h} style={{padding:"3px 3px",color:"var(--color-text-tertiary)",fontWeight:500,textAlign:"left",fontSize:9}}>{h}</th>)}
+                {["G","Home","H Win%","Total","OT%","Score","Result"].map(h=><th key={h} style={{padding:"3px 3px",color:"var(--color-text-tertiary)",fontWeight:500,textAlign:"left",fontSize:9,cursor:h==="OT%"?"help":"default"}} title={h==="OT%"?"P(game goes to OT). NHL playoff avg ~22%. Affects OT markets only, not series outcome.":undefined}>{h}</th>)}
               </tr></thead>
-              <tbody>{effG.map((g,i)=>(
+              <tbody>{effG.map((g,i)=>{
+                const isHome=HOME_PATTERN[i+1];
+                const homeLabel=isHome?(s.homeAbbr||"H"):(s.awayAbbr||"A");
+                return (
                 <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:g.result?0.5:1}}>
                   <td style={{padding:"2px 3px",color:"var(--color-text-tertiary)",fontSize:9}}>G{i+1}</td>
-                  <td style={{padding:"2px 3px",fontSize:9,color:"var(--color-text-secondary)"}}>{HOME_PATTERN[i+1]?(s.homeAbbr||"H"):(s.awayAbbr||"A")}</td>
+                  <td style={{padding:"2px 3px",fontSize:9,color:"var(--color-text-secondary)"}}>{homeLabel}</td>
                   <td style={{padding:"1px 2px"}}><NI value={+g.winPct.toFixed(3)} onChange={v=>updG(i,"winPct",v)} min={0} max={1} step={0.01} style={{width:46}}/></td>
                   <td style={{padding:"1px 2px"}}><NI value={+g.expTotal.toFixed(1)} onChange={v=>updG(i,"expTotal",v)} min={2} max={12} step={0.1} style={{width:40}}/></td>
-                  <td style={{padding:"1px 2px"}}><NI value={+(g.pOT??0.22).toFixed(2)} onChange={v=>updG(i,"pOT",v)} min={0} max={0.5} step={0.01} style={{width:40}}/></td>
+                  <td style={{padding:"1px 2px"}}><NI value={+(g.pOT??0.22).toFixed(2)} onChange={v=>updG(i,"pOT",v)} min={0} max={0.5} step={0.01} style={{width:38}}/></td>
+                  <td style={{padding:"1px 2px"}}>
+                    <div style={{display:"flex",gap:2,alignItems:"center"}}>
+                      <input type="number" min={0} max={20} value={g.homeScore??""} placeholder="—"
+                        onChange={e=>updG(i,"homeScore",parseInt(e.target.value)||null)}
+                        style={{width:28,fontSize:9,textAlign:"center",padding:"2px 2px",fontFamily:"var(--font-mono)",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-primary)"}}/>
+                      <span style={{fontSize:9,color:"var(--color-text-tertiary)"}}>-</span>
+                      <input type="number" min={0} max={20} value={g.awayScore??""} placeholder="—"
+                        onChange={e=>updG(i,"awayScore",parseInt(e.target.value)||null)}
+                        style={{width:28,fontSize:9,textAlign:"center",padding:"2px 2px",fontFamily:"var(--font-mono)",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-primary)"}}/>
+                    </div>
+                  </td>
                   <td style={{padding:"1px 3px"}}>
                     <select value={g.result||""} onChange={e=>updG(i,"result",e.target.value||null)}
-                      style={{fontSize:9,padding:"2px 3px",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-primary)",width:40}}>
-                      <option value="">—</option><option value="home">H</option><option value="away">A</option>
+                      style={{fontSize:9,padding:"2px 3px",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-primary)",width:48}}>
+                      <option value="">—</option>
+                      <option value="home">{s.homeAbbr||"Home"} W</option>
+                      <option value="away">{s.awayAbbr||"Away"} W</option>
                     </select>
                   </td>
                 </tr>
-              ))}</tbody>
+                );
+              })}</tbody>
             </table>
             <div style={{marginTop:8,paddingTop:8,borderTop:"0.5px solid var(--color-border-tertiary)"}}>
               <div style={{display:"flex",gap:10,fontSize:10,alignItems:"center",flexWrap:"wrap"}}>
@@ -1240,7 +1297,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             <tbody><OR label={s.homeTeam||"Home"} tp={hwp} ap={adjH} showTrue={showTrue}/><OR label={s.awayTeam||"Away"} tp={awp} ap={adjA} showTrue={showTrue}/></tbody></table>
           </Card>}
 
-          {mkt==="eightway"&&<Card><SH title="8-Way Outcome" sub={`OR: ${margins.eightWay}x`}/>
+          {mkt==="eightway"&&<Card><SH title="Series Correct Score" sub={`OR: ${margins.eightWay}x`}/>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><TH cols={["Outcome",...(showTrue?["True%"]:[]),"Adj%","American","Decimal"]}/>
             <tbody>{e8.map((o,i)=><OR key={i} label={o.l} tp={o.tp} ap={o.ap} showTrue={showTrue}/>)}</tbody></table>
           </Card>}
@@ -1252,24 +1309,38 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
               Exp length: <strong style={{color:"var(--color-text-primary)"}}>{expG.toFixed(2)}g</strong></div>
           </Card>}
 
-          {mkt==="winorder"&&<Card><SH title="Win Order (70-Way)" sub={`OR: ${margins.winOrder}x — e.g. HHAAHH = H wins G1,G2,G5,G6`}/>
-            <div style={{maxHeight:480,overflowY:"auto"}}>
-              <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-                <TH cols={["Sequence","Winner","Games",...(showTrue?["True%"]:[]),"Adj%","American","Dec"]}/>
-                <tbody>{winOrders.map((o,i)=>(
-                  <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)")}}>
-                    <td style={{padding:"3px 8px",fontFamily:"var(--font-mono)",fontSize:11,letterSpacing:"0.04em"}}>{o.seq}</td>
-                    <td style={{padding:"3px 8px",fontSize:10,color:"var(--color-text-secondary)"}}>{o.hw===4?(s.homeTeam||"Home"):(s.awayTeam||"Away")}</td>
-                    <td style={{padding:"3px 8px",textAlign:"right",fontSize:10}}>{o.seq.length}</td>
-                    {showTrue&&<td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(o.tp*100).toFixed(2)}%</td>}
-                    <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{(o.ap*100).toFixed(2)}%</td>
-                    <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{fmt(o.ap)}</td>
-                    <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{toDec(o.ap).toFixed(2)}</td>
-                  </tr>
-                ))}</tbody>
-              </table>
-            </div>
-          </Card>}
+          {mkt==="winorder"&&(()=>{
+            const hn=s.homeTeam||s.homeAbbr||"Home";
+            const an=s.awayTeam||s.awayAbbr||"Away";
+            // Convert H/A seq to team names
+            const seqLabel=(seq)=>seq.split("").map(c=>c==="H"?hn:an).join(" / ");
+            const copyAll=()=>{
+              const txt=winOrders.map(o=>`${seqLabel(o.seq)}\t${o.ap>0?"+":""}${fmt(o.ap)}\t${toDec(o.ap).toFixed(2)}`).join("\n");
+              navigator.clipboard?.writeText(txt);
+            };
+            return <Card>
+              <div style={{display:"flex",alignItems:"center",marginBottom:10}}>
+                <SH title="Win Order (70-Way)" sub={`OR: ${margins.winOrder}x — sequences show game-by-game winner`}/>
+                <button onClick={copyAll} style={{marginLeft:"auto",padding:"3px 10px",fontSize:10,borderRadius:"var(--border-radius-md)",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",color:"var(--color-text-secondary)",cursor:"pointer"}}>Copy All</button>
+              </div>
+              <div style={{maxHeight:480,overflowY:"auto"}}>
+                <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                  <TH cols={["Sequence","Winner","Games",...(showTrue?["True%"]:[]),"Adj%","American","Dec"]}/>
+                  <tbody>{winOrders.map((o,i)=>(
+                    <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)")}}>
+                      <td style={{padding:"3px 8px",fontSize:10}}>{seqLabel(o.seq)}</td>
+                      <td style={{padding:"3px 8px",fontSize:10,color:"var(--color-text-secondary)"}}>{o.hw===4?hn:an}</td>
+                      <td style={{padding:"3px 8px",textAlign:"right",fontSize:10}}>{o.seq.length}</td>
+                      {showTrue&&<td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(o.tp*100).toFixed(2)}%</td>}
+                      <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{(o.ap*100).toFixed(2)}%</td>
+                      <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{fmt(o.ap)}</td>
+                      <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{toDec(o.ap).toFixed(2)}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            </Card>;
+          })()}
 
           {mkt==="score3"&&<Card><SH title="Correct Score After 3 Games" sub={`OR: ${margins.correctScore}x`}/>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><TH cols={["Score (H-A)",...(showTrue?["True%"]:[]),"Adj%","American","Decimal"]}/>
@@ -1324,11 +1395,11 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
 
           {mkt==="spread"&&<Card><SH title="Series Spread" sub={`Goal differential — OR: ${margins.spread}x`}/>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
-              <TH cols={["Line (Home)","Line (Away)",...(showTrue?["True%"]:[]),"H Adj%","H Odds","A Adj%","A Odds"]}/>
+              <TH cols={["Home Line","Away Line",...(showTrue?["True%"]:[]),"H Adj%","H Odds","A Adj%","A Odds"]}/>
               <tbody>{spreadMkt.map((r,i)=>(
                 <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)")}}>
-                  <td style={{padding:"5px 8px",fontFamily:"var(--font-mono)"}}>{s.homeAbbr||"H"} {r.line>0?"+":""}{r.line}</td>
-                  <td style={{padding:"5px 8px",fontFamily:"var(--font-mono)",color:"var(--color-text-secondary)"}}>{s.awayAbbr||"A"} {-r.line>0?"+":""}{-r.line}</td>
+                  <td style={{padding:"5px 8px",fontFamily:"var(--font-mono)",fontWeight:500}}>{r.homeLabel}</td>
+                  <td style={{padding:"5px 8px",fontFamily:"var(--font-mono)",color:"var(--color-text-secondary)"}}>{r.awayLabel}</td>
                   {showTrue&&<td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(r.pHome*100).toFixed(1)}%</td>}
                   <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{(r.ah*100).toFixed(1)}%</td>
                   <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500,color:r.ah>=0.5?"#4ade80":"var(--color-text-primary)"}}>{fmt(r.ah)}</td>
@@ -1386,10 +1457,16 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
           </Card>}
 
           {mkt==="teamgoals"&&<Card><SH title="Per-Team Total Goals O/U" sub={`OR: ${margins.teamGoals}x`}/>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
-              {[["home",s.homeTeam||"Home",teamGoalsMkt.home],["away",s.awayTeam||"Away",teamGoalsMkt.away]].map(([side,name,data])=>(
-                <div key={side}>
-                  <div style={{fontSize:10,fontWeight:500,color:"var(--color-text-secondary)",marginBottom:6,textTransform:"uppercase"}}>{name} Goals · λ={data.lambda.toFixed(2)}</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:0}}>
+              {[["home",s.homeTeam||s.homeAbbr||"Home",teamGoalsMkt.home],["away",s.awayTeam||s.awayAbbr||"Away",teamGoalsMkt.away]].map(([side,name,data],si)=>(
+                <div key={side} style={{
+                  padding:"0 16px 0",
+                  borderRight:si===0?`2px solid ${dark?"#2d3147":"#e2e8f0"}`:"none",
+                  paddingLeft:si===1?16:0,
+                }}>
+                  <div style={{fontSize:11,fontWeight:500,color:side==="home"?"#60a5fa":"#a78bfa",marginBottom:8,paddingBottom:6,borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                    {name} <span style={{color:"var(--color-text-tertiary)",fontWeight:400,fontSize:10}}>λ={data.lambda.toFixed(2)}</span>
+                  </div>
                   <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
                     <TH cols={["Line",...(showTrue?["P(O)"]:[]),"Ov%","Over","Under"]}/>
                     <tbody>{data.rows.map((r,i)=>(
@@ -1407,13 +1484,22 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             </div>
           </Card>}
 
-          {mkt==="parlay"&&<Card><SH title="Game 1 × Series Winner Parlay" sub={`OR: ${margins.parlay}x`}/>
-            <div style={{marginBottom:8,fontSize:11,color:"var(--color-text-tertiary)"}}>G1 winner × series winner (4 combos). Not exhaustive — push scenarios excluded.</div>
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
-              <TH cols={["Parlay",...(showTrue?["True%"]:[]),"Adj%","American","Decimal"]}/>
-              <tbody>{parlayMkt.map((r,i)=><OR key={i} label={r.label.replace("Home",s.homeTeam||"Home").replace("Away",s.awayTeam||"Away")} tp={r.tp} ap={r.ap} showTrue={showTrue}/>)}</tbody>
-            </table>
-          </Card>}
+          {mkt==="parlay"&&(()=>{
+            const gPlayed=s.games.filter(g=>g.result).length;
+            const parlayGame=gPlayed+1;
+            const parlayTitle=gPlayed===0?`Game 1 × Series Winner Parlay`:`Game ${parlayGame} × Series Winner Parlay`;
+            const parlayNote=gPlayed===0
+              ?"G1 result × series winner (4 combos)"
+              :`Based on current series state (${s.games.filter(g=>g.result==="home").length}-${s.games.filter(g=>g.result==="away").length}). Next game × series winner.`;
+            return <Card>
+              <SH title={parlayTitle} sub={`OR: ${margins.parlay}x`}/>
+              <div style={{marginBottom:8,fontSize:11,color:"var(--color-text-tertiary)"}}>{parlayNote}</div>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                <TH cols={["Parlay",...(showTrue?["True%"]:[]),"Adj%","American","Decimal"]}/>
+                <tbody>{parlayMkt.map((r,i)=><OR key={i} label={r.label.replace("Home",s.homeTeam||"Home").replace("Away",s.awayTeam||"Away")} tp={r.tp} ap={r.ap} showTrue={showTrue}/>)}</tbody>
+              </table>
+            </Card>;
+          })()}
 
           {mkt==="props"&&<PropsPanel s={s} expG={expG} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark} mode="ou"/>}
           {mkt==="binary"&&<PropsPanel s={s} expG={expG} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark} mode="binary"/>}
@@ -1437,6 +1523,8 @@ function PropsPanel({s,expG,players,globals,margins,showTrue,dark,mode}) {
     {id:"tk",label:"Takeaways",mk:"propsTakeaways"},{id:"pim",label:"PIM",mk:"propsPIM"},
     {id:"give",label:"Giveaways",mk:"propsGiveaways"},{id:"tsa",label:"TSA",mk:"propsTSA"},
   ];
+  const statMeta=STATS.find(x=>x.id===stat)||STATS[0];
+  const statMargin=margins[statMeta.mk]||1.05;
 
   const pool=useMemo(()=>{
     if(!players)return[];
@@ -1447,7 +1535,7 @@ function PropsPanel({s,expG,players,globals,margins,showTrue,dark,mode}) {
   const results=useMemo(()=>{
     const {rateDiscount,dispersion}=globals;
     return pool.map(p=>{
-      const rm=p.lineRole==="TOP6"?1.15:p.lineRole==="BOT6"?0.75:1.0;
+      const rm=roleMultiplier(p.lineRole);
       // stat key mapping
       const pgKey=stat==="tk"?"take_pg":stat==="pim"?"pim_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
       const actKey=stat==="tk"?"pTK":stat==="pim"?"pPIM":stat==="give"?"pGIVE":stat==="tsa"?"pTSA":"p"+stat.toUpperCase();
@@ -1573,6 +1661,8 @@ function PlayerDetailPanel({s,expG,players,globals,margins,showTrue,dark}) {
     {id:"tk",label:"Takeaways",mk:"propsTakeaways"},{id:"pim",label:"PIM",mk:"propsPIM"},
     {id:"give",label:"Giveaways",mk:"propsGiveaways"},{id:"tsa",label:"TSA",mk:"propsTSA"},
   ];
+  const statMeta = STATS.find(x=>x.id===stat)||STATS[0];
+  const or = margins[statMeta.mk]||1.05;
 
   const pool = useMemo(()=>{
     if(!players) return [];
@@ -1585,7 +1675,7 @@ function PlayerDetailPanel({s,expG,players,globals,margins,showTrue,dark}) {
   const lines = useMemo(()=>{
     if(!player) return [];
     const {rateDiscount,dispersion} = globals;
-    const rm = player.lineRole==="TOP6"?1.15:player.lineRole==="BOT6"?0.75:1.0;
+    const rm = roleMultiplier(player.lineRole);
     const pgKey = stat==="tk"?"take_pg":stat==="pim"?"pim_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
     const actKey = stat==="tk"?"pTK":stat==="pim"?"pPIM":stat==="give"?"pGIVE":stat==="tsa"?"pTSA":"p"+stat.toUpperCase();
     const rr = (player[pgKey]||0)*rm*rateDiscount;
@@ -1623,7 +1713,7 @@ function PlayerDetailPanel({s,expG,players,globals,margins,showTrue,dark}) {
 
     {player && lines.rows && <>
       <div style={{display:"flex",gap:16,marginBottom:12,padding:"8px 10px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",flexWrap:"wrap"}}>
-        {[["Player",player.name],["Team",player.team],["Role",player.lineRole||"MID6"],["λ",lines.lam.toFixed(3)],["Actual",player[stat==="tk"?"pTK":stat==="pim"?"pPIM":"p"+stat.toUpperCase()]||0],["Exp Rem",expG.toFixed(2)+"g"],["OR",or+"x"]].map(([k,v])=>(
+        {[["Player",player.name],["Team",player.team],["Role",player.lineRole||"—"],["λ",lines.lam.toFixed(3)],["Actual",player[stat==="tk"?"pTK":stat==="pim"?"pPIM":"p"+stat.toUpperCase()]||0],["Exp Rem",expG.toFixed(2)+"g"],["OR",or+"x"]].map(([k,v])=>(
           <div key={k} style={{fontSize:10}}>
             <span style={{color:"var(--color-text-tertiary)"}}>{k}: </span>
             <span style={{fontFamily:"var(--font-mono)",fontWeight:500,color:"var(--color-text-primary)"}}>{v}</span>
@@ -1694,7 +1784,7 @@ function SeriesLeaderPanel({s,expG,players,globals,margins,showTrue,dark}) {
     if(!pool.length)return[];
     const {rateDiscount}=globals;
     const lambdas=pool.map(p=>{
-      const rm=p.lineRole==="TOP6"?1.15:p.lineRole==="BOT6"?0.75:1.0;
+      const rm=roleMultiplier(p.lineRole);
       const pgKey=stat==="tk"?"take_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat==="pim"?"pim_pg":stat+"_pg";
       const actKey=stat==="tk"?"pTK":stat==="give"?"pGIVE":stat==="tsa"?"pTSA":stat==="pim"?"pPIM":"p"+stat.toUpperCase();
       const rr=(p[pgKey]||0)*rm*rateDiscount;
@@ -1745,60 +1835,158 @@ function SeriesLeaderPanel({s,expG,players,globals,margins,showTrue,dark}) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // LINE COMPARE TAB
 // ═══════════════════════════════════════════════════════════════════════════════
-// Mirrors the Comparison sheet: shows our price vs entered book odds, CLV diff.
-// Books: BetMGM, FanDuel, DraftKings, Pinnacle (user-entered decimal odds).
+// Parser for book odds paste. Format: "Player Name +ODDS" or "Player Name -ODDS"
+// Handles: American odds (+390, -150), decimal (3.90), loose text/headers ignored.
+function parseBookPaste(text, playerPool) {
+  // Extract all "Name +/-NNNN" or "Name NNNN" patterns
+  // Strategy: find tokens matching american odds (+100 to +99999, -9999 to -100)
+  const lines = text.replace(/\s{2,}/g,' ').split(/[\n\r]+/);
+  const results = [];
+  const oddsRe = /([+-]\d{2,5})/g;
+  const nameOddsRe = /^(.+?)\s+([+-]\d{2,5})\s*$/;
+
+  // Build fuzzy match index from player pool
+  function normalize(s){ return s.toLowerCase().replace(/[^a-z]/g,''); }
+  const poolIndex = playerPool.map(p=>({...p, norm:normalize(p.name)}));
+
+  function fuzzyMatch(name) {
+    const n = normalize(name);
+    // Exact normalized match first
+    let m = poolIndex.find(p=>p.norm===n);
+    if(m) return m;
+    // Last name match (avoid false positives — require last name >= 4 chars)
+    const parts = name.trim().split(/\s+/);
+    const last = normalize(parts[parts.length-1]);
+    if(last.length>=4){
+      const lastMatches = poolIndex.filter(p=>p.norm.endsWith(last)||p.norm.includes(last));
+      if(lastMatches.length===1) return lastMatches[0];
+    }
+    // Starts-with match on full normalized name
+    if(n.length>=6){
+      const sw = poolIndex.filter(p=>p.norm.startsWith(n.slice(0,6))||n.startsWith(p.norm.slice(0,6)));
+      if(sw.length===1) return sw[0];
+    }
+    return null;
+  }
+
+  // Process line by line — each line may have "Name +ODDS" or just be header noise
+  let buf = "";
+  for(const raw of lines){
+    const line = raw.trim();
+    if(!line) continue;
+    // Try direct "Name ODDS" pattern first
+    const m = line.match(nameOddsRe);
+    if(m){
+      const candidate = m[1].trim();
+      const odds = parseInt(m[2]);
+      if(Math.abs(odds)>=100 && Math.abs(odds)<=99999){
+        const player = fuzzyMatch(candidate);
+        if(player) results.push({player, odds, raw:line, matched:true});
+        else results.push({player:null, odds, raw:line, matched:false, candidateName:candidate});
+      }
+      continue;
+    }
+    // No direct match — try to find odds token anywhere in line
+    const oddsTokens = [...line.matchAll(/([+-]\d{2,5})/g)];
+    for(const tok of oddsTokens){
+      const odds = parseInt(tok[1]);
+      if(Math.abs(odds)<100||Math.abs(odds)>99999) continue;
+      // Name is everything before the odds token
+      const namePart = line.slice(0, tok.index).trim().replace(/[^a-zA-Z\s'.]/g,'').trim();
+      if(namePart.split(/\s+/).length<2) continue; // need at least first + last
+      const player = fuzzyMatch(namePart);
+      if(player) results.push({player, odds, raw:line, matched:true});
+      else results.push({player:null, odds, raw:line, matched:false, candidateName:namePart});
+    }
+  }
+
+  // Deduplicate — if same player matched multiple times, keep first
+  const seen = new Set();
+  const deduped = results.filter(r=>{
+    if(!r.matched||!r.player) return true;
+    const key=r.player.name;
+    if(seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  return deduped;
+}
+
+function amerToDecimal(amer){
+  if(amer>0) return +(1+100/amer).toFixed(3);
+  if(amer<0) return +(1+100/Math.abs(amer)).toFixed(3);
+  return null;
+}
+
 function CompareTab({leaderMarket,STATS,lStat,setLStat,lScope,setLScope,dark}) {
-  const BOOKS=["BetMGM","FanDuel","DraftKings","Pinnacle","Bet365"];
-  // bookOdds[bookName][playerName] = decimal odds (string input)
+  const BOOKS=["FanDuel","BetMGM","DraftKings","Pinnacle","Bet365"];
+  // bookOdds[bookName][playerName] = { amer, dec } (american int + decimal float)
   const [bookOdds,setBookOdds]=useState({});
-  const [filterBook,setFilterBook]=useState("BetMGM");
-  const [showAll,setShowAll]=useState(false); // show all players or only those with odds entered
+  const [activeBook,setActiveBook]=useState("FanDuel");
+  const [pasteText,setPasteText]=useState("");
+  const [parseResult,setParseResult]=useState(null); // {matched,unmatched,book}
+  const [showPastePanel,setShowPastePanel]=useState(true);
+  const [showAll,setShowAll]=useState(true);
   const [filterTeam,setFilterTeam]=useState("ALL");
   const [search,setSearch]=useState("");
 
   const teams=[...new Set(leaderMarket.map(p=>p.team))].sort();
 
-  function setOdd(book,name,val){
-    setBookOdds(prev=>({...prev,[book]:{...(prev[book]||{}),[name]:val}}));
+  function getOdds(book,name){ return bookOdds[book]?.[name]||null; }
+  function setPlayerOdds(book,name,amer,dec){
+    setBookOdds(prev=>({...prev,[book]:{...(prev[book]||{}),[name]:{amer,dec}}}));
   }
-  function getOdd(book,name){return bookOdds[book]?.[name]??"";}
+  function clearBook(book){ setBookOdds(prev=>({...prev,[book]:{}})); }
 
-  // Compute diff: book implied prob - our adj prob. Positive = market shorter = value UNDER.
-  function diff(bookDec,adjProb){
-    const d=parseFloat(bookDec);
-    if(!d||d<=1)return null;
-    const bookImpl=1/d;
-    return bookImpl-adjProb; // positive = book shorter than us (book has more margin on this player)
+  function handleParse(){
+    if(!pasteText.trim()) return;
+    const pool = leaderMarket; // already computed players with name/team
+    const parsed = parseBookPaste(pasteText, pool);
+    let matched=0, unmatched=[];
+    for(const r of parsed){
+      if(r.matched&&r.player){
+        const dec = amerToDecimal(r.odds);
+        setPlayerOdds(activeBook, r.player.name, r.odds, dec);
+        matched++;
+      } else if(!r.matched && r.candidateName) {
+        unmatched.push(r.candidateName);
+      }
+    }
+    setParseResult({matched, unmatched:[...new Set(unmatched)].slice(0,15), book:activeBook, total:parsed.length});
+    setPasteText("");
   }
 
-  const displayed=leaderMarket
-    .filter(p=>(filterTeam==="ALL"||p.team===filterTeam))
-    .filter(p=>(!search||p.name.toLowerCase().includes(search.toLowerCase())))
-    .filter(p=>showAll||getOdd(filterBook,p.name)!=="");
-
-  // Edge summary: where our price is longer than book (we'd be giving value)
-  const edges=leaderMarket.filter(p=>{
-    const d=parseFloat(getOdd(filterBook,p.name));
-    if(!d||d<=1)return false;
-    const bookImpl=1/d;
-    return bookImpl>p.adjProb*1.03; // book shorter by >3% = they have value, we're cheap
-  });
-
-  const ourValue=leaderMarket.filter(p=>{
-    const d=parseFloat(getOdd(filterBook,p.name));
-    if(!d||d<=1)return false;
-    const bookImpl=1/d;
-    return p.adjProb>bookImpl*1.03; // our price shorter by >3% = we have value vs book
-  });
-
-  const cellStyle={padding:"4px 6px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11};
-  const diffColor=(v)=>v===null?"var(--color-text-tertiary)":v>0.02?"#ef4444":v<-0.02?"#4ade80":"var(--color-text-secondary)";
+  // Diff: book implied% - our adj%. Negative = we're shorter = value on our side.
+  function diffVal(bookDec, adjProb){
+    if(!bookDec||bookDec<=1) return null;
+    return (1/bookDec) - adjProb;
+  }
+  const diffColor=(v)=>v===null?"var(--color-text-tertiary)":v>0.025?"#ef4444":v<-0.025?"#4ade80":"var(--color-text-secondary)";
   const fmtDiff=(v)=>v===null?"—":(v>0?"+":"")+(v*100).toFixed(1)+"%";
+
+  // Players with any book odds entered (for active book)
+  const withOdds = leaderMarket.filter(p=>getOdds(activeBook,p.name));
+  const displayed = leaderMarket
+    .filter(p=>filterTeam==="ALL"||p.team===filterTeam)
+    .filter(p=>!search||p.name.toLowerCase().includes(search.toLowerCase()))
+    .filter(p=>showAll||getOdds(activeBook,p.name));
+
+  const edges = withOdds.filter(p=>{
+    const o=getOdds(activeBook,p.name);
+    return o && diffVal(o.dec,p.adjProb)>0.025;
+  });
+  const ourShort = withOdds.filter(p=>{
+    const o=getOdds(activeBook,p.name);
+    return o && diffVal(o.dec,p.adjProb)<-0.025;
+  });
+
+  const cs={padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11};
 
   return (
     <div>
-      {/* Controls */}
-      <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",marginBottom:16}}>
+      {/* Book selector + controls */}
+      <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:12}}>
         <div style={{display:"flex",borderRadius:"var(--border-radius-md)",overflow:"hidden",border:"0.5px solid var(--color-border-secondary)"}}>
           {[{id:"r1",label:"Round 1"},{id:"full",label:"Full Playoff"}].map(s=>(
             <button key={s.id} onClick={()=>setLScope(s.id)} style={{padding:"5px 12px",fontSize:11,border:"none",cursor:"pointer",
@@ -1808,282 +1996,491 @@ function CompareTab({leaderMarket,STATS,lStat,setLStat,lScope,setLScope,dark}) {
           ))}
         </div>
         <Seg options={STATS.map(s=>({id:s.id,label:s.label}))} value={lStat} onChange={setLStat} accent="#1d4ed8"/>
-        <select value={filterBook} onChange={e=>setFilterBook(e.target.value)} style={SEL}>
-          {BOOKS.map(b=><option key={b} value={b}>{b}</option>)}
-        </select>
-        <select value={filterTeam} onChange={e=>setFilterTeam(e.target.value)} style={SEL}>
-          <option value="ALL">All Teams</option>
-          {teams.map(t=><option key={t} value={t}>{t}</option>)}
-        </select>
-        <input placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)}
-          style={{padding:"4px 8px",fontSize:11,background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",color:"var(--color-text-primary)",width:140}}/>
-        <Toggle label="Show all" checked={showAll} onChange={setShowAll}/>
+        <div style={{marginLeft:"auto",display:"flex",gap:6,alignItems:"center"}}>
+          {BOOKS.map(b=>{
+            const cnt=Object.keys(bookOdds[b]||{}).length;
+            return <button key={b} onClick={()=>setActiveBook(b)} style={{
+              padding:"4px 10px",fontSize:11,borderRadius:3,border:"0.5px solid",cursor:"pointer",
+              borderColor:activeBook===b?"#3b82f6":"var(--color-border-secondary)",
+              background:activeBook===b?"rgba(59,130,246,0.15)":"var(--color-background-secondary)",
+              color:activeBook===b?"#60a5fa":"var(--color-text-secondary)",fontWeight:activeBook===b?500:400,
+              position:"relative",
+            }}>
+              {b}
+              {cnt>0&&<span style={{marginLeft:5,fontSize:9,padding:"1px 4px",borderRadius:8,
+                background:activeBook===b?"#3b82f6":"var(--color-border-secondary)",
+                color:"white"}}>{cnt}</span>}
+            </button>;
+          })}
+        </div>
       </div>
 
-      {/* Edge summary cards */}
-      {leaderMarket.length>0&&<div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
+      {/* Paste panel */}
+      <Card style={{marginBottom:14}}>
+        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+          <SH title={`Paste ${activeBook} Odds`} sub="Copy the odds table from the book page and paste below — player names + American odds parsed automatically"/>
+          <button onClick={()=>setShowPastePanel(v=>!v)} style={{marginLeft:"auto",padding:"3px 10px",fontSize:11,
+            borderRadius:"var(--border-radius-md)",background:"var(--color-background-secondary)",
+            border:"0.5px solid var(--color-border-secondary)",color:"var(--color-text-secondary)",cursor:"pointer"}}>
+            {showPastePanel?"Hide":"Show"}
+          </button>
+        </div>
+        {showPastePanel&&<>
+          <textarea value={pasteText} onChange={e=>setPasteText(e.target.value)}
+            placeholder={`Paste ${activeBook} odds here…\n\nExample format (any of these work):\n  Bryan Rust +390\n  Evgeni Malkin +600\n  Sidney Crosby +650\n\nThe parser handles extra text, headers, and whitespace automatically.`}
+            style={{width:"100%",height:140,fontSize:11,fontFamily:"var(--font-mono)",
+              background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
+              borderRadius:"var(--border-radius-md)",padding:10,color:"var(--color-text-primary)",
+              resize:"vertical",boxSizing:"border-box",marginBottom:8}}/>
+          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            <button onClick={handleParse} disabled={!pasteText.trim()} style={{
+              padding:"6px 18px",fontSize:12,fontWeight:500,borderRadius:"var(--border-radius-md)",border:"none",
+              cursor:pasteText.trim()?"pointer":"default",
+              background:pasteText.trim()?"#3b82f6":"var(--color-background-secondary)",
+              color:pasteText.trim()?"white":"var(--color-text-tertiary)"}}>
+              Parse & Import
+            </button>
+            <button onClick={()=>{clearBook(activeBook);setParseResult(null);}} style={{
+              padding:"5px 12px",fontSize:11,borderRadius:"var(--border-radius-md)",
+              background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
+              color:"var(--color-text-secondary)",cursor:"pointer"}}>
+              Clear {activeBook}
+            </button>
+            {!leaderMarket.length&&<span style={{fontSize:11,color:"var(--color-text-tertiary)"}}>Note: load player data for name matching</span>}
+          </div>
+          {parseResult&&<div style={{marginTop:10,padding:"8px 12px",borderRadius:"var(--border-radius-md)",
+            background:parseResult.matched>0?"rgba(16,185,129,0.08)":"rgba(239,68,68,0.08)",
+            border:`0.5px solid ${parseResult.matched>0?"rgba(16,185,129,0.3)":"rgba(239,68,68,0.3)"}`}}>
+            <div style={{fontSize:11,fontWeight:500,color:parseResult.matched>0?"#10b981":"#ef4444",marginBottom:parseResult.unmatched.length?4:0}}>
+              ✓ {parseResult.matched} players imported into {parseResult.book}
+            </div>
+            {parseResult.unmatched.length>0&&<div style={{fontSize:10,color:"var(--color-text-secondary)"}}>
+              Could not match: {parseResult.unmatched.join(", ")}
+              {parseResult.unmatched.length>=15&&"…"}
+              <div style={{marginTop:2,color:"var(--color-text-tertiary)"}}>
+                Check spelling or add manually in the table below.
+              </div>
+            </div>}
+          </div>}
+        </>}
+      </Card>
+
+      {/* Edge summary */}
+      {withOdds.length>0&&<div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:14}}>
         <Card style={{background:dark?"rgba(239,68,68,0.07)":"rgba(239,68,68,0.04)",border:"0.5px solid rgba(239,68,68,0.2)"}}>
           <div style={{fontSize:9,fontWeight:500,textTransform:"uppercase",letterSpacing:"0.08em",color:"#ef4444",marginBottom:6}}>
-            Book shorter than us (&gt;3%) — {edges.length} players
+            Book shorter than us (&gt;2.5%) — {edges.length}
           </div>
-          <div style={{fontSize:10,color:"var(--color-text-secondary)"}}>
-            {edges.length===0?"None entered yet":edges.slice(0,6).map(p=>{
-              const d=parseFloat(getOdd(filterBook,p.name));
-              const v=d>1?diff(d,p.adjProb):null;
-              return <div key={p.name} style={{display:"flex",justifyContent:"space-between",padding:"2px 0",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
-                <span style={{fontWeight:500}}>{p.name} <span style={{color:"var(--color-text-tertiary)",fontWeight:400}}>({p.team})</span></span>
-                <span style={{fontFamily:"var(--font-mono)",color:"#ef4444"}}>{fmtDiff(v)}</span>
-              </div>;
-            })}
-            {edges.length>6&&<div style={{color:"var(--color-text-tertiary)",marginTop:4}}>+{edges.length-6} more</div>}
-          </div>
+          {edges.length===0
+            ?<div style={{fontSize:10,color:"var(--color-text-tertiary)"}}>None</div>
+            :edges.map(p=>{const o=getOdds(activeBook,p.name);const v=diffVal(o?.dec,p.adjProb);return(
+              <div key={p.name} style={{display:"flex",justifyContent:"space-between",padding:"2px 0",borderBottom:"0.5px solid var(--color-border-tertiary)",fontSize:10}}>
+                <span style={{fontWeight:500}}>{p.name} <span style={{color:"var(--color-text-tertiary)",fontWeight:400,fontSize:9}}>({p.team})</span></span>
+                <span style={{fontFamily:"var(--font-mono)",color:"#ef4444"}}>{o?.amer>0?`+${o.amer}`:o?.amer} · {fmtDiff(v)}</span>
+              </div>
+            );})}
         </Card>
         <Card style={{background:dark?"rgba(74,222,128,0.07)":"rgba(74,222,128,0.04)",border:"0.5px solid rgba(74,222,128,0.2)"}}>
           <div style={{fontSize:9,fontWeight:500,textTransform:"uppercase",letterSpacing:"0.08em",color:"#4ade80",marginBottom:6}}>
-            We're shorter than book (&gt;3%) — {ourValue.length} players
+            We're shorter than book (&gt;2.5%) — {ourShort.length}
           </div>
-          <div style={{fontSize:10,color:"var(--color-text-secondary)"}}>
-            {ourValue.length===0?"None entered yet":ourValue.slice(0,6).map(p=>{
-              const d=parseFloat(getOdd(filterBook,p.name));
-              const v=d>1?diff(d,p.adjProb):null;
-              return <div key={p.name} style={{display:"flex",justifyContent:"space-between",padding:"2px 0",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
-                <span style={{fontWeight:500}}>{p.name} <span style={{color:"var(--color-text-tertiary)",fontWeight:400}}>({p.team})</span></span>
-                <span style={{fontFamily:"var(--font-mono)",color:"#4ade80"}}>{fmtDiff(v)}</span>
-              </div>;
-            })}
-            {ourValue.length>6&&<div style={{color:"var(--color-text-tertiary)",marginTop:4}}>+{ourValue.length-6} more</div>}
-          </div>
+          {ourShort.length===0
+            ?<div style={{fontSize:10,color:"var(--color-text-tertiary)"}}>None</div>
+            :ourShort.map(p=>{const o=getOdds(activeBook,p.name);const v=diffVal(o?.dec,p.adjProb);return(
+              <div key={p.name} style={{display:"flex",justifyContent:"space-between",padding:"2px 0",borderBottom:"0.5px solid var(--color-border-tertiary)",fontSize:10}}>
+                <span style={{fontWeight:500}}>{p.name} <span style={{color:"var(--color-text-tertiary)",fontWeight:400,fontSize:9}}>({p.team})</span></span>
+                <span style={{fontFamily:"var(--font-mono)",color:"#4ade80"}}>{o?.amer>0?`+${o.amer}`:o?.amer} · {fmtDiff(v)}</span>
+              </div>
+            );})}
         </Card>
       </div>}
 
-      {/* Main comparison table */}
+      {/* Comparison table */}
       <Card>
-        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
-          <SH title={`${lScope==="r1"?"R1":"Playoff"} ${STATS.find(s=>s.id===lStat)?.label||""} Leader — vs ${filterBook}`}
-            sub="Enter book decimal odds. Green = we're shorter (value on us). Red = book shorter (value on book)."/>
+        <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:10,flexWrap:"wrap"}}>
+          <SH title={`${lScope==="r1"?"R1":"Playoff"} ${STATS.find(s=>s.id===lStat)?.label||""} — ${activeBook} vs Our Price`}
+            sub={withOdds.length?`${withOdds.length} players with ${activeBook} odds · ${displayed.length} shown`:"Paste odds above to populate"}/>
           <div style={{marginLeft:"auto",display:"flex",gap:8,alignItems:"center"}}>
-            {BOOKS.map(b=>(
-              <button key={b} onClick={()=>setFilterBook(b)} style={{
-                padding:"3px 8px",fontSize:10,borderRadius:3,border:"0.5px solid",cursor:"pointer",
-                borderColor:filterBook===b?"#3b82f6":"var(--color-border-secondary)",
-                background:filterBook===b?"rgba(59,130,246,0.15)":"var(--color-background-secondary)",
-                color:filterBook===b?"#60a5fa":"var(--color-text-secondary)",fontWeight:filterBook===b?500:400,
-              }}>{b}</button>
-            ))}
+            <select value={filterTeam} onChange={e=>setFilterTeam(e.target.value)} style={SEL}>
+              <option value="ALL">All Teams</option>
+              {teams.map(t=><option key={t} value={t}>{t}</option>)}
+            </select>
+            <input placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)}
+              style={{padding:"4px 8px",fontSize:11,background:"var(--color-background-secondary)",
+                border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",
+                color:"var(--color-text-primary)",width:130}}/>
+            <Toggle label="All players" checked={showAll} onChange={setShowAll}/>
           </div>
         </div>
 
-        {!leaderMarket.length?<div style={{color:"var(--color-text-secondary)",fontSize:12,padding:"20px 0",textAlign:"center"}}>
-          No leader market computed — configure R1 Matchups and load player data first.
-        </div>:<div style={{overflowX:"auto"}}>
+        {!leaderMarket.length
+          ?<div style={{fontSize:12,color:"var(--color-text-secondary)",padding:"20px 0",textAlign:"center"}}>
+            Configure R1 Matchups and load player data first.
+          </div>
+          :<div style={{overflowX:"auto"}}>
           <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-            <thead>
-              <tr style={{borderBottom:"0.5px solid var(--color-border-secondary)"}}>
-                <th style={{padding:"5px 8px",textAlign:"left",color:"var(--color-text-secondary)",fontWeight:500,fontSize:10,textTransform:"uppercase",width:28}}>#</th>
-                <th style={{padding:"5px 8px",textAlign:"left",color:"var(--color-text-secondary)",fontWeight:500,fontSize:10,textTransform:"uppercase"}}>Player</th>
-                <th style={{padding:"5px 8px",textAlign:"right",color:"var(--color-text-secondary)",fontWeight:500,fontSize:10,textTransform:"uppercase"}}>Team</th>
-                <th style={{padding:"5px 8px",textAlign:"right",color:"var(--color-text-secondary)",fontWeight:500,fontSize:10,textTransform:"uppercase"}}>λ</th>
-                <th style={{padding:"5px 8px",textAlign:"right",color:"var(--color-text-secondary)",fontWeight:500,fontSize:10,textTransform:"uppercase"}}>Adj%</th>
-                <th style={{padding:"5px 8px",textAlign:"right",color:"var(--color-text-secondary)",fontWeight:500,fontSize:10,textTransform:"uppercase"}}>Our Odds</th>
-                <th style={{padding:"5px 8px",textAlign:"right",color:"var(--color-text-secondary)",fontWeight:500,fontSize:10,textTransform:"uppercase"}}>{filterBook} Dec</th>
-                <th style={{padding:"5px 8px",textAlign:"right",color:"var(--color-text-secondary)",fontWeight:500,fontSize:10,textTransform:"uppercase"}}>Diff</th>
-                {BOOKS.filter(b=>b!==filterBook).map(b=>(
-                  <th key={b} style={{padding:"5px 6px",textAlign:"right",color:"var(--color-text-tertiary)",fontWeight:400,fontSize:9}}>{b.slice(0,4)}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {(showAll?leaderMarket.filter(p=>(filterTeam==="ALL"||p.team===filterTeam)&&(!search||p.name.toLowerCase().includes(search.toLowerCase()))):displayed)
-                .map((p,i)=>{
-                  const ourAmer=toAmer(p.adjProb);
-                  const ourDec=toDec(p.adjProb);
-                  const bookDec=getOdd(filterBook,p.name);
-                  const d=bookDec?parseFloat(bookDec):null;
-                  const diffVal=d&&d>1?diff(d,p.adjProb):null;
-                  const isEdge=diffVal!==null&&Math.abs(diffVal)>0.02;
-                  return (
-                    <tr key={i} style={{
-                      borderBottom:"0.5px solid var(--color-border-tertiary)",
-                      background:isEdge?(diffVal>0?(dark?"rgba(239,68,68,0.06)":"rgba(239,68,68,0.04)"):(dark?"rgba(74,222,128,0.06)":"rgba(74,222,128,0.04)")):i%2===0?"transparent":(dark?"rgba(255,255,255,0.015)":"rgba(0,0,0,0.01)"),
-                    }}>
-                      <td style={{padding:"3px 8px",color:"var(--color-text-tertiary)",fontSize:10}}>{leaderMarket.indexOf(p)+1}</td>
-                      <td style={{padding:"3px 8px",fontWeight:500}}>{p.name}</td>
-                      <td style={{...cellStyle}}><span style={{fontSize:9,padding:"1px 4px",borderRadius:2,background:"rgba(59,130,246,0.12)",color:"#60a5fa"}}>{p.team}</span></td>
-                      <td style={{...cellStyle,color:"var(--color-text-secondary)"}}>{p.lambda.toFixed(2)}</td>
-                      <td style={{...cellStyle}}>{(p.adjProb*100).toFixed(2)}%</td>
-                      <td style={{...cellStyle,fontWeight:500,color:ourAmer<0?"#4ade80":"var(--color-text-primary)"}}>{ourAmer>0?`+${ourAmer}`:ourAmer} <span style={{color:"var(--color-text-tertiary)",fontWeight:400,fontSize:9}}>({ourDec.toFixed(2)})</span></td>
-                      <td style={{padding:"2px 4px",textAlign:"right"}}>
-                        <input
-                          type="number" min={1} step={0.05}
-                          value={bookDec}
-                          placeholder="—"
-                          onChange={e=>setOdd(filterBook,p.name,e.target.value)}
-                          style={{width:58,fontSize:11,textAlign:"center",padding:"2px 4px",fontFamily:"var(--font-mono)",
-                            background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
-                            borderRadius:3,color:"var(--color-text-primary)"}}/>
-                      </td>
-                      <td style={{...cellStyle,fontWeight:isEdge?500:400,color:diffColor(diffVal)}}>{fmtDiff(diffVal)}</td>
-                      {BOOKS.filter(b=>b!==filterBook).map(b=>{
-                        const od=getOdd(b,p.name);
-                        const od2=od?parseFloat(od):null;
-                        return <td key={b} style={{padding:"2px 3px",textAlign:"right"}}>
-                          <input type="number" min={1} step={0.05} value={od} placeholder="—"
-                            onChange={e=>setOdd(b,p.name,e.target.value)}
-                            style={{width:46,fontSize:10,textAlign:"center",padding:"1px 3px",fontFamily:"var(--font-mono)",
-                              background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-tertiary)",
-                              borderRadius:3,color:od2&&od2>1?diffColor(diff(od2,p.adjProb)):"var(--color-text-tertiary)"}}/>
-                        </td>;
-                      })}
-                    </tr>
-                  );
-              })}
-            </tbody>
+            <thead><tr style={{borderBottom:"0.5px solid var(--color-border-secondary)"}}>
+              {["#","Player","Team","λ","Our%","Our Odds",activeBook+" Amer",activeBook+" Dec","Diff",
+                ...BOOKS.filter(b=>b!==activeBook).map(b=>b.slice(0,3))
+              ].map((h,i)=>(
+                <th key={i} style={{padding:"5px 8px",textAlign:i<2?"left":"right",
+                  color:i>=9?"var(--color-text-tertiary)":"var(--color-text-secondary)",
+                  fontWeight:i>=9?400:500,fontSize:i>=9?9:10,textTransform:"uppercase"}}>{h}</th>
+              ))}
+            </tr></thead>
+            <tbody>{displayed.map((p,i)=>{
+              const ourAmer=toAmer(p.adjProb);
+              const ourDec=toDec(p.adjProb);
+              const bo=getOdds(activeBook,p.name);
+              const dv=bo?diffVal(bo.dec,p.adjProb):null;
+              const isEdge=dv!==null&&Math.abs(dv)>0.025;
+              return (
+                <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",
+                  background:isEdge?(dv>0?(dark?"rgba(239,68,68,0.06)":"rgba(239,68,68,0.03)"):(dark?"rgba(74,222,128,0.06)":"rgba(74,222,128,0.03)")):
+                    i%2===0?"transparent":(dark?"rgba(255,255,255,0.015)":"rgba(0,0,0,0.01)")}}>
+                  <td style={{padding:"3px 8px",color:"var(--color-text-tertiary)",fontSize:10}}>{leaderMarket.indexOf(p)+1}</td>
+                  <td style={{padding:"3px 8px",fontWeight:bo?500:400}}>{p.name}</td>
+                  <td style={{...cs}}><span style={{fontSize:9,padding:"1px 4px",borderRadius:2,background:"rgba(59,130,246,0.12)",color:"#60a5fa"}}>{p.team}</span></td>
+                  <td style={{...cs,color:"var(--color-text-secondary)"}}>{p.lambda.toFixed(2)}</td>
+                  <td style={{...cs}}>{(p.adjProb*100).toFixed(2)}%</td>
+                  <td style={{...cs,fontWeight:500,color:ourAmer<0?"#4ade80":"var(--color-text-primary)"}}>
+                    {ourAmer>0?`+${ourAmer}`:ourAmer}
+                    <span style={{color:"var(--color-text-tertiary)",fontWeight:400,fontSize:9,marginLeft:4}}>({ourDec.toFixed(2)})</span>
+                  </td>
+                  {/* Active book odds — editable */}
+                  <td style={{padding:"2px 4px",textAlign:"right"}}>
+                    <input type="number" step={1} value={bo?.amer??""} placeholder="—"
+                      onChange={e=>{const a=parseInt(e.target.value)||0;if(Math.abs(a)>=100)setPlayerOdds(activeBook,p.name,a,amerToDecimal(a));}}
+                      style={{width:58,fontSize:11,textAlign:"center",padding:"2px 4px",fontFamily:"var(--font-mono)",
+                        background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
+                        borderRadius:3,color:"var(--color-text-primary)"}}/>
+                  </td>
+                  <td style={{...cs,color:bo?"var(--color-text-secondary)":"var(--color-text-tertiary)"}}>
+                    {bo?bo.dec.toFixed(2):"—"}
+                  </td>
+                  <td style={{...cs,fontWeight:isEdge?500:400,color:diffColor(dv)}}>{fmtDiff(dv)}</td>
+                  {/* Other books — compact */}
+                  {BOOKS.filter(b=>b!==activeBook).map(b=>{
+                    const o=getOdds(b,p.name);
+                    const dv2=o?diffVal(o.dec,p.adjProb):null;
+                    return <td key={b} style={{padding:"2px 3px",textAlign:"right"}}>
+                      <input type="number" step={1} value={o?.amer??""} placeholder="—"
+                        onChange={e=>{const a=parseInt(e.target.value)||0;if(Math.abs(a)>=100)setPlayerOdds(b,p.name,a,amerToDecimal(a));}}
+                        style={{width:48,fontSize:10,textAlign:"center",padding:"1px 3px",fontFamily:"var(--font-mono)",
+                          background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-tertiary)",
+                          borderRadius:3,color:dv2!==null?diffColor(dv2):"var(--color-text-tertiary)"}}/>
+                    </td>;
+                  })}
+                </tr>
+              );
+            })}</tbody>
           </table>
         </div>}
-        <div style={{marginTop:10,padding:"6px 10px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",fontSize:10,color:"var(--color-text-tertiary)"}}>
-          Diff = Book implied% − Our adj%. <span style={{color:"#ef4444"}}>Red = book shorter than us</span> · <span style={{color:"#4ade80"}}>Green = we're shorter than book (value on our side)</span>. Threshold ±3%.
+        <div style={{marginTop:8,padding:"5px 10px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",fontSize:10,color:"var(--color-text-tertiary)"}}>
+          Diff = Book implied% − Our adj%. <span style={{color:"#ef4444"}}>Red = book shorter (tighter than us)</span> · <span style={{color:"#4ade80"}}>Green = we're shorter (tighter than book)</span>. Threshold ±2.5%. Manual edits accepted in American odds columns.
         </div>
       </Card>
     </div>
   );
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// UPLOAD TAB
-// ═══════════════════════════════════════════════════════════════════════════════
-function UploadTab({players,setPlayers,goalies,setGoalies,exportState,importState,syncStatus,dark}) {
+// ─── EXPORT / IMPORT PANEL ───────────────────────────────────────────────────
+function ExportImportPanel({exportState,importState}) {
+  const [exportJson,setExportJson]=useState("");
+  const [importText,setImportText]=useState("");
+  const [msg,setMsg]=useState("");
+  const [copied,setCopied]=useState(false);
+
+  function doExport(){
+    const json=exportState();
+    setExportJson(json);
+    // Try clipboard
+    if(navigator.clipboard){
+      navigator.clipboard.writeText(json).then(()=>{setCopied(true);setTimeout(()=>setCopied(false),2000);}).catch(()=>{});
+    }
+  }
+  function doImport(){
+    const r=importState(importText);
+    setMsg(r.ok?"✓ State restored successfully":`Error: ${r.error}`);
+    if(r.ok){setImportText("");setExportJson("");}
+  }
+
+  return <div>
+    <div style={{display:"flex",gap:8,marginBottom:8,alignItems:"center"}}>
+      <button onClick={doExport} style={{padding:"5px 14px",fontSize:12,borderRadius:"var(--border-radius-md)",
+        background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
+        color:"var(--color-text-primary)",cursor:"pointer"}}>
+        {copied?"✓ Copied!":"Export State"}
+      </button>
+      <span style={{fontSize:10,color:"var(--color-text-tertiary)"}}>Copies JSON to clipboard + shows below</span>
+    </div>
+    {exportJson&&<textarea readOnly value={exportJson} onClick={e=>e.target.select()}
+      style={{width:"100%",height:80,fontSize:9,fontFamily:"var(--font-mono)",
+        background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
+        borderRadius:"var(--border-radius-md)",padding:8,color:"var(--color-text-secondary)",
+        resize:"vertical",boxSizing:"border-box",marginBottom:8}}/>}
+    <textarea value={importText} onChange={e=>setImportText(e.target.value)}
+      placeholder="Paste exported JSON here to restore state…"
+      style={{width:"100%",height:60,fontSize:9,fontFamily:"var(--font-mono)",
+        background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
+        borderRadius:"var(--border-radius-md)",padding:8,color:"var(--color-text-primary)",
+        resize:"vertical",boxSizing:"border-box",marginBottom:6}}/>
+    <button onClick={doImport} disabled={!importText.trim()} style={{
+      padding:"4px 12px",fontSize:11,borderRadius:"var(--border-radius-md)",border:"none",
+      cursor:importText.trim()?"pointer":"default",
+      background:importText.trim()?"#1d4ed8":"var(--color-background-secondary)",
+      color:importText.trim()?"white":"var(--color-text-tertiary)"}}>
+      Restore from JSON
+    </button>
+    {msg&&<div style={{marginTop:6,fontSize:11,color:msg.startsWith("✓")?"#10b981":"#ef4444"}}>{msg}</div>}
+  </div>;
+}
+
+// ─── GAME STAT IMPORTER ──────────────────────────────────────────────────────
+// Paste an HR box score for one team + one game → increments player playoff totals
+function GameStatImporter({players,setPlayers,allSeries}) {
+  const [seriesIdx,setSeriesIdx]=useState(0);
+  const [gameNum,setGameNum]=useState(1);
   const [paste,setPaste]=useState("");
   const [result,setResult]=useState(null);
   const [err,setErr]=useState("");
-  const [impText,setImpText]=useState("");
-  const [impMsg,setImpMsg]=useState("");
 
-  function process(){
+  const s=allSeries?.[seriesIdx];
+  const seriesLabel=(sr)=>sr.homeAbbr&&sr.awayAbbr?`${sr.homeAbbr} vs ${sr.awayAbbr}`:`Series ${sr._idx+1}`;
+
+  // Parse HR skater box score — tab-separated, detects column positions
+  function parseHRGame(text){
+    const lines=text.trim().split("\n");
+    let hi=-1,headers=[];
+    for(let i=0;i<lines.length;i++){
+      const c=lines[i].split("\t").map(s=>s.trim());
+      if(c.some(h=>["Player","Skater","Name"].includes(h))){hi=i;headers=c;break;}
+    }
+    if(hi===-1) return {error:"No header row found — copy the full table including headers"};
+    // Map columns
+    const col=(alts)=>{for(const a of alts){const i=headers.findIndex(h=>h.toLowerCase()===a.toLowerCase());if(i!==-1)return i;}return -1;};
+    const cm={
+      name:col(["Player","Skater","Name"]),
+      g:col(["G","Goals"]),
+      a:col(["A","Assists"]),
+      sog:col(["S","SOG","Shots"]),
+      pim:col(["PIM"]),
+      // HR game box score doesn't have HIT/BLK/TK — those aren't in the standard scoring table
+    };
+    if(cm.name===-1) return {error:"Could not find Player column"};
+    const players=[];
+    for(let i=hi+1;i<lines.length;i++){
+      const c=lines[i].split("\t").map(s=>s.trim());
+      const name=cm.name!==-1?c[cm.name]:"";
+      if(!name||["Player","Rk","TOTAL","Team Totals"].some(x=>name.includes(x))) continue;
+      players.push({
+        name,
+        g:cm.g!==-1?parseInt(c[cm.g])||0:0,
+        a:cm.a!==-1?parseInt(c[cm.a])||0:0,
+        sog:cm.sog!==-1?parseInt(c[cm.sog])||0:0,
+        pim:cm.pim!==-1?parseInt(c[cm.pim])||0:0,
+      });
+    }
+    return {players};
+  }
+
+  function handleImport(){
     setErr("");setResult(null);
-    const r=parseHR(paste);
+    if(!players){setErr("Load skaters.csv first.");return;}
+    if(!paste.trim()){return;}
+    const r=parseHRGame(paste);
     if(r.error){setErr(r.error);return;}
-    if(!players){setErr("No player data. Load skaters.csv first.");return;}
+
+    // Normalize name for matching
+    const norm=s=>s.toLowerCase().replace(/[^a-z]/g,"");
     let matched=0;const unmatched=[];
+
     const updated=players.map(p=>{
-      const m=r.players.find(u=>u.name.toLowerCase()===p.name.toLowerCase()||u.name.toLowerCase().replace(/\./g,"")===p.name.toLowerCase().replace(/\./g,""));
-      if(m){matched++;return{...p,pGP:m.gp||p.pGP,pG:m.g!==undefined?m.g:p.pG,pA:m.a!==undefined?m.a:p.pA,pSOG:m.sog!==undefined?m.sog:p.pSOG,pHIT:m.hit!==undefined?m.hit:p.pHIT,pBLK:m.blk!==undefined?m.blk:p.pBLK};}
-      unmatched.push(p.name);return p;
+      const m=r.players.find(u=>
+        norm(u.name)===norm(p.name)||
+        // last name fallback
+        (norm(u.name).length>=4&&norm(p.name).endsWith(norm(u.name.split(" ").pop()||"")))
+      );
+      if(m){
+        matched++;
+        return{...p,
+          pGP:(p.pGP||0)+1,
+          pG:(p.pG||0)+m.g,
+          pA:(p.pA||0)+m.a,
+          pSOG:(p.pSOG||0)+m.sog,
+          pPIM:(p.pPIM||0)+m.pim,
+        };
+      }
+      return p;
     });
+
+    // Report unmatched HR names
+    r.players.forEach(u=>{
+      const m=players.find(p=>norm(u.name)===norm(p.name));
+      if(!m) unmatched.push(u.name);
+    });
+
     setPlayers(updated);
-    setResult({matched,unmatched:unmatched.slice(0,20),total:r.players.length});
+    setResult({matched,unmatched:unmatched.slice(0,10),gameNum,seriesLabel:s?seriesLabel(s):"?"});
     setPaste("");
   }
 
-  function initPlayers(){
-    const inp=document.createElement("input");inp.type="file";inp.accept=".csv,.json";
-    inp.onchange=e=>{
-      const file=e.target.files[0];if(!file)return;
-      const reader=new FileReader();
-      reader.onload=ev=>{
-        try{
-          const text=ev.target.result;
-          if(file.name.endsWith(".json")){const d=JSON.parse(text);setPlayers(Array.isArray(d)?d:d.players);return;}
-          const lines=text.split("\n"),headers=lines[0].split(",");
-          const idx=h=>headers.indexOf(h);
-          const pt=new Set(["ANA","BOS","BUF","CAR","COL","DAL","EDM","LAK","MIN","MTL","OTT","PHI","PIT","TBL","UTA","VGK"]);
-          const parsed=[];
-          for(let i=1;i<lines.length;i++){
-            const c=lines[i].split(",");
-            if(!c[idx("situation")]||c[idx("situation")].trim()!=="all")continue;
-            let team=c[idx("team")]?.trim();if(!pt.has(team))continue;if(team==="VGK")team="VEG";
-            const gp=parseFloat(c[idx("games_played")])||1;
-            const g=parseFloat(c[idx("I_F_goals")])||0;
-            const a=(parseFloat(c[idx("I_F_primaryAssists")])||0)+(parseFloat(c[idx("I_F_secondaryAssists")])||0);
-            const sog=parseFloat(c[idx("I_F_shotsOnGoal")])||0;
-            const hit=parseFloat(c[idx("I_F_hits")])||0;
-            const blk=parseFloat(c[idx("shotsBlockedByPlayer")])||0;
-            const tk=parseFloat(c[idx("I_F_takeaways")])||0;
-            const pim=parseFloat(c[idx("I_F_penalityMinutes")])||0;
-            const tsa=parseFloat(c[idx("I_F_shotAttempts")])||0;
-            const give=parseFloat(c[idx("I_F_giveaways")])||0;
-            const name=c[idx("name")]?.trim();if(!name)continue;
-            parsed.push({name,team,pos:c[idx("position")]?.trim()||"F",gp:Math.round(gp),g,a,pts:g+a,sog,hit,blk,tk,pim,tsa,give,
-              g_pg:+(g/gp).toFixed(4),a_pg:+(a/gp).toFixed(4),pts_pg:+((g+a)/gp).toFixed(4),
-              sog_pg:+(sog/gp).toFixed(4),hit_pg:+(hit/gp).toFixed(4),blk_pg:+(blk/gp).toFixed(4),
-              take_pg:+(tk/gp).toFixed(4),pim_pg:+(pim/gp).toFixed(4),
-              tsa_pg:+(tsa/gp).toFixed(4),give_pg:+(give/gp).toFixed(4),
-              lineRole:"MID6",pGP:0,pG:0,pA:0,pSOG:0,pHIT:0,pBLK:0,pTK:0,pPIM:0,pTSA:0,pGIVE:0});
-          }
-          parsed.sort((a,b)=>a.team.localeCompare(b.team)||b.pts-a.pts);
-          setPlayers(parsed);
-        }catch(e){alert("Parse error: "+e.message);}
-      };
-      reader.readAsText(file);
+  return <div>
+    {/* Series + Game selector */}
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
+      <div>
+        <div style={{fontSize:10,color:"var(--color-text-secondary)",marginBottom:4}}>Series</div>
+        <select value={seriesIdx} onChange={e=>setSeriesIdx(+e.target.value)}
+          style={{width:"100%",padding:"5px 8px",fontSize:12,background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",color:"var(--color-text-primary)"}}>
+          {(allSeries||[]).map((sr,i)=><option key={i} value={i}>{sr.homeAbbr&&sr.awayAbbr?`${sr.homeAbbr} vs ${sr.awayAbbr}`:`Series ${i+1}`}</option>)}
+        </select>
+      </div>
+      <div>
+        <div style={{fontSize:10,color:"var(--color-text-secondary)",marginBottom:4}}>Game</div>
+        <select value={gameNum} onChange={e=>setGameNum(+e.target.value)}
+          style={{width:"100%",padding:"5px 8px",fontSize:12,background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",color:"var(--color-text-primary)"}}>
+          {[1,2,3,4,5,6,7].map(n=><option key={n} value={n}>Game {n}</option>)}
+        </select>
+      </div>
+    </div>
+
+    <div style={{fontSize:10,color:"var(--color-text-tertiary)",marginBottom:8}}>
+      Paste the HR box score for <strong>one team</strong> at a time. Stats are <strong>added</strong> to running playoff totals (G, A, SOG, PIM incremented by +1 game each paste). Repeat for the other team.
+    </div>
+
+    <textarea value={paste} onChange={e=>setPaste(e.target.value)}
+      placeholder={"Paste HR box score here (tab-separated with headers)…\n\nExample:\nPlayer\tG\tA\tPTS\t+/-\tPIM\t…\tS\nSidney Crosby\t1\t1\t2\t+1\t0\t…\t4\n\nHR columns mapped: Player, G, A, S (shots), PIM\nHIT/BLK/TK not available in HR box score — enter via game entry modal"}
+      style={{width:"100%",height:180,fontSize:11,fontFamily:"var(--font-mono)",
+        background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
+        borderRadius:"var(--border-radius-md)",padding:10,color:"var(--color-text-primary)",
+        resize:"vertical",boxSizing:"border-box",marginBottom:8}}/>
+
+    <div style={{display:"flex",gap:8,alignItems:"center"}}>
+      <button onClick={handleImport} disabled={!paste.trim()||!players}
+        style={{padding:"6px 18px",fontSize:12,fontWeight:500,borderRadius:"var(--border-radius-md)",border:"none",
+          cursor:paste.trim()&&players?"pointer":"default",
+          background:paste.trim()&&players?"#10b981":"var(--color-background-secondary)",
+          color:paste.trim()&&players?"white":"var(--color-text-tertiary)"}}>
+        + Add to Totals
+      </button>
+      <button onClick={()=>{setPaste("");setResult(null);setErr("");}}
+        style={{padding:"5px 10px",fontSize:11,borderRadius:"var(--border-radius-md)",
+          background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
+          color:"var(--color-text-secondary)",cursor:"pointer"}}>Clear</button>
+      {!players&&<span style={{fontSize:11,color:"#f59e0b"}}>Load skaters.csv first</span>}
+    </div>
+
+    {err&&<div style={{marginTop:8,padding:8,borderRadius:"var(--border-radius-md)",
+      background:"rgba(239,68,68,0.1)",border:"0.5px solid rgba(239,68,68,0.3)",fontSize:11,color:"#ef4444"}}>{err}</div>}
+    {result&&<div style={{marginTop:8,padding:8,borderRadius:"var(--border-radius-md)",
+      background:"rgba(16,185,129,0.1)",border:"0.5px solid rgba(16,185,129,0.3)",fontSize:11}}>
+      <div style={{color:"#10b981",fontWeight:500,marginBottom:2}}>
+        ✓ {result.matched} players updated — {result.seriesLabel} G{result.gameNum}
+      </div>
+      <div style={{fontSize:10,color:"var(--color-text-secondary)"}}>pGP+1, pG/pA/pSOG/pPIM incremented for matched players</div>
+      {result.unmatched.length>0&&<div style={{fontSize:10,color:"#f59e0b",marginTop:4}}>
+        Not in roster: {result.unmatched.join(", ")}{result.unmatched.length>=10?"…":""}
+      </div>}
+    </div>}
+  </div>;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// UPLOAD TAB
+// ═══════════════════════════════════════════════════════════════════════════════
+function UploadTab({players,setPlayers,goalies,setGoalies,exportState,importState,syncStatus,allSeries,dark}) {
+  const [fileErr,setFileErr]=useState("");
+  const setErr=setFileErr; // alias used in file handlers
+
+  const playerFileRef = useRef(null);
+  const goalieFileRef = useRef(null);
+
+  function handlePlayerFile(e){
+    const file=e.target.files[0];if(!file)return;
+    e.target.value=""; // reset so same file can be re-selected
+    const reader=new FileReader();
+    reader.onload=ev=>{
+      try{
+        const text=ev.target.result;
+        if(file.name.endsWith(".json")){const d=JSON.parse(text);setPlayers(Array.isArray(d)?d:d.players);return;}
+        const lines=text.split("\n"),headers=lines[0].split(",");
+        const idx=h=>headers.indexOf(h);
+        const pt=new Set(["ANA","BOS","BUF","CAR","COL","DAL","EDM","LAK","MIN","MTL","OTT","PHI","PIT","TBL","UTA","VGK"]);
+        const parsed=[];
+        for(let i=1;i<lines.length;i++){
+          const c=lines[i].split(",");
+          if(!c[idx("situation")]||c[idx("situation")].trim()!=="all")continue;
+          let team=c[idx("team")]?.trim();if(!pt.has(team))continue;if(team==="VGK")team="VEG";
+          const gp=parseFloat(c[idx("games_played")])||1;
+          const g=parseFloat(c[idx("I_F_goals")])||0;
+          const a=(parseFloat(c[idx("I_F_primaryAssists")])||0)+(parseFloat(c[idx("I_F_secondaryAssists")])||0);
+          const sog=parseFloat(c[idx("I_F_shotsOnGoal")])||0;
+          const hit=parseFloat(c[idx("I_F_hits")])||0;
+          const blk=parseFloat(c[idx("shotsBlockedByPlayer")])||0;
+          const tk=parseFloat(c[idx("I_F_takeaways")])||0;
+          const pim=parseFloat(c[idx("I_F_penalityMinutes")])||0;
+          const tsa=parseFloat(c[idx("I_F_shotAttempts")])||0;
+          const give=parseFloat(c[idx("I_F_giveaways")])||0;
+          const posVal=c[idx("position")]?.trim()||"F";
+          const name=c[idx("name")]?.trim();if(!name)continue;
+          const defRole=posVal==="D"?"D2":posVal==="G"?"BACKUP":"BOT6";
+          parsed.push({name,team,pos:posVal,gp:Math.round(gp),g,a,pts:g+a,sog,hit,blk,tk,pim,tsa,give,
+            g_pg:+(g/gp).toFixed(4),a_pg:+(a/gp).toFixed(4),pts_pg:+((g+a)/gp).toFixed(4),
+            sog_pg:+(sog/gp).toFixed(4),hit_pg:+(hit/gp).toFixed(4),blk_pg:+(blk/gp).toFixed(4),
+            take_pg:+(tk/gp).toFixed(4),pim_pg:+(pim/gp).toFixed(4),
+            tsa_pg:+(tsa/gp).toFixed(4),give_pg:+(give/gp).toFixed(4),
+            lineRole:defRole,pGP:0,pG:0,pA:0,pSOG:0,pHIT:0,pBLK:0,pTK:0,pPIM:0,pTSA:0,pGIVE:0});
+        }
+        parsed.sort((a,b)=>a.team.localeCompare(b.team)||b.pts-a.pts);
+        setPlayers(parsed);
+      }catch(e){setErr("Skaters parse error: "+e.message);}
     };
-    inp.click();
+    reader.readAsText(file);
   }
 
-  function initGoalies(){
-    const inp=document.createElement("input");inp.type="file";inp.accept=".csv,.json";
-    inp.onchange=e=>{
-      const file=e.target.files[0];if(!file)return;
-      const reader=new FileReader();
-      reader.onload=ev=>{
-        try{
-          const text=ev.target.result;
-          if(file.name.endsWith(".json")){const d=JSON.parse(text);setGoalies(Array.isArray(d)?d:d.goalies);return;}
-          const lines=text.split("\n"),headers=lines[0].split(",");
-          const idx=h=>headers.indexOf(h);
-          const pt=new Set(["ANA","BOS","BUF","CAR","COL","DAL","EDM","LAK","MIN","MTL","OTT","PHI","PIT","TBL","UTA","VGK"]);
-          const rawGoalies=[];
-          for(let i=1;i<lines.length;i++){
-            const c=lines[i].split(",");
-            if(!c[idx("situation")]||c[idx("situation")].trim()!=="all")continue;
-            let team=c[idx("team")]?.trim();if(!pt.has(team))continue;if(team==="VGK")team="VEG";
-            const gp=parseFloat(c[idx("games_played")])||1;
-            const ongoal=parseFloat(c[idx("ongoal")])||0;
-            const goals=parseFloat(c[idx("goals")])||0;
-            const saves=ongoal-goals;
-            const name=c[idx("name")]?.trim();if(!name)continue;
-            rawGoalies.push({name,team,gp:Math.round(gp),saves,saves_pg:+(saves/gp).toFixed(4),_rawGP:gp});
-          }
-          // Compute starter share = GP / team total GP
-          const teamGP={};
-          rawGoalies.forEach(g=>{teamGP[g.team]=(teamGP[g.team]||0)+g.gp;});
-          const parsed=rawGoalies.map(g=>({...g,starter_share:+(g.gp/Math.max(1,teamGP[g.team])).toFixed(4),pGP:0,pSaves:0}));
-          parsed.sort((a,b)=>a.team.localeCompare(b.team)||b.starter_share-a.starter_share);
-          setGoalies(parsed);
-        }catch(e){alert("Goalie parse error: "+e.message);}
-      };
-      reader.readAsText(file);
+  function handleGoalieFile(e){
+    const file=e.target.files[0];if(!file)return;
+    e.target.value="";
+    const reader=new FileReader();
+    reader.onload=ev=>{
+      try{
+        const text=ev.target.result;
+        if(file.name.endsWith(".json")){const d=JSON.parse(text);setGoalies(Array.isArray(d)?d:d.goalies);return;}
+        const lines=text.split("\n"),headers=lines[0].split(",");
+        const idx=h=>headers.indexOf(h);
+        const pt=new Set(["ANA","BOS","BUF","CAR","COL","DAL","EDM","LAK","MIN","MTL","OTT","PHI","PIT","TBL","UTA","VGK"]);
+        const rawGoalies=[];
+        for(let i=1;i<lines.length;i++){
+          const c=lines[i].split(",");
+          if(!c[idx("situation")]||c[idx("situation")].trim()!=="all")continue;
+          let team=c[idx("team")]?.trim();if(!pt.has(team))continue;if(team==="VGK")team="VEG";
+          const gp=parseFloat(c[idx("games_played")])||1;
+          const ongoal=parseFloat(c[idx("ongoal")])||0;
+          const goals=parseFloat(c[idx("goals")])||0;
+          const saves=ongoal-goals;
+          const name=c[idx("name")]?.trim();if(!name)continue;
+          rawGoalies.push({name,team,gp:Math.round(gp),saves,saves_pg:+(saves/gp).toFixed(4)});
+        }
+        const teamGP={};
+        rawGoalies.forEach(g=>{teamGP[g.team]=(teamGP[g.team]||0)+g.gp;});
+        const parsed=rawGoalies.map(g=>({...g,starter_share:+(g.gp/Math.max(1,teamGP[g.team])).toFixed(4),pGP:0,pSaves:0}));
+        parsed.sort((a,b)=>a.team.localeCompare(b.team)||b.starter_share-a.starter_share);
+        setGoalies(parsed);
+      }catch(e){setErr("Goalies parse error: "+e.message);}
     };
-    inp.click();
+    reader.readAsText(file);
   }
 
   return (
     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20,alignItems:"start"}}>
+      {/* Hidden real file inputs — triggered by visible buttons */}
+      <input ref={playerFileRef} type="file" accept=".csv,.json" onChange={handlePlayerFile} style={{display:"none"}}/>
+      <input ref={goalieFileRef} type="file" accept=".csv,.json" onChange={handleGoalieFile} style={{display:"none"}}/>
       <div>
         <Card style={{marginBottom:14}}>
-          <SH title="Paste Hockey Reference Stats" sub="Copy table from Hockey-Reference.com (tab-separated)"/>
-          <textarea value={paste} onChange={e=>setPaste(e.target.value)} placeholder={"Paste HR table here...\nExpected: Player, Team, GP, G, A, SOG, HIT, BLK\nExtra columns are ignored."}
-            style={{width:"100%",height:200,fontSize:11,fontFamily:"var(--font-mono)",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",padding:10,color:"var(--color-text-primary)",resize:"vertical",boxSizing:"border-box"}}/>
-          <div style={{display:"flex",gap:8,marginTop:8}}>
-            <button onClick={process} disabled={!paste.trim()} style={{padding:"6px 16px",fontSize:12,borderRadius:"var(--border-radius-md)",border:"none",cursor:paste.trim()?"pointer":"default",background:paste.trim()?"#3b82f6":"var(--color-background-secondary)",color:paste.trim()?"white":"var(--color-text-tertiary)"}}>Process</button>
-            <button onClick={()=>{setPaste("");setResult(null);setErr("");}} style={{padding:"6px 12px",fontSize:12,borderRadius:"var(--border-radius-md)",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",color:"var(--color-text-secondary)",cursor:"pointer"}}>Clear</button>
-          </div>
-          {err&&<div style={{marginTop:8,padding:8,borderRadius:"var(--border-radius-md)",background:"rgba(239,68,68,0.1)",border:"0.5px solid rgba(239,68,68,0.3)",fontSize:11,color:"#ef4444"}}>{err}</div>}
-          {result&&<div style={{marginTop:8,padding:8,borderRadius:"var(--border-radius-md)",background:"rgba(16,185,129,0.1)",border:"0.5px solid rgba(16,185,129,0.3)",fontSize:11}}>
-            <div style={{color:"#10b981",fontWeight:500,marginBottom:2}}>✓ {result.matched}/{result.total} matched</div>
-            {result.unmatched.length>0&&<div style={{color:"var(--color-text-secondary)",fontSize:10}}>Unmatched: {result.unmatched.join(", ")}{result.unmatched.length>=20?"…":""}</div>}
-          </div>}
-        </Card>
-
-        <Card>
-          <SH title="Column Mapping"/>
-          <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-            <TH cols={["Field","HR Columns"]}/>
-            <tbody>{[["Player","Player, Skater, Name"],["Team","Team, Tm"],["GP","GP, GamesPlayed"],["Goals","G, Goals"],["Assists","A, Assists"],["SOG","SOG, S, Shots"],["Hits","HIT, H, Hits"],["Blocks","BLK, B, Blocked, BS"]].map(([f,c],i)=>(
-              <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
-                <td style={{padding:"3px 8px",fontFamily:"var(--font-mono)",fontSize:10}}>{f}</td>
-                <td style={{padding:"3px 8px",color:"var(--color-text-secondary)",fontSize:10}}>{c}</td>
-              </tr>
-            ))}</tbody>
-          </table>
+          <SH title="Game Stat Import" sub="Paste a Hockey Reference box score — stats are added to each player's running playoff totals"/>
+          {/* Series + Game selector */}
+          <GameStatImporter players={players} setPlayers={setPlayers} allSeries={allSeries}/>
         </Card>
       </div>
 
@@ -2091,16 +2488,22 @@ function UploadTab({players,setPlayers,goalies,setGoalies,exportState,importStat
         <Card style={{marginBottom:14}}>
           <SH title="Skater Base Data"/>
           <div style={{marginBottom:8,fontSize:12,color:"var(--color-text-secondary)"}}>{players?`${players.length} skaters loaded`:"No skater data"}</div>
-          <button onClick={initPlayers} style={{padding:"6px 16px",fontSize:12,borderRadius:"var(--border-radius-md)",background:"#3b82f6",color:"white",border:"none",cursor:"pointer"}}>{players?"Re-load skaters.csv":"Load skaters.csv"}</button>
-          {players&&<div style={{marginTop:10,display:"flex",gap:6,flexWrap:"wrap"}}>
-            {["TOP6","MID6","BOT6","SCRATCHED"].map(r=>{const cnt=players.filter(p=>p.lineRole===r).length,c=roleColor(r);return <div key={r} style={{fontSize:9,padding:"2px 7px",borderRadius:3,background:`${c}20`,color:c,fontWeight:500}}>{r}: {cnt}</div>;})}
+          <button onClick={()=>playerFileRef.current?.click()} style={{padding:"6px 16px",fontSize:12,borderRadius:"var(--border-radius-md)",background:"#3b82f6",color:"white",border:"none",cursor:"pointer"}}>{players?"Re-load skaters.csv":"Load skaters.csv"}</button>
+          {players&&<div style={{marginTop:10,display:"flex",gap:4,flexWrap:"wrap"}}>
+            {["TOP6","BOT6","D1","D2","D3","STARTER","BACKUP","SCRATCHED"].map(r=>{
+              const cnt=players.filter(p=>p.lineRole===r).length;
+              if(!cnt) return null;
+              const c=roleColor(r);
+              return <div key={r} style={{fontSize:9,padding:"2px 7px",borderRadius:3,background:`${c}20`,color:c,fontWeight:500}}>{r}: {cnt}</div>;
+            })}
           </div>}
+          {fileErr&&<div style={{marginTop:8,fontSize:11,color:"#ef4444"}}>{fileErr}</div>}
         </Card>
 
         <Card style={{marginBottom:14}}>
           <SH title="Goalie Data" sub="Required for Goalie Saves props in Series Pricer"/>
           <div style={{marginBottom:8,fontSize:12,color:"var(--color-text-secondary)"}}>{goalies?`${goalies.length} goalies loaded`:"No goalie data"}</div>
-          <button onClick={initGoalies} style={{padding:"6px 16px",fontSize:12,borderRadius:"var(--border-radius-md)",background:"#7c3aed",color:"white",border:"none",cursor:"pointer",marginBottom:8}}>{goalies?"Re-load goalies.csv":"Load goalies.csv"}</button>
+          <button onClick={()=>goalieFileRef.current?.click()} style={{padding:"6px 16px",fontSize:12,borderRadius:"var(--border-radius-md)",background:"#7c3aed",color:"white",border:"none",cursor:"pointer",marginBottom:8}}>{goalies?"Re-load goalies.csv":"Load goalies.csv"}</button>
           <div style={{fontSize:10,color:"var(--color-text-tertiary)",lineHeight:1.7}}>
             Upload the MoneyPuck <code style={{background:"var(--color-background-secondary)",padding:"0 3px",borderRadius:2}}>goalies.csv</code> (situation=all).<br/>
             Saves = ongoal − goals. Starter share = GP / team total GP.
@@ -2131,13 +2534,8 @@ function UploadTab({players,setPlayers,goalies,setGoalies,exportState,importStat
         </Card>
 
         <Card>
-          <SH title="JSON Backup"/>
-          <button onClick={exportState} style={{padding:"6px 14px",fontSize:12,borderRadius:"var(--border-radius-md)",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",color:"var(--color-text-primary)",cursor:"pointer",marginBottom:10}}>Export JSON</button>
-          <textarea value={impText} onChange={e=>setImpText(e.target.value)} placeholder="Paste exported JSON to restore…"
-            style={{width:"100%",height:70,fontSize:10,fontFamily:"var(--font-mono)",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",padding:8,color:"var(--color-text-primary)",resize:"vertical",boxSizing:"border-box"}}/>
-          <button onClick={()=>{const r=importState(impText);setImpMsg(r.ok?"✓ Restored":`Error: ${r.error}`);if(r.ok)setImpText("");}} disabled={!impText.trim()}
-            style={{marginTop:6,padding:"5px 12px",fontSize:11,borderRadius:"var(--border-radius-md)",background:impText.trim()?"#1d4ed8":"var(--color-background-secondary)",color:impText.trim()?"white":"var(--color-text-tertiary)",border:"none",cursor:impText.trim()?"pointer":"default"}}>Import</button>
-          {impMsg&&<div style={{marginTop:5,fontSize:11,color:impMsg.startsWith("✓")?"#10b981":"#ef4444"}}>{impMsg}</div>}
+          <SH title="JSON Backup" sub="Export state to copy-paste, or paste a backup below to restore"/>
+          <ExportImportPanel exportState={exportState} importState={importState}/>
         </Card>
       </div>
     </div>
@@ -2155,21 +2553,10 @@ function RolesTab({players,setPlayers,dark}) {
 
   function setRole(name,team,role){setPlayers(prev=>prev.map(p=>p.name===name&&p.team===team?{...p,lineRole:role}:p));}
   function bulkSet(role){if(!filterTeam||filterTeam==="ALL")return;setPlayers(prev=>prev.map(p=>p.team===filterTeam?{...p,lineRole:role}:p));}
-  function scratchExceptTopN(n){
-    if(!filterTeam||filterTeam==="ALL")return;
-    const sorted=players.filter(p=>p.team===filterTeam).sort((a,b)=>b.pts-a.pts);
-    const top=new Set(sorted.slice(0,n).map(p=>p.name));
-    setPlayers(prev=>prev.map(p=>p.team===filterTeam?{...p,lineRole:top.has(p.name)?"MID6":"SCRATCHED"}:p));
-  }
-  function autoAssignRoles(team){
-    // Top 6 by PTS = TOP6, next 6 = MID6, next 6 = BOT6, rest = SCRATCHED
-    const sorted=players.filter(p=>p.team===team&&p.pos!=="G").sort((a,b)=>b.pts-a.pts);
-    const roleMap={};
-    sorted.forEach((p,i)=>{roleMap[p.name]=i<6?"TOP6":i<12?"MID6":i<18?"BOT6":"SCRATCHED";});
-    setPlayers(prev=>prev.map(p=>p.team===team&&roleMap[p.name]?{...p,lineRole:roleMap[p.name]}:p));
-  }
 
   if(!players) return <Card><div style={{color:"var(--color-text-secondary)",fontSize:12,padding:8}}>Load player data first</div></Card>;
+
+  const ALL_ROLES=["TOP6","BOT6","D1","D2","D3","STARTER","BACKUP","SCRATCHED"];
 
   return <div>
     <Card style={{marginBottom:12}}>
@@ -2181,22 +2568,29 @@ function RolesTab({players,setPlayers,dark}) {
           {teams.map(t=><option key={t} value={t}>{t} – {TEAM_NAMES[t]}</option>)}
         </select>
         {filterTeam!=="ALL"&&<>
-          <span style={{fontSize:10,color:"var(--color-text-secondary)"}}>Bulk:</span>
-          {["TOP6","MID6","BOT6","SCRATCHED"].map(r=><button key={r} onClick={()=>bulkSet(r)} style={{padding:"3px 8px",fontSize:9,borderRadius:3,border:"none",cursor:"pointer",fontWeight:500,background:`${roleColor(r)}20`,color:roleColor(r)}}>→{r}</button>)}
-          <button onClick={()=>scratchExceptTopN(20)} style={{padding:"3px 8px",fontSize:9,borderRadius:3,border:"0.5px solid var(--color-border-secondary)",background:"var(--color-background-secondary)",color:"var(--color-text-secondary)",cursor:"pointer"}}>Scratch below top 20</button>
-          <button onClick={()=>autoAssignRoles(filterTeam)} style={{padding:"3px 8px",fontSize:9,borderRadius:3,border:"0.5px solid #3b82f6",background:"rgba(59,130,246,0.1)",color:"#60a5fa",cursor:"pointer"}}>Auto-assign lines by PTS</button>
+          <span style={{fontSize:10,color:"var(--color-text-secondary)"}}>Bulk (all positions):</span>
+          {["SCRATCHED"].map(r=><button key={r} onClick={()=>bulkSet(r)} style={{padding:"3px 8px",fontSize:9,borderRadius:3,border:"none",cursor:"pointer",fontWeight:500,background:`${roleColor(r)}20`,color:roleColor(r)}}>→{r}</button>)}
         </>}
-        <div style={{marginLeft:"auto",display:"flex",gap:6}}>
-          {["TOP6","MID6","BOT6","SCRATCHED"].map(r=>{const cnt=players.filter(p=>p.lineRole===r).length,c=roleColor(r);return <div key={r} style={{fontSize:9,padding:"2px 7px",borderRadius:3,background:`${c}20`,color:c,fontWeight:500}}>{r}: {cnt}</div>;})}
+        <div style={{marginLeft:"auto",display:"flex",gap:4,flexWrap:"wrap"}}>
+          {ALL_ROLES.map(r=>{const cnt=players.filter(p=>p.lineRole===r).length;if(!cnt)return null;const c=roleColor(r);return <div key={r} style={{fontSize:9,padding:"2px 7px",borderRadius:3,background:`${c}20`,color:c,fontWeight:500}}>{r}: {cnt}</div>;})}
         </div>
+      </div>
+      <div style={{marginTop:8,fontSize:10,color:"var(--color-text-tertiary)"}}>
+        <strong style={{color:"#10b981"}}>F:</strong> TOP6 ×1.2, BOT6 ×0.75 &nbsp;|&nbsp;
+        <strong style={{color:"#3b82f6"}}>D:</strong> D1 ×1.15, D2 ×1.0, D3 ×0.75 &nbsp;|&nbsp;
+        <strong style={{color:"#a78bfa"}}>G:</strong> STARTER/BACKUP excluded from skater markets &nbsp;|&nbsp;
+        SCRATCHED ×0
       </div>
     </Card>
 
     <Card>
       <div style={{overflowX:"auto"}}>
         <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-          <TH cols={["Player","Team","Pos","GP","G","A","PTS","SOG","HIT","BLK","Role","pGP","pG","pA","pSOG","pHIT","pBLK"]}/>
-          <tbody>{displayed.slice(0,300).map((p,i)=>(
+          <TH cols={["Player","Team","Pos","GP","G","A","PTS","SOG","HIT","BLK","Role","pGP","pG","pA","pSOG","pHIT","pBLK","pTK","pTSA","pGV"]}/>
+          <tbody>{displayed.slice(0,300).map((p,i)=>{
+            const roles=rolesForPos(p.pos);
+            const curRole=p.lineRole||roles[0];
+            return (
             <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",
               background:p.lineRole==="SCRATCHED"?(dark?"rgba(239,68,68,0.06)":"rgba(239,68,68,0.04)"):i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)")}}>
               <td style={{padding:"3px 8px",opacity:p.lineRole==="SCRATCHED"?0.45:1}}>{p.name}</td>
@@ -2204,12 +2598,12 @@ function RolesTab({players,setPlayers,dark}) {
               <td style={{padding:"3px 8px",textAlign:"right",color:"var(--color-text-secondary)"}}>{p.pos}</td>
               {["gp","g","a","pts","sog","hit","blk"].map(f=><td key={f} style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{Math.round(p[f]||0)}</td>)}
               <td style={{padding:"3px 6px",textAlign:"right"}}>
-                <select value={p.lineRole||"MID6"} onChange={e=>setRole(p.name,p.team,e.target.value)}
-                  style={{fontSize:9,padding:"2px 4px",background:`${roleColor(p.lineRole||"MID6")}18`,border:`0.5px solid ${roleColor(p.lineRole||"MID6")}`,borderRadius:3,color:roleColor(p.lineRole||"MID6"),fontWeight:500}}>
-                  {["TOP6","MID6","BOT6","SCRATCHED"].map(r=><option key={r} value={r}>{r}</option>)}
+                <select value={curRole} onChange={e=>setRole(p.name,p.team,e.target.value)}
+                  style={{fontSize:9,padding:"2px 4px",background:`${roleColor(curRole)}18`,border:`0.5px solid ${roleColor(curRole)}`,borderRadius:3,color:roleColor(curRole),fontWeight:500}}>
+                  {roles.map(r=><option key={r} value={r}>{r}</option>)}
                 </select>
               </td>
-              {["pGP","pG","pA","pSOG","pHIT","pBLK"].map(f=>(
+              {["pGP","pG","pA","pSOG","pHIT","pBLK","pTK","pTSA","pGIVE"].map(f=>(
                 <td key={f} style={{padding:"1px 3px"}}>
                   <input type="number" value={p[f]||0} min={0} step={1}
                     onChange={e=>setPlayers(prev=>prev.map(q=>q.name===p.name&&q.team===p.team?{...q,[f]:parseInt(e.target.value)||0}:q))}
@@ -2218,8 +2612,9 @@ function RolesTab({players,setPlayers,dark}) {
                 </td>
               ))}
             </tr>
-          ))}
-          {displayed.length>300&&<tr><td colSpan={11} style={{padding:8,textAlign:"center",color:"var(--color-text-tertiary)",fontSize:10}}>Showing 300/{displayed.length} — filter by team</td></tr>}
+            );
+          })}
+          {displayed.length>300&&<tr><td colSpan={20} style={{padding:8,textAlign:"center",color:"var(--color-text-tertiary)",fontSize:10}}>Showing 300/{displayed.length} — filter by team</td></tr>}
           </tbody>
         </table>
       </div>
