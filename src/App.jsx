@@ -360,7 +360,7 @@ function roleColor(r) {
   }[r]||"#64748b";
 }
 function roleMultiplier(r) {
-  return {TOP6:1.2, BOT6:0.75, SCRATCHED:0, D1:1.15, D2:1.0, D3:0.75, STARTER:0, BACKUP:0}[r]??1.0;
+  return {TOP6:1.2, BOT6:0.75, SCRATCHED:0, D1:1.15, D2:1.0, D3:0.75, STARTER:0, BACKUP:0}[r]??0;
 }
 function RoleBadge({role}) { const c=roleColor(role||"BOT6"); return <span style={{fontSize:9,padding:"1px 5px",borderRadius:3,background:`${c}20`,color:c,fontWeight:500}}>{role||"—"}</span>; }
 function rolesForPos(pos) {
@@ -457,8 +457,8 @@ export default function App() {
     const kMax=lStat==="sog"?40:lStat==="hit"?50:lStat==="blk"?40:lStat==="tsa"?60:lStat==="give"?30:lStat==="g"&&lScope==="full"?25:20;
     const or=lScope==="r1"?globals.overroundR1:globals.overroundFull;
     const pf=globals.powerFactor;
-    let pool=players;
-    if(lScope==="r1"){const active=new Set([...matchups.filter(m=>m.homeAbbr).map(m=>m.homeAbbr),...matchups.filter(m=>m.awayAbbr).map(m=>m.awayAbbr)]);if(active.size>0)pool=players.filter(p=>active.has(p.team));}
+    let pool=players.filter(p=>roleMultiplier(p.lineRole)>0);
+    if(lScope==="r1"){const active=new Set([...matchups.filter(m=>m.homeAbbr).map(m=>m.homeAbbr),...matchups.filter(m=>m.awayAbbr).map(m=>m.awayAbbr)]);if(active.size>0)pool=pool.filter(p=>active.has(p.team));}
     const lambdas=pool.map(p=>computeLambda(p,lStat,lScope));
     const raw=computeLeaderProbs(lambdas,kMax);
     const powered=raw.map(p=>Math.pow(p,pf));
@@ -1000,14 +1000,17 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
         </div>
         <div style={{overflowX:"auto"}}>
           <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
-            <TH cols={["#","Player","Team","Role","λ",...(showTrue?["True%"]:[]),"Adj%","American",...(showDec?["Dec"]:[])]}/>
+            <TH cols={["#","Player","Team","Role","Now","λ",...(showTrue?["True%"]:[]),"Adj%","American",...(showDec?["Dec"]:[])]}/>
             <tbody>{displayed.map((p,i)=>{
               const rank=leaderMarket.indexOf(p)+1,a=toAmer(p.adjProb);
+              const actKey=lStat==="tk"?"pTK":lStat==="give"?"pGIVE":lStat==="tsa"?"pTSA":lStat==="pim"?"pPIM":"p"+lStat.toUpperCase();
+              const now=p[actKey]||0;
               return <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)")}}>
                 <td style={{padding:"4px 8px",color:"var(--color-text-tertiary)",fontSize:10,width:28}}>{rank}</td>
                 <td style={{padding:"4px 8px",fontWeight:rank<=3?500:400}}>{p.name}</td>
                 <td style={{padding:"4px 8px",textAlign:"right"}}><span style={{fontSize:9,padding:"1px 5px",borderRadius:3,background:"rgba(59,130,246,0.12)",color:"#60a5fa",fontWeight:500}}>{p.team}</span></td>
                 <td style={{padding:"4px 8px",textAlign:"right"}}><RoleBadge role={p.lineRole}/></td>
+                <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:now>0?500:400,color:now>0?"#4ade80":"var(--color-text-tertiary)"}}>{now>0?now:"—"}</td>
                 <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{p.lambda.toFixed(2)}</td>
                 {showTrue&&<td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(p.trueProb*100).toFixed(2)}%</td>}
                 <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11}}>{(p.adjProb*100).toFixed(2)}%</td>
@@ -1190,7 +1193,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
         </div>
       </Card>}
 
-      <div style={{display:"grid",gridTemplateColumns:"310px 1fr",gap:14,alignItems:"start"}}>
+      <div style={{display:"grid",gridTemplateColumns:"310px minmax(0,1fr)",gap:14,alignItems:"start"}}>
         <div>
           <Card style={{marginBottom:10}}>
             <SH title="Series Setup"/>
@@ -1541,8 +1544,11 @@ function PropsPanel({s,expG,players,globals,margins,showTrue,dark,mode}) {
       const actKey=stat==="tk"?"pTK":stat==="pim"?"pPIM":stat==="give"?"pGIVE":stat==="tsa"?"pTSA":"p"+stat.toUpperCase();
       const rr=(p[pgKey]||0)*rm*rateDiscount;
       const lam=Math.max(0.0001,(p[actKey]||0)+rr*Math.max(0,expG-(p.pGP||0)));
-      const lineInt=Math.ceil(line-0.001);
-      const pOver=1-nbCDF(lineInt-1,lam,dispersion);
+      const actual=p[actKey]||0;
+      // For binary: if player already has >= line, they've hit it — price at near-certainty
+      const effectiveLine = mode==="binary" ? Math.max(line, actual+1) : line;
+      const lineInt=Math.ceil(effectiveLine-0.001);
+      const pOver=mode==="binary"&&actual>=line ? 1 : 1-nbCDF(lineInt-1,lam,dispersion);
       const [adjO,adjU]=applyMargin([pOver,1-pOver],statMargin);
       return {...p,lam,pYes:pOver,adjYes:adjO,adjNo:adjU};
     }).sort((a,b)=>b.adjYes-a.adjYes);
@@ -1811,14 +1817,18 @@ function SeriesLeaderPanel({s,expG,players,globals,margins,showTrue,dark}) {
     </div>
     <div style={{overflowX:"auto"}}>
       <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-        <TH cols={["#","Player","Team","Role","λ",...(showTrue?["True%","DH%"]:[]),"Adj%","American","Dec"]}/>
+        <TH cols={["#","Player","Team","Role","Now","λ",...(showTrue?["True%","DH%"]:[]),"Adj%","American","Dec"]}/>
         <tbody>{leaderRows.map((p,i)=>{
           const a=toAmer(p.adjProb);
+          // current actual series stat
+          const actKey=stat==="tk"?"pTK":stat==="give"?"pGIVE":stat==="tsa"?"pTSA":stat==="pim"?"pPIM":"p"+stat.toUpperCase();
+          const now=p[actKey]||0;
           return <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)")}}>
             <td style={{padding:"3px 8px",color:"var(--color-text-tertiary)",fontSize:9}}>{i+1}</td>
             <td style={{padding:"3px 8px",fontWeight:i<3?500:400}}>{p.name}</td>
             <td style={{padding:"3px 8px",textAlign:"right"}}><span style={{fontSize:9,padding:"1px 4px",borderRadius:2,background:"rgba(124,58,237,0.15)",color:"#a78bfa"}}>{p.team}</span></td>
             <td style={{padding:"3px 8px",textAlign:"right"}}><RoleBadge role={p.lineRole}/></td>
+            <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:now>0?500:400,color:now>0?"#4ade80":"var(--color-text-tertiary)"}}>{now>0?now:"—"}</td>
             <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{p.lambda.toFixed(2)}</td>
             {showTrue&&<><td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(p.trueProb*100).toFixed(2)}%</td>
             <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(Math.pow(p.trueProb,temp)*100).toFixed(2)}%</td></>}
@@ -2244,6 +2254,7 @@ function GameStatImporter({players,setPlayers,allSeries}) {
   const [paste,setPaste]=useState("");
   const [result,setResult]=useState(null);
   const [err,setErr]=useState("");
+  const [log,setLog]=useState([]); // upload history
 
   const s=allSeries?.[seriesIdx];
   const seriesLabel=(sr)=>sr.homeAbbr&&sr.awayAbbr?`${sr.homeAbbr} vs ${sr.awayAbbr}`:`Series ${sr._idx+1}`;
@@ -2321,7 +2332,9 @@ function GameStatImporter({players,setPlayers,allSeries}) {
     });
 
     setPlayers(updated);
-    setResult({matched,unmatched:unmatched.slice(0,10),gameNum,seriesLabel:s?seriesLabel(s):"?"});
+    const entry={ts:new Date().toLocaleTimeString(),matched,series:s?`${s.homeAbbr||"?"}/${s.awayAbbr||"?"}`:"-",game:gameNum,unmatched:unmatched.slice(0,5)};
+    setLog(prev=>[entry,...prev].slice(0,20));
+    setResult({matched,unmatched:unmatched.slice(0,10),gameNum,seriesLabel:s?`${s.homeAbbr||"?"} vs ${s.awayAbbr||"?"}`:""});
     setPaste("");
   }
 
@@ -2377,10 +2390,21 @@ function GameStatImporter({players,setPlayers,allSeries}) {
       <div style={{color:"#10b981",fontWeight:500,marginBottom:2}}>
         ✓ {result.matched} players updated — {result.seriesLabel} G{result.gameNum}
       </div>
-      <div style={{fontSize:10,color:"var(--color-text-secondary)"}}>pGP+1, pG/pA/pSOG/pPIM incremented for matched players</div>
+      <div style={{fontSize:10,color:"var(--color-text-secondary)"}}>pGP+1, pG/pA/pSOG/pPIM incremented</div>
       {result.unmatched.length>0&&<div style={{fontSize:10,color:"#f59e0b",marginTop:4}}>
         Not in roster: {result.unmatched.join(", ")}{result.unmatched.length>=10?"…":""}
       </div>}
+    </div>}
+    {log.length>0&&<div style={{marginTop:10}}>
+      <div style={{fontSize:10,fontWeight:500,color:"var(--color-text-secondary)",marginBottom:4,textTransform:"uppercase",letterSpacing:"0.06em"}}>Upload Log</div>
+      <div style={{maxHeight:120,overflowY:"auto"}}>
+        {log.map((e,i)=><div key={i} style={{display:"flex",gap:10,fontSize:10,padding:"3px 0",borderBottom:"0.5px solid var(--color-border-tertiary)",color:i===0?"var(--color-text-primary)":"var(--color-text-secondary)"}}>
+          <span style={{color:"var(--color-text-tertiary)",flexShrink:0}}>{e.ts}</span>
+          <span style={{color:"#10b981",flexShrink:0}}>✓ {e.matched}p</span>
+          <span style={{flexShrink:0}}>{e.series} G{e.game}</span>
+          {e.unmatched.length>0&&<span style={{color:"#f59e0b"}}>⚠ {e.unmatched.join(", ")}</span>}
+        </div>)}
+      </div>
     </div>}
   </div>;
 }
