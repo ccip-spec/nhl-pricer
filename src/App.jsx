@@ -73,6 +73,13 @@ function toAmer(p) {
   return Math.round(((1 - p) / p) * 100);
 }
 function toDec(p) { return p <= 0.002 ? 501 : Math.min(501, +(1 / p).toFixed(2)); }
+// Stats that scale with game total goals (offense-linked).
+// Defensive stats (hits/blk/tk/pim/give) don't scale with scoring environment.
+const SCORING_STATS = new Set(["g","a","pts","sog"]);
+function goalScaleFor(stat, scale) {
+  return SCORING_STATS.has(stat) ? (scale || 1) : 1;
+}
+
 function applyMargin(trueProbs, or) {
   const s = trueProbs.reduce((a, b) => a + b, 0);
   return trueProbs.map(p => s > 0 ? (p / s) * or : 0);
@@ -147,8 +154,25 @@ function computeSeriesGoalsLambda(effG) {
   return Math.max(0.01, lambda);
 }
 
-// Series shutouts: Poisson(shutoutRate * expGames)
-function computeShutoutLambda(shutoutRate, expGames) { return Math.max(0.0001, shutoutRate * expGames); }
+// Series shutouts (v17): count observed shutouts in played games + project rate×remaining.
+// A shutout = one team scored 0 in a game. So a game can produce 0 or 1 shutouts.
+// `observedShutouts` = count of played games where homeScore=0 or awayScore=0.
+// `remainingExpGames` = expG - games already played.
+// lambda = observedShutouts + rate × remainingExpGames.
+function computeShutoutLambda(shutoutRate, expG, effG) {
+  let observedShutouts = 0;
+  let playedGames = 0;
+  if (effG) {
+    for (const g of effG) {
+      if (g.result) {
+        playedGames++;
+        if (g.homeScore===0 || g.awayScore===0) observedShutouts++;
+      }
+    }
+  }
+  const remainingExpGames = Math.max(0, expG - playedGames);
+  return Math.max(0.0001, observedShutouts + shutoutRate * remainingExpGames);
+}
 
 // OT games in series: enumerate paths, P(k OT games) using Poisson per game
 function computeOTSeriesDist(effG, outcomes, kMax=8) {
@@ -238,8 +262,14 @@ function computeTeamGoalsLambda(effG, side) {
     if (gi>=7) return;
     const g = effG[gi];
     const total = g.expTotal || 5.5;
-    // home goals ≈ total * winPct (home scoring proxy), away = total * (1-winPct)
-    const contribution = side==="home" ? total * g.winPct : total * (1-g.winPct);
+    // v17: for games already played with scores entered, use the ACTUAL team goals from the box score
+    // instead of the projected expTotal × winPct. Falls back to projected if scores not entered.
+    const hasActual = g.result && g.homeScore!=null && g.awayScore!=null;
+    const actualContribution = hasActual
+      ? (side==="home" ? Number(g.homeScore) : Number(g.awayScore))
+      : null;
+    const projectedContribution = side==="home" ? total * g.winPct : total * (1-g.winPct);
+    const contribution = actualContribution!=null ? actualContribution : projectedContribution;
     if (g.result==="home") rec(gi+1, hw+1, aw, prob, goalsAcc+contribution);
     else if (g.result==="away") rec(gi+1, hw, aw+1, prob, goalsAcc+contribution);
     else { rec(gi+1, hw+1, aw, prob*g.winPct, goalsAcc+contribution); rec(gi+1, hw, aw+1, prob*(1-g.winPct), goalsAcc+contribution); }
@@ -1082,6 +1112,31 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
   const tot=len4+len5+len6+len7;
   const expG=tot>0?(4*len4+5*len5+6*len6+7*len7)/tot:5.82;
 
+  // v16 fix: compute per-game effective weight for each unplayed game.
+  // A game contributes to player rate prop only to the extent it's played AND scales with its own expTotal.
+  // Formula per game g: weight(g) = P(g is played) × (expTotal[g] / BASELINE_GAME_GOALS)
+  // "gameEquivalents" = sum of these weights across unplayed games.
+  // For a vanilla 5.8g/game series, gameEquivalents === expGamesRemaining.
+  // Boosting G3 from 6.1 to 9.1 adds (3.0/5.8)*P(G3 played) ≈ 0.52 game-equivalents → player lambdas jump ~10%.
+  const BASELINE_GAME_GOALS = 5.8;
+  // P(game g is played), 1-indexed in gPlayed[1..7]
+  const pGamePlayed = [null,1,1,1,1, 1-len4, len6+len7, len7];
+  // Override: if game has a result already, it's not in future lambda (already locked via pGP), weight 0
+  let gameEquivalents = 0;
+  for(let i=0;i<7;i++){
+    const g = effG[i];
+    if(g.result) continue; // already played, stats are in pGP/pG
+    const p = pGamePlayed[i+1] ?? 0;
+    const scale = (g.expTotal || BASELINE_GAME_GOALS) / BASELINE_GAME_GOALS;
+    gameEquivalents += p * scale;
+  }
+  // Legacy single-number scale kept for rollbackability, but real weight is gameEquivalents
+  const seriesGameGoalMean = (() => {
+    const unplayed = effG.filter(g=>!g.result);
+    return unplayed.length>0 ? unplayed.reduce((a,g)=>a+(g.expTotal||BASELINE_GAME_GOALS),0)/unplayed.length : BASELINE_GAME_GOALS;
+  })();
+  const gameGoalScale = seriesGameGoalMean / BASELINE_GAME_GOALS;
+
   const lenAdj=applyMargin([len4,len5,len6,len7],margins.length);
 
   const e8=useMemo(()=>{
@@ -1149,7 +1204,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
   // Shutouts O/U
   const shutoutMkt=useMemo(()=>{
     const rate=s.shutoutRate??0.08;
-    const lambda=computeShutoutLambda(rate,expG);
+    const lambda=computeShutoutLambda(rate,expG,effG);
     const lines=[0.5,1.5,2.5,3.5];
     return {lambda,lines:ouTable(lambda,lines).map(r=>{const[ao,au]=applyMargin([r.pOver,r.pUnder],margins.shutouts);return{...r,ao,au};})};
   },[effKey,margins.shutouts,s.shutoutRate,expG]);
@@ -1240,12 +1295,16 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
                 {[
                   ["G",""],
                   ["Host","Which team hosts this game (2-2-1-1-1 rotation based on series home team)"],
-                  ["Host Win%","Win probability for the host team of THIS game (NOT the series home team). For a road game, this is the road team's win probability at home."],
+                  ["","Series HOME team's win probability for this game (ALWAYS from the series-home-team's perspective, regardless of who hosts). For games hosted by the away team, this should typically be lower to reflect home-ice advantage."],
                   ["Total","Expected total goals for this game"],
                   ["OT%","P(game goes to OT). NHL playoff avg ~22%. Affects OT markets only, not series outcome."],
                   ["Score",""],
                   ["Result",""]
-                ].map(([h,tip])=><th key={h} style={{padding:"3px 3px",color:"var(--color-text-tertiary)",fontWeight:500,textAlign:"left",fontSize:9,cursor:tip?"help":"default"}} title={tip||undefined}>{h}</th>)}
+                ].map(([h,tip],idx)=>{
+                  // Dynamic label for the win% column based on series home team
+                  const label = idx===2 ? ((s.homeAbbr||"H")+" Win%") : h;
+                  return <th key={idx} style={{padding:"3px 3px",color:"var(--color-text-tertiary)",fontWeight:500,textAlign:"left",fontSize:9,cursor:tip?"help":"default"}} title={tip||undefined}>{label}</th>;
+                })}
               </tr></thead>
               <tbody>{effG.map((g,i)=>{
                 const isHome=HOME_PATTERN[i+1];
@@ -1544,11 +1603,11 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             </Card>;
           })()}
 
-          {mkt==="props"&&<PropsPanel s={s} expG={expG} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark} mode="ou"/>}
-          {mkt==="binary"&&<PropsPanel s={s} expG={expG} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark} mode="binary"/>}
+          {mkt==="props"&&<PropsPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark} mode="ou"/>}
+          {mkt==="binary"&&<PropsPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark} mode="binary"/>}
           {mkt==="goaliesaves"&&<GoalieSavesPanel s={s} expG={expG} goalies={goalies} margins={margins} showTrue={showTrue} dark={dark}/>}
-          {mkt==="playerdetail"&&<PlayerDetailPanel s={s} expG={expG} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark}/>}
-          {mkt==="seriesleader"&&<SeriesLeaderPanel s={s} expG={expG} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark}/>}
+          {mkt==="playerdetail"&&<PlayerDetailPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark}/>}
+          {mkt==="seriesleader"&&<SeriesLeaderPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark}/>}
         </div>
       </div>
     </div>
@@ -1556,7 +1615,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
 }
 
 // ─── PROPS PANEL (shared O/U + Binary) ───────────────────────────────────────
-function PropsPanel({s,expG,players,globals,margins,showTrue,dark,mode}) {
+function PropsPanel({s,expG,gameGoalScale=1,gameEquivalents,players,globals,margins,showTrue,dark,mode}) {
   const [stat,setStat]=useState("g");
   const [line,setLine]=useState(mode==="binary"?1:0.5);
   const STATS=[
@@ -1584,10 +1643,14 @@ function PropsPanel({s,expG,players,globals,margins,showTrue,dark,mode}) {
       const actKey=stat==="tk"?"pTK":stat==="pim"?"pPIM":stat==="give"?"pGIVE":stat==="tsa"?"pTSA":"p"+stat.toUpperCase();
       // v13: shrink rate for <20 GP; scratched already filtered out above
       const shrunk=shrinkRate(p[pgKey],p.gp,stat);
-      const rr=shrunk*rm*rateDiscount;
+      const rm_rate_disc = shrunk*rm*rateDiscount;
+      const remainingGames = Math.max(0, expG - (p.pGP||0));
       const actual=p[actKey]||0;
-      // λ = stats-already-recorded + rate × remaining games
-      const lam=Math.max(0.0001,actual+rr*Math.max(0,expG-(p.pGP||0)));
+      // v16: for scoring stats, use per-game probability-weighted goal equivalents (respects per-game expTotal);
+      // for defensive stats, fall back to flat expected-games-remaining.
+      const gEq = (gameEquivalents!=null && SCORING_STATS.has(stat)) ? gameEquivalents : remainingGames;
+      const futureLam = Math.max(0.0001, rm_rate_disc*gEq);
+      const lam=Math.max(0.0001,actual+futureLam);
       // v13 fix: For binary (1+), bump the line above what they already have.
       // If Martone has 1G already and line is "1+", they've hit; real question becomes 2+.
       // This way we compute a proper Poisson probability for the remaining window, not pOver=1.
@@ -1596,13 +1659,12 @@ function PropsPanel({s,expG,players,globals,margins,showTrue,dark,mode}) {
       // Probability of reaching effectiveLine from current actual using remaining-games lambda only
       // (actual stats are already locked in; we need P(future additions >= (effectiveLine - actual)))
       const needMore = Math.max(0, lineInt - actual);
-      const futureLam = Math.max(0.0001, rr*Math.max(0,expG-(p.pGP||0)));
       const pOver = needMore===0 ? 1 : 1-nbCDF(needMore-1, futureLam, dispersion);
       // Apply margin only to uncertain events; pOver=1 stays at 1 and No = 0
       const [adjO,adjU]= pOver>=0.9999 ? [1,0] : pOver<=0.0001 ? [0,1] : applyMargin([pOver,1-pOver],statMargin);
       return {...p,lam,actual,effectiveLine,needMore,pYes:pOver,adjYes:adjO,adjNo:adjU};
     }).sort((a,b)=>b.adjYes-a.adjYes);
-  },[pool,stat,line,globals,expG,statMargin]);
+  },[pool,stat,line,globals,expG,statMargin,gameEquivalents,mode]);
 
   if(!s.homeAbbr||!s.awayAbbr) return <Card><div style={{color:"var(--color-text-secondary)",fontSize:12}}>Set team abbreviations to load props</div></Card>;
 
@@ -1713,7 +1775,7 @@ function GoalieSavesPanel({s,expG,goalies,margins,showTrue,dark}) {
 // ─── PLAYER O/U DETAIL PANEL ─────────────────────────────────────────────────
 // Full multi-line O/U table for a single selected player across all stats.
 // Matches Player O-U Detail sheet: shows every half-integer line from 0.5 up.
-function PlayerDetailPanel({s,expG,players,globals,margins,showTrue,dark}) {
+function PlayerDetailPanel({s,expG,gameGoalScale=1,gameEquivalents,players,globals,margins,showTrue,dark}) {
   const [selectedPlayer,setSelectedPlayer] = useState("");
   const [stat,setStat] = useState("g");
   const STATS=[
@@ -1740,8 +1802,10 @@ function PlayerDetailPanel({s,expG,players,globals,margins,showTrue,dark}) {
     const rm = roleMultiplier(player.lineRole);
     const pgKey = stat==="tk"?"take_pg":stat==="pim"?"pim_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
     const actKey = stat==="tk"?"pTK":stat==="pim"?"pPIM":stat==="give"?"pGIVE":stat==="tsa"?"pTSA":"p"+stat.toUpperCase();
-    const rr = shrinkRate(player[pgKey],player.gp,stat)*rm*rateDiscount;
-    const lam = Math.max(0.0001,(player[actKey]||0)+rr*Math.max(0,expG-(player.pGP||0)));
+    const rr_base = shrinkRate(player[pgKey],player.gp,stat)*rm*rateDiscount;
+    const remainingGames = Math.max(0, expG - (player.pGP||0));
+    const gEq = (gameEquivalents!=null && SCORING_STATS.has(stat)) ? gameEquivalents : remainingGames;
+    const lam = Math.max(0.0001,(player[actKey]||0)+rr_base*gEq);
     // Build line table: 0.5 through ceil(lam*2)+2, step 0.5
     const maxLine = Math.ceil(lam)+4;
     const lineArr = [];
@@ -1756,7 +1820,7 @@ function PlayerDetailPanel({s,expG,players,globals,margins,showTrue,dark}) {
       lineArr.push({line:l,pOver,pUnder,ao,au,lam,actual,need});
     }
     return {lam, rows: lineArr};
-  },[player,stat,expG,globals,or]);
+  },[player,stat,expG,globals,or,gameEquivalents]);
 
   if(!s.homeAbbr||!s.awayAbbr) return <Card><div style={{color:"var(--color-text-secondary)",fontSize:12}}>Set team abbreviations first</div></Card>;
 
@@ -1828,7 +1892,7 @@ const SERIES_LEADER_STATS = [
   {id:"pim",  label:"PIM",       temp:1.5, kMax:25},
 ];
 
-function SeriesLeaderPanel({s,expG,players,globals,margins,showTrue,dark}) {
+function SeriesLeaderPanel({s,expG,gameGoalScale=1,gameEquivalents,players,globals,margins,showTrue,dark}) {
   const [stat,setStat]=useState("g");
   const [customTemps,setCustomTemps]=useState({});
   const meta=SERIES_LEADER_STATS.find(x=>x.id===stat)||SERIES_LEADER_STATS[0];
@@ -1848,8 +1912,10 @@ function SeriesLeaderPanel({s,expG,players,globals,margins,showTrue,dark}) {
       const rm=roleMultiplier(p.lineRole);
       const pgKey=stat==="tk"?"take_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat==="pim"?"pim_pg":stat+"_pg";
       const actKey=stat==="tk"?"pTK":stat==="give"?"pGIVE":stat==="tsa"?"pTSA":stat==="pim"?"pPIM":"p"+stat.toUpperCase();
-      const rr=shrinkRate(p[pgKey],p.gp,stat)*rm*rateDiscount;
-      return Math.max(0.0001,(p[actKey]||0)+rr*Math.max(0,expG-(p.pGP||0)));
+      const rr_base=shrinkRate(p[pgKey],p.gp,stat)*rm*rateDiscount;
+      const remainingGames = Math.max(0, expG - (p.pGP||0));
+      const gEq = (gameEquivalents!=null && SCORING_STATS.has(stat)) ? gameEquivalents : remainingGames;
+      return Math.max(0.0001,(p[actKey]||0)+rr_base*gEq);
     });
     const raw=computeLeaderProbs(lambdas,meta.kMax);
     // Apply per-stat temperature (power factor) then normalize with overround
@@ -1858,7 +1924,7 @@ function SeriesLeaderPanel({s,expG,players,globals,margins,showTrue,dark}) {
     const adj=powered.map(p=>psum>0?(p/psum)*or:0);
     return pool.map((p,i)=>({...p,lambda:lambdas[i],trueProb:raw[i],adjProb:adj[i]}))
       .sort((a,b)=>b.adjProb-a.adjProb);
-  },[pool,stat,expG,globals,temp,or,meta.kMax]);
+  },[pool,stat,expG,globals,temp,or,meta.kMax,gameEquivalents]);
 
   if(!s.homeAbbr||!s.awayAbbr) return <Card><div style={{color:"var(--color-text-secondary)",fontSize:12}}>Set team abbreviations to load series leaders</div></Card>;
 
@@ -2491,6 +2557,36 @@ function GameStatImporter({players,setPlayers,allSeries,setAllSeries}) {
     }
   }
 
+  // v15 nuclear option: wipe all playoff stats for players on the two teams in this series,
+  // clear this series' imports log, clear all game scores/results for this series.
+  // Recovers from the "v13 legacy duplicate" scenario where undo isn't available.
+  function handleResetSeries(){
+    if(!s||!s.homeAbbr||!s.awayAbbr){return;}
+    const seriesTeams = new Set([s.homeAbbr, s.awayAbbr]);
+    const impactedPlayerCount = (players||[]).filter(p=>seriesTeams.has(p.team)&&(p.pGP||0)>0).length;
+    const confirmMsg = `Nuclear reset for ${s.homeAbbr} vs ${s.awayAbbr}:\n\n` +
+      `• Wipe pGP/pG/pA/pSOG/pPIM for all ${s.homeAbbr}+${s.awayAbbr} players (${impactedPlayerCount} affected)\n` +
+      `• Clear ${seriesImports.length} import log entries\n` +
+      `• Clear all game scores/results for this series\n\n` +
+      `Proceed?`;
+    if(!window.confirm(confirmMsg)){return;}
+
+    setPlayers(prev=>prev.map(p=>seriesTeams.has(p.team)
+      ? {...p, pGP:0, pG:0, pA:0, pSOG:0, pPIM:0, pHIT:0, pBLK:0, pTK:0, pGIVE:0, pTSA:0}
+      : p));
+    setImports(prev=>prev.filter(x=>x.seriesIdx!==seriesIdx));
+    if(setAllSeries){
+      setAllSeries(prev=>{
+        const u=[...prev];
+        if(!u[seriesIdx])return prev;
+        const games=u[seriesIdx].games.map(g=>({...g, homeScore:null, awayScore:null, result:null}));
+        u[seriesIdx]={...u[seriesIdx], games};
+        return u;
+      });
+    }
+    setResult(null); setErr("");
+  }
+
   // Per-series game matrix: [g1..g7] -> list of uploads for current seriesIdx
   const gameMatrix = useMemo(()=>{
     const m={};
@@ -2529,21 +2625,49 @@ function GameStatImporter({players,setPlayers,allSeries,setAllSeries}) {
       </div>
     </div>
 
-    {/* Per-game status grid */}
-    {s&&s.homeAbbr&&s.awayAbbr&&<div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:4,marginBottom:10}}>
-      {[1,2,3,4,5,6,7].map(g=>{
-        const gm=gameMatrix[g];
-        const hasHome=!!gm.home, hasAway=!!gm.away;
-        const complete=hasHome&&hasAway;
-        const partial=hasHome||hasAway;
-        const bg=complete?"rgba(16,185,129,0.15)":partial?"rgba(245,158,11,0.12)":"var(--color-background-secondary)";
-        const color=complete?"#10b981":partial?"#f59e0b":"var(--color-text-tertiary)";
-        const label=complete?"✓✓":partial?(hasHome?`${s.homeAbbr} ✓`:`${s.awayAbbr} ✓`):"—";
-        return <div key={g} style={{padding:"4px 2px",textAlign:"center",background:bg,borderRadius:3,fontSize:9,color,fontWeight:500,border:"0.5px solid var(--color-border-tertiary)"}}>
-          <div style={{fontSize:8,color:"var(--color-text-tertiary)"}}>G{g}</div>
-          <div>{label}</div>
-        </div>;
-      })}
+    {/* Per-game status grid — shows score from series data + running series count */}
+    {s&&s.homeAbbr&&s.awayAbbr&&<div style={{marginBottom:10}}>
+      {(() => {
+        // Running tally of wins to display "DAL 1-0", "Tied 1-1", etc.
+        let hw=0, aw=0;
+        const cells=[];
+        for(let g=1; g<=7; g++){
+          const gm=gameMatrix[g];
+          const hasHome=!!gm.home, hasAway=!!gm.away;
+          const complete=hasHome&&hasAway;
+          const partial=hasHome||hasAway;
+          // Score comes from allSeries[seriesIdx].games[g-1]
+          const gameData = s.games?.[g-1] || {};
+          const hs = gameData.homeScore, as = gameData.awayScore;
+          const hasScore = typeof hs==="number" && typeof as==="number";
+          // Winner attribution (only if scores + complete)
+          if(hasScore){
+            if(hs>as) hw++;
+            else if(as>hs) aw++;
+          }
+          const runningLabel = hasScore
+            ? (hw===aw ? `Tied ${hw}-${aw}` : hw>aw ? `${s.homeAbbr} ${hw}-${aw}` : `${s.awayAbbr} ${aw}-${hw}`)
+            : null;
+          const scoreLabel = hasScore ? `${s.homeAbbr} ${hs}-${as} ${s.awayAbbr}` : null;
+          const bg=complete?"rgba(16,185,129,0.12)":partial?"rgba(245,158,11,0.1)":"var(--color-background-secondary)";
+          const borderCol=complete?"rgba(16,185,129,0.3)":partial?"rgba(245,158,11,0.25)":"var(--color-border-tertiary)";
+          const color=complete?"#10b981":partial?"#f59e0b":"var(--color-text-tertiary)";
+          const uploadLabel = complete ? "✓ both teams" : partial ? (hasHome?`${s.homeAbbr} only`:`${s.awayAbbr} only`) : "not uploaded";
+          cells.push(
+            <div key={g} style={{padding:"5px 4px",textAlign:"center",background:bg,borderRadius:3,fontSize:9,border:`0.5px solid ${borderCol}`,minHeight:54}}>
+              <div style={{fontSize:8,color:"var(--color-text-tertiary)",marginBottom:2}}>G{g}</div>
+              {hasScore
+                ? <>
+                    <div style={{fontSize:10,fontWeight:500,color:"var(--color-text-primary)",fontFamily:"var(--font-mono)"}}>{hs}-{as}</div>
+                    <div style={{fontSize:8,color:"var(--color-text-secondary)",marginTop:1}}>{runningLabel}</div>
+                  </>
+                : <div style={{fontSize:9,color,fontWeight:500,marginTop:6}}>{uploadLabel==="not uploaded"?"—":uploadLabel}</div>
+              }
+            </div>
+          );
+        }
+        return <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:4}}>{cells}</div>;
+      })()}
     </div>}
 
     <div style={{fontSize:10,color:"var(--color-text-tertiary)",marginBottom:8}}>
@@ -2586,11 +2710,17 @@ function GameStatImporter({players,setPlayers,allSeries,setAllSeries}) {
       </div>}
     </div>}
 
-    {seriesImports.length>0&&<div style={{marginTop:12}}>
-      <div style={{fontSize:10,fontWeight:500,color:"var(--color-text-secondary)",marginBottom:4,textTransform:"uppercase",letterSpacing:"0.06em"}}>
-        Imports for this series ({seriesImports.length})
+    {s&&s.homeAbbr&&s.awayAbbr&&<div style={{marginTop:12}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+        <div style={{fontSize:10,fontWeight:500,color:"var(--color-text-secondary)",textTransform:"uppercase",letterSpacing:"0.06em"}}>
+          Imports for this series {seriesImports.length>0?`(${seriesImports.length})`:""}
+        </div>
+        <button onClick={handleResetSeries}
+          style={{marginLeft:"auto",padding:"3px 9px",fontSize:9,borderRadius:3,border:"0.5px solid rgba(239,68,68,0.4)",background:"rgba(239,68,68,0.12)",color:"#ef4444",cursor:"pointer",fontWeight:500}}>
+          ⚠ Reset Series
+        </button>
       </div>
-      <div style={{maxHeight:180,overflowY:"auto",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)"}}>
+      {seriesImports.length>0 ? <div style={{maxHeight:180,overflowY:"auto",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)"}}>
         {seriesImports.map((e)=>(
           <div key={e.id} style={{display:"flex",gap:8,fontSize:10,padding:"4px 8px",borderBottom:"0.5px solid var(--color-border-tertiary)",alignItems:"center"}}>
             <span style={{color:"var(--color-text-tertiary)",flexShrink:0,fontSize:9}}>{e.ts}</span>
@@ -2604,7 +2734,7 @@ function GameStatImporter({players,setPlayers,allSeries,setAllSeries}) {
             </button>
           </div>
         ))}
-      </div>
+      </div> : <div style={{fontSize:10,color:"var(--color-text-tertiary)",padding:"6px 8px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)"}}>No imports yet. If prior uploads left phantom data, use Reset Series to wipe this matchup.</div>}
     </div>}
   </div>;
 }
