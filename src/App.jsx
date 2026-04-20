@@ -1349,7 +1349,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
                 </label>
                 <span style={{marginLeft:"auto",color:"var(--color-text-tertiary)"}}>Exp {expG.toFixed(2)}g</span>
               </div>
-              <div style={{marginTop:4,fontSize:9,color:"var(--color-text-tertiary)"}}>H:{s.games.filter(g=>g.result==="home").length} A:{s.games.filter(g=>g.result==="away").length} · TtlGoals λ {totalGoalsMkt.lambda.toFixed(1)} · Shut λ {shutoutMkt.lambda.toFixed(2)}</div>
+              <div style={{marginTop:4,fontSize:9,color:"var(--color-text-tertiary)"}}>H:{s.games.filter(g=>g.result==="home").length} A:{s.games.filter(g=>g.result==="away").length} · TtlGoals λ {totalGoalsMkt.lambda.toFixed(1)} · Shut λ {shutoutMkt.lambda.toFixed(2)} · gEq {gameEquivalents.toFixed(2)}</div>
             </div>
           </Card>
           <Card>
