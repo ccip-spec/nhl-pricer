@@ -83,8 +83,8 @@ function applyMargin(trueProbs, or) {
 // Only applies to SMALL samples (gp < 20). Veterans with 20+ GP use their raw rate.
 // Scratched players are excluded upstream by roleMultiplier=0, so no need to check here.
 // shrunkRate = (gp*rawRate + k*prior) / (gp + k), with k=20 game-equivalent prior weight.
-// stat = "g"|"a"|"pts"|"sog"|"hit"|"blk"|"tk"|"pim"|"tsa"|"give"
-const PRIOR_RATES = {g:0.1, a:0.18, pts:0.28, sog:1.3, hit:1.0, blk:0.7, tk:0.4, pim:0.3, tsa:3.0, give:0.4};
+// stat = "g"|"a"|"pts"|"sog"|"hit"|"blk"|"tk"|"pim"|"give"
+const PRIOR_RATES = {g:0.1, a:0.18, pts:0.28, sog:1.3, hit:1.0, blk:0.7, tk:0.4, pim:0.3, give:0.4};
 const SHRINK_K = 20;
 const SHRINK_THRESHOLD_GP = 20;
 function shrinkRate(rawRate, gp, stat) {
@@ -274,7 +274,7 @@ const DEFAULT_MARGINS = {
   teamMostGoals:1.05, teamGoals:1.05,
   propsGoals:1.08, propsAssists:1.05, propsPoints:1.05, propsSOG:1.05,
   propsHits:1.05, propsBlocks:1.05, propsTakeaways:1.05, propsPIM:1.05,
-  propsGiveaways:1.05, propsTSA:1.05,
+  propsGiveaways:1.05,
   seriesLeader:1.15, leaderR1:1.15, leaderFull:1.15,
 };
 const DEFAULT_GLOBALS = { overroundR1:1.15, overroundFull:1.15, powerFactor:1.0, rateDiscount:0.85, dispersion:1.2, seriesLeaderPF:0.85 };
@@ -292,7 +292,7 @@ function parseHR(text) {
     G:["G","Goals"], A:["A","Assists"], SOG:["SOG","S","Shots"],
     HIT:["HIT","H","Hits"], BLK:["BLK","B","Blocked","BS"],
     TK:["TK","Takeaways","Take","TAKE"], PIM:["PIM","PenMin"],
-    TSA:["TSA","SA","ShotAtt","Attempts"], GV:["GV","Give","Giveaways","GIVE"] };
+    GV:["GV","Give","Giveaways","GIVE"] };
   const cm = {};
   for (const [k,alts] of Object.entries(al)) {
     for (const a of alts) { const idx=headers.findIndex(h=>h.toLowerCase()===a.toLowerCase()); if(idx!==-1){cm[k]=idx;break;} }
@@ -309,7 +309,6 @@ function parseHR(text) {
       blk:cm.BLK!==undefined?parseInt(c[cm.BLK])||0:0,
       tk:cm.TK!==undefined?parseInt(c[cm.TK])||0:0,
       pim:cm.PIM!==undefined?parseInt(c[cm.PIM])||0:0,
-      tsa:cm.TSA!==undefined?parseInt(c[cm.TSA])||0:0,
       give:cm.GV!==undefined?parseInt(c[cm.GV])||0:0 });
   }
   return {players};
@@ -497,7 +496,7 @@ export default function App() {
   const STATS=[
     {id:"g",label:"Goals"},{id:"a",label:"Assists"},{id:"pts",label:"Points"},
     {id:"sog",label:"SOG"},{id:"hit",label:"Hits"},{id:"blk",label:"Blocks"},
-    {id:"tk",label:"TK"},{id:"tsa",label:"TSA"},{id:"give",label:"GV"},
+    {id:"tk",label:"TK"},{id:"give",label:"GV"},
   ];
   const NAV=[{id:"leaders",l:"Leader Markets"},{id:"series",l:"Series Pricer"},{id:"compare",l:"Line Compare"},{id:"upload",l:"Upload Stats"},{id:"roles",l:"Roles"},{id:"settings",l:"Settings"}];
   const [gameModal,setGameModal] = useState(null);
@@ -531,7 +530,7 @@ export default function App() {
           players={players} goalies={goalies} margins={margins} setMargins={setMargins}
           globals={globals} showTrue={showTrue} dark={dark} onEnterGame={setGameModal}/>}
         {tab==="upload"&&<UploadTab players={players} setPlayers={setP} goalies={goalies} setGoalies={setG}
-          exportState={exportState} importState={importState} syncStatus={syncStatus} allSeries={allSeries} dark={dark}/>}
+          exportState={exportState} importState={importState} syncStatus={syncStatus} allSeries={allSeries} setAllSeries={setSeries} dark={dark}/>}
         {tab==="compare"&&<CompareTab leaderMarket={leaderMarket} STATS={STATS} lStat={lStat} setLStat={setLStat} lScope={lScope} setLScope={setLScope} dark={dark}/>}
         {tab==="roles"&&<RolesTab players={players} setPlayers={setP} dark={dark}/>}
         {tab==="settings"&&<SettingsTab globals={globals} setGlobals={setGlobals}
@@ -1565,7 +1564,7 @@ function PropsPanel({s,expG,players,globals,margins,showTrue,dark,mode}) {
     {id:"pts",label:"Points",mk:"propsPoints"},{id:"sog",label:"SOG",mk:"propsSOG"},
     {id:"hit",label:"Hits",mk:"propsHits"},{id:"blk",label:"Blocks",mk:"propsBlocks"},
     {id:"tk",label:"Takeaways",mk:"propsTakeaways"},{id:"pim",label:"PIM",mk:"propsPIM"},
-    {id:"give",label:"Giveaways",mk:"propsGiveaways"},{id:"tsa",label:"TSA",mk:"propsTSA"},
+    {id:"give",label:"Giveaways",mk:"propsGiveaways"},
   ];
   const statMeta=STATS.find(x=>x.id===stat)||STATS[0];
   const statMargin=margins[statMeta.mk]||1.05;
@@ -1622,10 +1621,13 @@ function PropsPanel({s,expG,players,globals,margins,showTrue,dark,mode}) {
     <div style={{overflowX:"auto"}}>
       <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
         <TH cols={["#","Player","Team","Role","Now","Line","λ",...(showTrue?["True%"]:[]),"Adj%","Yes Odds","No Odds"]}/>
-        <tbody>{results.map((p,i)=>(
-          <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)")}}>
+        <tbody>{results.map((p,i)=>{
+          const settled = mode==="binary" && p.actual>=line;
+          const rowOpacity = settled ? 0.45 : 1;
+          return (
+          <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:settled?(dark?"rgba(100,116,139,0.08)":"rgba(100,116,139,0.05)"):i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)"),opacity:rowOpacity}}>
             <td style={{padding:"3px 8px",color:"var(--color-text-tertiary)",fontSize:9}}>{i+1}</td>
-            <td style={{padding:"3px 8px",fontWeight:i<3?500:400}}>{p.name}</td>
+            <td style={{padding:"3px 8px",fontWeight:settled?400:(i<3?500:400),textDecoration:settled?"line-through":"none"}}>{p.name}{settled?<span style={{marginLeft:6,fontSize:9,color:"#64748b",fontWeight:500,textDecoration:"none"}}>✓ settled</span>:""}</td>
             <td style={{padding:"3px 8px",textAlign:"right"}}><span style={{fontSize:9,padding:"1px 4px",borderRadius:2,background:"rgba(59,130,246,0.12)",color:"#60a5fa"}}>{p.team}</span></td>
             <td style={{padding:"3px 8px",textAlign:"right"}}><RoleBadge role={p.lineRole}/></td>
             <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,fontWeight:p.actual>0?500:400,color:p.actual>0?"#4ade80":"var(--color-text-tertiary)"}}>{p.actual||0}</td>
@@ -1633,10 +1635,11 @@ function PropsPanel({s,expG,players,globals,margins,showTrue,dark,mode}) {
             <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{p.lam.toFixed(2)}</td>
             {showTrue&&<td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(p.pYes*100).toFixed(1)}%</td>}
             <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{(p.adjYes*100).toFixed(1)}%</td>
-            <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500,color:p.adjYes>=0.5?"#4ade80":"var(--color-text-primary)"}}>{fmt(p.adjYes)}</td>
-            <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{fmt(p.adjNo)}</td>
+            <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500,color:settled?"var(--color-text-tertiary)":(p.adjYes>=0.5?"#4ade80":"var(--color-text-primary)")}}>{settled?"—":fmt(p.adjYes)}</td>
+            <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{settled?"—":fmt(p.adjNo)}</td>
           </tr>
-        ))}</tbody>
+          );
+        })}</tbody>
       </table>
     </div>
   </Card>;
@@ -1718,7 +1721,7 @@ function PlayerDetailPanel({s,expG,players,globals,margins,showTrue,dark}) {
     {id:"pts",label:"Points",mk:"propsPoints"},{id:"sog",label:"SOG",mk:"propsSOG"},
     {id:"hit",label:"Hits",mk:"propsHits"},{id:"blk",label:"Blocks",mk:"propsBlocks"},
     {id:"tk",label:"Takeaways",mk:"propsTakeaways"},{id:"pim",label:"PIM",mk:"propsPIM"},
-    {id:"give",label:"Giveaways",mk:"propsGiveaways"},{id:"tsa",label:"TSA",mk:"propsTSA"},
+    {id:"give",label:"Giveaways",mk:"propsGiveaways"},
   ];
   const statMeta = STATS.find(x=>x.id===stat)||STATS[0];
   const or = margins[statMeta.mk]||1.05;
@@ -1823,7 +1826,6 @@ const SERIES_LEADER_STATS = [
   {id:"tk",   label:"TK",        temp:1.5, kMax:20},
   {id:"give", label:"GV",        temp:1.5, kMax:30},
   {id:"pim",  label:"PIM",       temp:1.5, kMax:25},
-  {id:"tsa",  label:"TSA",       temp:2.0, kMax:60},
 ];
 
 function SeriesLeaderPanel({s,expG,players,globals,margins,showTrue,dark}) {
@@ -2300,19 +2302,31 @@ function ExportImportPanel({exportState,importState}) {
 }
 
 // ─── GAME STAT IMPORTER ──────────────────────────────────────────────────────
-// Paste an HR box score for one team + one game → increments player playoff totals
-function GameStatImporter({players,setPlayers,allSeries}) {
+// v15: full rewrite
+// - Tracks each upload as {seriesIdx,game,team,hash,delta} in localStorage
+// - Blocks exact-duplicate pastes (same hash for same series+game+team)
+// - "Undo last" button reverses the most recent import
+// - Auto-pushes scores into Series Pricer game rows once both teams uploaded
+// - Clear per-game status grid: which games have 0/1/2 teams uploaded
+function GameStatImporter({players,setPlayers,allSeries,setAllSeries}) {
   const [seriesIdx,setSeriesIdx]=useState(0);
   const [gameNum,setGameNum]=useState(1);
   const [paste,setPaste]=useState("");
   const [result,setResult]=useState(null);
   const [err,setErr]=useState("");
-  const [log,setLog]=useState([]); // upload history
+
+  // Imports log, persisted to localStorage so it survives refreshes.
+  // Each entry: {id,ts,seriesIdx,seriesLabel,game,teamAbbr,hash,matched,unmatched,delta,goalsFor}
+  // `delta` = array of {name,team,pG,pA,pSOG,pPIM,pGP} added by THIS import (for undo)
+  const [imports,setImports] = useState(()=>{try{const s=localStorage.getItem("nhl_imports");return s?JSON.parse(s):[];}catch{return[];}});
+  useEffect(()=>{try{localStorage.setItem("nhl_imports",JSON.stringify(imports));}catch{}},[imports]);
 
   const s=allSeries?.[seriesIdx];
-  const seriesLabel=(sr)=>sr.homeAbbr&&sr.awayAbbr?`${sr.homeAbbr} vs ${sr.awayAbbr}`:`Series ${sr._idx+1}`;
 
-  // Parse HR skater box score — tab-separated, detects column positions
+  // Simple stable hash of pasted text (dedup fingerprint)
+  function hashStr(str){let h=0;for(let i=0;i<str.length;i++){h=((h<<5)-h)+str.charCodeAt(i);h|=0;}return (h>>>0).toString(36);}
+
+  // Parse HR skater box score
   function parseHRGame(text){
     const lines=text.trim().split("\n");
     let hi=-1,headers=[];
@@ -2321,7 +2335,6 @@ function GameStatImporter({players,setPlayers,allSeries}) {
       if(c.some(h=>["Player","Skater","Name"].includes(h))){hi=i;headers=c;break;}
     }
     if(hi===-1) return {error:"No header row found — copy the full table including headers"};
-    // Map columns
     const col=(alts)=>{for(const a of alts){const i=headers.findIndex(h=>h.toLowerCase()===a.toLowerCase());if(i!==-1)return i;}return -1;};
     const cm={
       name:col(["Player","Skater","Name"]),
@@ -2329,44 +2342,77 @@ function GameStatImporter({players,setPlayers,allSeries}) {
       a:col(["A","Assists"]),
       sog:col(["S","SOG","Shots"]),
       pim:col(["PIM"]),
-      // HR game box score doesn't have HIT/BLK/TK — those aren't in the standard scoring table
     };
     if(cm.name===-1) return {error:"Could not find Player column"};
-    const players=[];
+    const gamePlayers=[];
+    let totalGoals=0;
     for(let i=hi+1;i<lines.length;i++){
       const c=lines[i].split("\t").map(s=>s.trim());
       const name=cm.name!==-1?c[cm.name]:"";
       if(!name||["Player","Rk","TOTAL","Team Totals"].some(x=>name.includes(x))) continue;
-      players.push({
-        name,
-        g:cm.g!==-1?parseInt(c[cm.g])||0:0,
-        a:cm.a!==-1?parseInt(c[cm.a])||0:0,
+      const g=cm.g!==-1?parseInt(c[cm.g])||0:0;
+      const a=cm.a!==-1?parseInt(c[cm.a])||0:0;
+      totalGoals += g;
+      gamePlayers.push({
+        name, g, a,
         sog:cm.sog!==-1?parseInt(c[cm.sog])||0:0,
         pim:cm.pim!==-1?parseInt(c[cm.pim])||0:0,
       });
     }
-    return {players};
+    return {players:gamePlayers, totalGoals};
+  }
+
+  // Infer which team was uploaded by looking at the matched players' team field
+  function inferTeamFromParse(parsedPlayers){
+    const norm=s=>s.toLowerCase().replace(/[^a-z]/g,"");
+    const counts={};
+    for(const u of parsedPlayers){
+      const match=players.find(p=>norm(u.name)===norm(p.name));
+      if(match){counts[match.team]=(counts[match.team]||0)+1;}
+    }
+    let best=null,bestCnt=0;
+    for(const [t,c] of Object.entries(counts)){if(c>bestCnt){best=t;bestCnt=c;}}
+    return best;
   }
 
   function handleImport(){
     setErr("");setResult(null);
     if(!players){setErr("Load skaters.csv first.");return;}
     if(!paste.trim()){return;}
+    if(!s||!s.homeAbbr||!s.awayAbbr){setErr("Select a series with both team abbreviations set.");return;}
+
     const r=parseHRGame(paste);
     if(r.error){setErr(r.error);return;}
 
-    // Normalize name for matching
+    const hash=hashStr(paste.trim());
+
+    // Dedup: exact paste already processed for this series/game?
+    const dup=imports.find(x=>x.seriesIdx===seriesIdx&&x.game===gameNum&&x.hash===hash);
+    if(dup){setErr(`Duplicate paste — already imported ${dup.seriesLabel} G${dup.game} (${dup.teamAbbr}) at ${dup.ts}.`);return;}
+
+    // Infer team from matched roster entries
+    const teamAbbr=inferTeamFromParse(r.players);
+    if(!teamAbbr){setErr("Could not match any player to a roster team. Check that skaters.csv is loaded and the paste includes that team's players.");return;}
+    if(teamAbbr!==s.homeAbbr&&teamAbbr!==s.awayAbbr){
+      setErr(`Paste appears to be for ${teamAbbr}, but selected series is ${s.homeAbbr} vs ${s.awayAbbr}. Pick the right series or verify the paste.`);return;
+    }
+
+    // Same-team re-upload for same game? block
+    const sameTeamSameGame=imports.find(x=>x.seriesIdx===seriesIdx&&x.game===gameNum&&x.teamAbbr===teamAbbr);
+    if(sameTeamSameGame){setErr(`${teamAbbr} has already been uploaded for G${gameNum}. Click 'Undo' on that entry first if you need to redo it.`);return;}
+
     const norm=s=>s.toLowerCase().replace(/[^a-z]/g,"");
     let matched=0;const unmatched=[];
+    const delta=[]; // record per-player additions so we can undo
 
     const updated=players.map(p=>{
       const m=r.players.find(u=>
         norm(u.name)===norm(p.name)||
-        // last name fallback
         (norm(u.name).length>=4&&norm(p.name).endsWith(norm(u.name.split(" ").pop()||"")))
       );
-      if(m){
+      if(m && p.team===teamAbbr){
         matched++;
+        delta.push({name:p.name,team:p.team,pG:m.g,pA:m.a,pSOG:m.sog,pPIM:m.pim,pGP:1});
         return{...p,
           pGP:(p.pGP||0)+1,
           pG:(p.pG||0)+m.g,
@@ -2378,21 +2424,89 @@ function GameStatImporter({players,setPlayers,allSeries}) {
       return p;
     });
 
-    // Report unmatched HR names
     r.players.forEach(u=>{
-      const m=players.find(p=>norm(u.name)===norm(p.name));
+      const m=players.find(p=>norm(u.name)===norm(p.name)&&p.team===teamAbbr);
       if(!m) unmatched.push(u.name);
     });
 
     setPlayers(updated);
-    const entry={ts:new Date().toLocaleTimeString(),matched,series:s?`${s.homeAbbr||"?"}/${s.awayAbbr||"?"}`:"-",game:gameNum,unmatched:unmatched.slice(0,5)};
-    setLog(prev=>[entry,...prev].slice(0,20));
-    setResult({matched,unmatched:unmatched.slice(0,10),gameNum,seriesLabel:s?`${s.homeAbbr||"?"} vs ${s.awayAbbr||"?"}`:""});
+
+    const seriesLabel=`${s.homeAbbr} vs ${s.awayAbbr}`;
+    const entry={
+      id:Date.now()+"-"+Math.random().toString(36).slice(2,7),
+      ts:new Date().toLocaleString(),
+      seriesIdx, seriesLabel, game:gameNum, teamAbbr, hash,
+      matched, unmatched:unmatched.slice(0,10), delta,
+      goalsFor:r.totalGoals,
+    };
+    setImports(prev=>[entry,...prev].slice(0,200));
+
+    // If this completes both teams for this game, push score into series pricer
+    const otherTeam = teamAbbr===s.homeAbbr ? s.awayAbbr : s.homeAbbr;
+    const other = imports.find(x=>x.seriesIdx===seriesIdx&&x.game===gameNum&&x.teamAbbr===otherTeam);
+    if(other && setAllSeries){
+      const homeGoals = teamAbbr===s.homeAbbr ? r.totalGoals : other.goalsFor;
+      const awayGoals = teamAbbr===s.awayAbbr ? r.totalGoals : other.goalsFor;
+      const winResult = homeGoals>awayGoals ? "home" : awayGoals>homeGoals ? "away" : null;
+      setAllSeries(prev=>{
+        const u=[...prev];
+        const games=[...u[seriesIdx].games];
+        games[gameNum-1]={...games[gameNum-1], homeScore:homeGoals, awayScore:awayGoals, result:winResult||games[gameNum-1].result};
+        u[seriesIdx]={...u[seriesIdx], games};
+        return u;
+      });
+    }
+
+    setResult({matched,unmatched:unmatched.slice(0,10),gameNum,seriesLabel,teamAbbr,goalsFor:r.totalGoals,completesGame:!!other});
     setPaste("");
   }
 
+  function handleUndo(entryId){
+    const entry=imports.find(x=>x.id===entryId);
+    if(!entry||!entry.delta){return;}
+    // Reverse the delta
+    const map={};for(const d of entry.delta){map[d.name+"|"+d.team]=d;}
+    setPlayers(prev=>prev.map(p=>{
+      const d=map[p.name+"|"+p.team];
+      if(!d)return p;
+      return{...p,
+        pGP:Math.max(0,(p.pGP||0)-d.pGP),
+        pG:Math.max(0,(p.pG||0)-d.pG),
+        pA:Math.max(0,(p.pA||0)-d.pA),
+        pSOG:Math.max(0,(p.pSOG||0)-d.pSOG),
+        pPIM:Math.max(0,(p.pPIM||0)-d.pPIM),
+      };
+    }));
+    setImports(prev=>prev.filter(x=>x.id!==entryId));
+    // Also clear the series pricer score/result if we just undid a completing upload
+    if(setAllSeries){
+      setAllSeries(prev=>{
+        const u=[...prev];
+        if(!u[entry.seriesIdx])return prev;
+        const games=[...u[entry.seriesIdx].games];
+        games[entry.game-1]={...games[entry.game-1], homeScore:null, awayScore:null, result:null};
+        u[entry.seriesIdx]={...u[entry.seriesIdx], games};
+        return u;
+      });
+    }
+  }
+
+  // Per-series game matrix: [g1..g7] -> list of uploads for current seriesIdx
+  const gameMatrix = useMemo(()=>{
+    const m={};
+    for(let g=1;g<=7;g++){m[g]={home:null,away:null};}
+    if(!s)return m;
+    for(const e of imports){
+      if(e.seriesIdx!==seriesIdx)continue;
+      const slot = e.teamAbbr===s.homeAbbr?"home":e.teamAbbr===s.awayAbbr?"away":null;
+      if(slot&&m[e.game])m[e.game][slot]=e;
+    }
+    return m;
+  },[imports,seriesIdx,s]);
+
+  const seriesImports = imports.filter(x=>x.seriesIdx===seriesIdx);
+
   return <div>
-    {/* Series + Game selector */}
     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
       <div>
         <div style={{fontSize:10,color:"var(--color-text-secondary)",marginBottom:4}}>Series</div>
@@ -2405,18 +2519,40 @@ function GameStatImporter({players,setPlayers,allSeries}) {
         <div style={{fontSize:10,color:"var(--color-text-secondary)",marginBottom:4}}>Game</div>
         <select value={gameNum} onChange={e=>setGameNum(+e.target.value)}
           style={{width:"100%",padding:"5px 8px",fontSize:12,background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",color:"var(--color-text-primary)"}}>
-          {[1,2,3,4,5,6,7].map(n=><option key={n} value={n}>Game {n}</option>)}
+          {[1,2,3,4,5,6,7].map(n=>{
+            const gm=gameMatrix[n];
+            const count=(gm?.home?1:0)+(gm?.away?1:0);
+            const tag=count===2?" ✓✓":count===1?" ✓·":"";
+            return <option key={n} value={n}>Game {n}{tag}</option>;
+          })}
         </select>
       </div>
     </div>
 
+    {/* Per-game status grid */}
+    {s&&s.homeAbbr&&s.awayAbbr&&<div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:4,marginBottom:10}}>
+      {[1,2,3,4,5,6,7].map(g=>{
+        const gm=gameMatrix[g];
+        const hasHome=!!gm.home, hasAway=!!gm.away;
+        const complete=hasHome&&hasAway;
+        const partial=hasHome||hasAway;
+        const bg=complete?"rgba(16,185,129,0.15)":partial?"rgba(245,158,11,0.12)":"var(--color-background-secondary)";
+        const color=complete?"#10b981":partial?"#f59e0b":"var(--color-text-tertiary)";
+        const label=complete?"✓✓":partial?(hasHome?`${s.homeAbbr} ✓`:`${s.awayAbbr} ✓`):"—";
+        return <div key={g} style={{padding:"4px 2px",textAlign:"center",background:bg,borderRadius:3,fontSize:9,color,fontWeight:500,border:"0.5px solid var(--color-border-tertiary)"}}>
+          <div style={{fontSize:8,color:"var(--color-text-tertiary)"}}>G{g}</div>
+          <div>{label}</div>
+        </div>;
+      })}
+    </div>}
+
     <div style={{fontSize:10,color:"var(--color-text-tertiary)",marginBottom:8}}>
-      Paste the HR box score for <strong>one team</strong> at a time. Stats are <strong>added</strong> to running playoff totals (G, A, SOG, PIM incremented by +1 game each paste). Repeat for the other team.
+      Paste the HR box score for <strong>one team</strong>. Team is inferred from roster matches. Duplicate pastes are blocked. Once both teams are uploaded for a game, scores auto-flow into Series Pricer.
     </div>
 
     <textarea value={paste} onChange={e=>setPaste(e.target.value)}
-      placeholder={"Paste HR box score here (tab-separated with headers)…\n\nExample:\nPlayer\tG\tA\tPTS\t+/-\tPIM\t…\tS\nSidney Crosby\t1\t1\t2\t+1\t0\t…\t4\n\nHR columns mapped: Player, G, A, S (shots), PIM\nHIT/BLK/TK not available in HR box score — enter via game entry modal"}
-      style={{width:"100%",height:180,fontSize:11,fontFamily:"var(--font-mono)",
+      placeholder={"Paste HR box score here (tab-separated with headers)…"}
+      style={{width:"100%",height:160,fontSize:11,fontFamily:"var(--font-mono)",
         background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
         borderRadius:"var(--border-radius-md)",padding:10,color:"var(--color-text-primary)",
         resize:"vertical",boxSizing:"border-box",marginBottom:8}}/>
@@ -2441,26 +2577,38 @@ function GameStatImporter({players,setPlayers,allSeries}) {
     {result&&<div style={{marginTop:8,padding:8,borderRadius:"var(--border-radius-md)",
       background:"rgba(16,185,129,0.1)",border:"0.5px solid rgba(16,185,129,0.3)",fontSize:11}}>
       <div style={{color:"#10b981",fontWeight:500,marginBottom:2}}>
-        ✓ {result.matched} players updated — {result.seriesLabel} G{result.gameNum}
+        ✓ {result.matched} {result.teamAbbr} players updated — {result.seriesLabel} G{result.gameNum} ({result.goalsFor}g)
       </div>
-      <div style={{fontSize:10,color:"var(--color-text-secondary)"}}>pGP+1, pG/pA/pSOG/pPIM incremented</div>
+      {result.completesGame&&<div style={{fontSize:10,color:"#10b981"}}>Both teams uploaded — score pushed to Series Pricer</div>}
+      {!result.completesGame&&<div style={{fontSize:10,color:"var(--color-text-secondary)"}}>Awaiting other team's paste for G{result.gameNum}</div>}
       {result.unmatched.length>0&&<div style={{fontSize:10,color:"#f59e0b",marginTop:4}}>
-        Not in roster: {result.unmatched.join(", ")}{result.unmatched.length>=10?"…":""}
+        Not in roster: {result.unmatched.join(", ")}
       </div>}
     </div>}
-    {log.length>0&&<div style={{marginTop:10}}>
-      <div style={{fontSize:10,fontWeight:500,color:"var(--color-text-secondary)",marginBottom:4,textTransform:"uppercase",letterSpacing:"0.06em"}}>Upload Log</div>
-      <div style={{maxHeight:120,overflowY:"auto"}}>
-        {log.map((e,i)=><div key={i} style={{display:"flex",gap:10,fontSize:10,padding:"3px 0",borderBottom:"0.5px solid var(--color-border-tertiary)",color:i===0?"var(--color-text-primary)":"var(--color-text-secondary)"}}>
-          <span style={{color:"var(--color-text-tertiary)",flexShrink:0}}>{e.ts}</span>
-          <span style={{color:"#10b981",flexShrink:0}}>✓ {e.matched}p</span>
-          <span style={{flexShrink:0}}>{e.series} G{e.game}</span>
-          {e.unmatched.length>0&&<span style={{color:"#f59e0b"}}>⚠ {e.unmatched.join(", ")}</span>}
-        </div>)}
+
+    {seriesImports.length>0&&<div style={{marginTop:12}}>
+      <div style={{fontSize:10,fontWeight:500,color:"var(--color-text-secondary)",marginBottom:4,textTransform:"uppercase",letterSpacing:"0.06em"}}>
+        Imports for this series ({seriesImports.length})
+      </div>
+      <div style={{maxHeight:180,overflowY:"auto",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)"}}>
+        {seriesImports.map((e)=>(
+          <div key={e.id} style={{display:"flex",gap:8,fontSize:10,padding:"4px 8px",borderBottom:"0.5px solid var(--color-border-tertiary)",alignItems:"center"}}>
+            <span style={{color:"var(--color-text-tertiary)",flexShrink:0,fontSize:9}}>{e.ts}</span>
+            <span style={{color:"#10b981",flexShrink:0,fontFamily:"var(--font-mono)"}}>G{e.game}</span>
+            <span style={{flexShrink:0,fontWeight:500}}>{e.teamAbbr}</span>
+            <span style={{color:"var(--color-text-secondary)",flexShrink:0}}>{e.matched}p · {e.goalsFor}g</span>
+            {e.unmatched.length>0&&<span style={{color:"#f59e0b",fontSize:9}}>⚠{e.unmatched.length}</span>}
+            <button onClick={()=>handleUndo(e.id)}
+              style={{marginLeft:"auto",padding:"2px 8px",fontSize:9,borderRadius:3,border:"0.5px solid rgba(239,68,68,0.3)",background:"rgba(239,68,68,0.08)",color:"#ef4444",cursor:"pointer"}}>
+              Undo
+            </button>
+          </div>
+        ))}
       </div>
     </div>}
   </div>;
 }
+
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // PLAYOFF TOTALS VERIFICATION TABLE (v13)
@@ -2539,7 +2687,7 @@ function PlayoffTotalsTable({players,dark}) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // UPLOAD TAB
 // ═══════════════════════════════════════════════════════════════════════════════
-function UploadTab({players,setPlayers,goalies,setGoalies,exportState,importState,syncStatus,allSeries,dark}) {
+function UploadTab({players,setPlayers,goalies,setGoalies,exportState,importState,syncStatus,allSeries,setAllSeries,dark}) {
   const [fileErr,setFileErr]=useState("");
   const setErr=setFileErr; // alias used in file handlers
 
@@ -2631,7 +2779,7 @@ function UploadTab({players,setPlayers,goalies,setGoalies,exportState,importStat
         <Card style={{marginBottom:14}}>
           <SH title="Game Stat Import" sub="Paste a Hockey Reference box score — stats are added to each player's running playoff totals"/>
           {/* Series + Game selector */}
-          <GameStatImporter players={players} setPlayers={setPlayers} allSeries={allSeries}/>
+          <GameStatImporter players={players} setPlayers={setPlayers} allSeries={allSeries} setAllSeries={setAllSeries}/>
         </Card>
         <Card style={{marginBottom:14}}>
           <SH title="Live Playoff Totals" sub="Post-import verification — any player with pGP > 0 appears here"/>
