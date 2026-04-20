@@ -77,6 +77,24 @@ function applyMargin(trueProbs, or) {
   const s = trueProbs.reduce((a, b) => a + b, 0);
   return trueProbs.map(p => s > 0 ? (p / s) * or : 0);
 }
+
+// v13 Bayesian shrinkage for per-game rates — used by all prop/leader panels.
+// Prevents 1-GP call-ups (e.g., Booth, Rooney, Luneau) from showing λ≈5 in R1 goals leader.
+// Only applies to SMALL samples (gp < 20). Veterans with 20+ GP use their raw rate.
+// Scratched players are excluded upstream by roleMultiplier=0, so no need to check here.
+// shrunkRate = (gp*rawRate + k*prior) / (gp + k), with k=20 game-equivalent prior weight.
+// stat = "g"|"a"|"pts"|"sog"|"hit"|"blk"|"tk"|"pim"|"tsa"|"give"
+const PRIOR_RATES = {g:0.1, a:0.18, pts:0.28, sog:1.3, hit:1.0, blk:0.7, tk:0.4, pim:0.3, tsa:3.0, give:0.4};
+const SHRINK_K = 20;
+const SHRINK_THRESHOLD_GP = 20;
+function shrinkRate(rawRate, gp, stat) {
+  const prior = PRIOR_RATES[stat] ?? 0.1;
+  if (!gp || gp <= 0) return prior;
+  // Veterans (gp >= 20): use raw rate untouched
+  if (gp >= SHRINK_THRESHOLD_GP) return rawRate || 0;
+  // Small sample: shrink toward prior
+  return (gp * (rawRate||0) + SHRINK_K * prior) / (gp + SHRINK_K);
+}
 function fmt(p) { const a = toAmer(p); return a > 0 ? `+${a}` : `${a}`; }
 
 // ─── SERIES MATH ──────────────────────────────────────────────────────────────
@@ -449,7 +467,9 @@ export default function App() {
     // stat key mapping: tsa->tsa_pg, give->give_pg, tk->take_pg, else stat_pg
     const pgKey=stat==="tk"?"take_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
     const actKey=stat==="tk"?"pTK":stat==="give"?"pGIVE":stat==="tsa"?"pTSA":"p"+stat.toUpperCase();
-    const rr=(p[pgKey]||0)*rm*globals.rateDiscount;
+    // v13: shrink rate with Bayesian prior for <20 GP (shrinkRate handles threshold internally)
+    const shrunk = shrinkRate(p[pgKey], p.gp, stat);
+    const rr = shrunk * rm * globals.rateDiscount;
     let expTotal,actualGP;
     if(scope==="r1"){expTotal=teamExpGR1[p.team]||5.82;actualGP=p.pGP||0;}
     else{const adv=advancement[p.team]||{winR1:0.5,winConf:0.25,winCup:0.1};expTotal=5.82+5.82*adv.winR1+5.82*adv.winConf+5.82*adv.winCup;actualGP=p.pGP||0;}
@@ -1197,7 +1217,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
         </div>
       </Card>}
 
-      <div style={{display:"grid",gridTemplateColumns:"310px minmax(0,1fr)",gap:14,alignItems:"start"}}>
+      <div style={{display:"grid",gridTemplateColumns:"340px minmax(0,1fr)",gap:14,alignItems:"start"}}>
         <div>
           <Card style={{marginBottom:10}}>
             <SH title="Series Setup"/>
@@ -1207,7 +1227,16 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
                   style={{padding:"4px 7px",fontSize:12,background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:4,color:"var(--color-text-primary)"}}/>
               ))}
             </div>
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:11,tableLayout:"fixed"}}>
+              <colgroup>
+                <col style={{width:"22px"}}/>
+                <col style={{width:"34px"}}/>
+                <col style={{width:"50px"}}/>
+                <col style={{width:"42px"}}/>
+                <col style={{width:"40px"}}/>
+                <col style={{width:"70px"}}/>
+                <col style={{width:"60px"}}/>
+              </colgroup>
               <thead><tr style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
                 {[
                   ["G",""],
@@ -1554,15 +1583,25 @@ function PropsPanel({s,expG,players,globals,margins,showTrue,dark,mode}) {
       // stat key mapping
       const pgKey=stat==="tk"?"take_pg":stat==="pim"?"pim_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
       const actKey=stat==="tk"?"pTK":stat==="pim"?"pPIM":stat==="give"?"pGIVE":stat==="tsa"?"pTSA":"p"+stat.toUpperCase();
-      const rr=(p[pgKey]||0)*rm*rateDiscount;
-      const lam=Math.max(0.0001,(p[actKey]||0)+rr*Math.max(0,expG-(p.pGP||0)));
+      // v13: shrink rate for <20 GP; scratched already filtered out above
+      const shrunk=shrinkRate(p[pgKey],p.gp,stat);
+      const rr=shrunk*rm*rateDiscount;
       const actual=p[actKey]||0;
-      // For binary: if player already has >= line, they've hit it — price at near-certainty
+      // λ = stats-already-recorded + rate × remaining games
+      const lam=Math.max(0.0001,actual+rr*Math.max(0,expG-(p.pGP||0)));
+      // v13 fix: For binary (1+), bump the line above what they already have.
+      // If Martone has 1G already and line is "1+", they've hit; real question becomes 2+.
+      // This way we compute a proper Poisson probability for the remaining window, not pOver=1.
       const effectiveLine = mode==="binary" ? Math.max(line, actual+1) : line;
       const lineInt=Math.ceil(effectiveLine-0.001);
-      const pOver=mode==="binary"&&actual>=line ? 1 : 1-nbCDF(lineInt-1,lam,dispersion);
-      const [adjO,adjU]=applyMargin([pOver,1-pOver],statMargin);
-      return {...p,lam,pYes:pOver,adjYes:adjO,adjNo:adjU};
+      // Probability of reaching effectiveLine from current actual using remaining-games lambda only
+      // (actual stats are already locked in; we need P(future additions >= (effectiveLine - actual)))
+      const needMore = Math.max(0, lineInt - actual);
+      const futureLam = Math.max(0.0001, rr*Math.max(0,expG-(p.pGP||0)));
+      const pOver = needMore===0 ? 1 : 1-nbCDF(needMore-1, futureLam, dispersion);
+      // Apply margin only to uncertain events; pOver=1 stays at 1 and No = 0
+      const [adjO,adjU]= pOver>=0.9999 ? [1,0] : pOver<=0.0001 ? [0,1] : applyMargin([pOver,1-pOver],statMargin);
+      return {...p,lam,actual,effectiveLine,needMore,pYes:pOver,adjYes:adjO,adjNo:adjU};
     }).sort((a,b)=>b.adjYes-a.adjYes);
   },[pool,stat,line,globals,expG,statMargin]);
 
@@ -1582,13 +1621,15 @@ function PropsPanel({s,expG,players,globals,margins,showTrue,dark,mode}) {
     </div>
     <div style={{overflowX:"auto"}}>
       <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-        <TH cols={["#","Player","Team","Role","λ",...(showTrue?["True%"]:[]),"Adj%","Yes Odds","No Odds"]}/>
+        <TH cols={["#","Player","Team","Role","Now","Line","λ",...(showTrue?["True%"]:[]),"Adj%","Yes Odds","No Odds"]}/>
         <tbody>{results.map((p,i)=>(
           <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)")}}>
             <td style={{padding:"3px 8px",color:"var(--color-text-tertiary)",fontSize:9}}>{i+1}</td>
             <td style={{padding:"3px 8px",fontWeight:i<3?500:400}}>{p.name}</td>
             <td style={{padding:"3px 8px",textAlign:"right"}}><span style={{fontSize:9,padding:"1px 4px",borderRadius:2,background:"rgba(59,130,246,0.12)",color:"#60a5fa"}}>{p.team}</span></td>
             <td style={{padding:"3px 8px",textAlign:"right"}}><RoleBadge role={p.lineRole}/></td>
+            <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,fontWeight:p.actual>0?500:400,color:p.actual>0?"#4ade80":"var(--color-text-tertiary)"}}>{p.actual||0}</td>
+            <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:mode==="binary"&&p.effectiveLine>line?"#f59e0b":"var(--color-text-secondary)"}}>{mode==="binary"?`${p.effectiveLine}+`:p.line}</td>
             <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{p.lam.toFixed(2)}</td>
             {showTrue&&<td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(p.pYes*100).toFixed(1)}%</td>}
             <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{(p.adjYes*100).toFixed(1)}%</td>
@@ -1696,7 +1737,7 @@ function PlayerDetailPanel({s,expG,players,globals,margins,showTrue,dark}) {
     const rm = roleMultiplier(player.lineRole);
     const pgKey = stat==="tk"?"take_pg":stat==="pim"?"pim_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
     const actKey = stat==="tk"?"pTK":stat==="pim"?"pPIM":stat==="give"?"pGIVE":stat==="tsa"?"pTSA":"p"+stat.toUpperCase();
-    const rr = (player[pgKey]||0)*rm*rateDiscount;
+    const rr = shrinkRate(player[pgKey],player.gp,stat)*rm*rateDiscount;
     const lam = Math.max(0.0001,(player[actKey]||0)+rr*Math.max(0,expG-(player.pGP||0)));
     // Build line table: 0.5 through ceil(lam*2)+2, step 0.5
     const maxLine = Math.ceil(lam)+4;
@@ -1805,7 +1846,7 @@ function SeriesLeaderPanel({s,expG,players,globals,margins,showTrue,dark}) {
       const rm=roleMultiplier(p.lineRole);
       const pgKey=stat==="tk"?"take_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat==="pim"?"pim_pg":stat+"_pg";
       const actKey=stat==="tk"?"pTK":stat==="give"?"pGIVE":stat==="tsa"?"pTSA":stat==="pim"?"pPIM":"p"+stat.toUpperCase();
-      const rr=(p[pgKey]||0)*rm*rateDiscount;
+      const rr=shrinkRate(p[pgKey],p.gp,stat)*rm*rateDiscount;
       return Math.max(0.0001,(p[actKey]||0)+rr*Math.max(0,expG-(p.pGP||0)));
     });
     const raw=computeLeaderProbs(lambdas,meta.kMax);
