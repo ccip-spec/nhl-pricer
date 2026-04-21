@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, Fragment, Component } from "react";
 
 // ─── SUPABASE CONFIG ─────────────────────────────────────────────────────────
 const SUPABASE_URL = "";
@@ -1163,7 +1163,34 @@ function SyncBadge({status}) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // ROOT
 // ═══════════════════════════════════════════════════════════════════════════════
-export default function App() {
+
+// v25: error boundary so a render crash shows a visible error (not a blank page).
+class ErrorBoundary extends Component {
+  constructor(props) { super(props); this.state = { error: null, info: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error, info) { this.setState({ error, info }); console.error("ErrorBoundary caught:", error, info); }
+  render() {
+    if (this.state.error) {
+      return <div style={{padding:20,fontFamily:"monospace",color:"#ef4444",background:"#1a0a0a",minHeight:"100vh"}}>
+        <div style={{fontSize:16,fontWeight:600,marginBottom:10}}>⚠ Render error</div>
+        <div style={{fontSize:12,color:"#fca5a5",marginBottom:10}}>{String(this.state.error)}</div>
+        <pre style={{fontSize:11,color:"#f87171",background:"#000",padding:10,borderRadius:4,overflow:"auto",maxHeight:300}}>{this.state.error?.stack||""}</pre>
+        {this.state.info?.componentStack && <pre style={{fontSize:11,color:"#f87171",background:"#000",padding:10,borderRadius:4,overflow:"auto",maxHeight:300,marginTop:10}}>{this.state.info.componentStack}</pre>}
+        <div style={{marginTop:16,display:"flex",gap:8,flexWrap:"wrap"}}>
+          <button onClick={()=>this.setState({error:null,info:null})} style={{padding:"6px 12px",fontSize:12,background:"#3b82f6",color:"white",border:"none",borderRadius:4,cursor:"pointer"}}>Retry render</button>
+          <button onClick={()=>{try{localStorage.clear();location.reload();}catch(e){}}} style={{padding:"6px 12px",fontSize:12,background:"#ef4444",color:"white",border:"none",borderRadius:4,cursor:"pointer"}}>Clear all local data + reload</button>
+        </div>
+      </div>;
+    }
+    return this.props.children;
+  }
+}
+
+function AppRoot() {
+  return <ErrorBoundary><AppInner/></ErrorBoundary>;
+}
+
+function AppInner() {
   const [dark,setDark] = useState(true);
   const [tab,setTab] = useState("leaders");
   const [globals,setGlobals] = useState(DEFAULT_GLOBALS);
@@ -4651,3 +4678,5 @@ CREATE POLICY "anon_rw" ON pricer_state
     </div>
   );
 }
+
+export default AppRoot;
