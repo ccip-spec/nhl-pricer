@@ -2547,6 +2547,40 @@ function GameEntryModal({dark,allSeries,players,goalies,initialSeriesIdx,initial
 // ═══════════════════════════════════════════════════════════════════════════════
 // LEADERS TAB
 // ═══════════════════════════════════════════════════════════════════════════════
+// v41: number input with local string state — only commits parent on blur or Enter.
+// Fixes the laggy/cursor-jumpy behavior on the advancement table where every keystroke
+// re-rendered the whole 16-team auto-chain.
+function LazyNI({value, onCommit, min, max, step=0.01, style={}}) {
+  const [draft, setDraft] = useState(String(value));
+  const [editing, setEditing] = useState(false);
+  // Sync from prop when not actively editing (e.g., AUTO recompute updated the prop)
+  useEffect(()=>{
+    if (!editing) setDraft(String(value));
+  }, [value, editing]);
+  const commit = () => {
+    setEditing(false);
+    const parsed = parseFloat(draft);
+    if (!isNaN(parsed)) {
+      let v = parsed;
+      if (min != null) v = Math.max(min, v);
+      if (max != null) v = Math.min(max, v);
+      onCommit(v);
+      setDraft(String(v));
+    } else {
+      // invalid input — revert
+      setDraft(String(value));
+    }
+  };
+  return <input type="text" inputMode="decimal" value={draft}
+    onFocus={()=>setEditing(true)}
+    onChange={e=>setDraft(e.target.value)}
+    onBlur={commit}
+    onKeyDown={e=>{ if (e.key==="Enter") { e.target.blur(); } if (e.key==="Escape") { setDraft(String(value)); setEditing(false); e.target.blur(); } }}
+    style={{width:68,padding:"3px 6px",fontSize:12,fontFamily:"var(--font-mono)",
+      background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
+      borderRadius:"var(--border-radius-md)",color:"var(--color-text-primary)",...style}}/>;
+}
+
 function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdvancement,globals,setGlobals,leaderMarket,STATS,lStat,setLStat,lScope,setLScope,lTopN,setLTopN,showTrue,setShowTrue,showDec,dark,allSeries,simResultsBySeries,autoR1ByTeam,autoConfByTeam,autoCupByTeam,currentRound,setCurrentRound}) {
   const [showR1,setShowR1]=useState(false);
   const [showAdv,setShowAdv]=useState(false);
@@ -2692,8 +2726,8 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
                   {isAuto && <span style={{fontSize:9,padding:"1px 5px",background:"rgba(59,130,246,0.15)",color:"#60a5fa",borderRadius:3,letterSpacing:0.3}} title={autoTitle}>AUTO</span>}
                   {useMan && <span style={{fontSize:9,padding:"1px 5px",background:"rgba(245,158,11,0.15)",color:"#f59e0b",borderRadius:3,letterSpacing:0.3}} title="manual override">MANUAL</span>}
                   {advEntryMode==="decimal"
-                    ? <NI value={probToDec(probVal)} onChange={d=>setProbAndLock(decToProb(d))} min={1.01} max={1000} step={0.01} style={{width:64}}/>
-                    : <NI value={+probVal.toFixed(3)} onChange={v=>setProbAndLock(v)} min={0} max={1} step={0.01} style={{width:58}}/>}
+                    ? <LazyNI value={probToDec(probVal)} onCommit={d=>setProbAndLock(decToProb(d))} min={1.01} max={1000} step={0.01} style={{width:64}}/>
+                    : <LazyNI value={+probVal.toFixed(3)} onCommit={v=>setProbAndLock(v)} min={0} max={1} step={0.01} style={{width:58}}/>}
                   {useMan && autoAvail && (
                     <button type="button" onClick={unlock} title="Revert to AUTO"
                       style={{padding:"2px 5px",fontSize:10,lineHeight:1,borderRadius:3,cursor:"pointer",
