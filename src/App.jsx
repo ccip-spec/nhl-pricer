@@ -2388,6 +2388,45 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
   const tot=len4+len5+len6+len7;
   const expG=tot>0?(4*len4+5*len5+6*len6+7*len7)/tot:5.82;
 
+  // v31 (hoisted): realized state of this series — used to mark settled outcomes across all market panels.
+  // MUST be declared before any market useMemo that references it (TDZ).
+  const realized = useMemo(()=>{
+    let hw=0, aw=0, gH=0, gA=0, sh=0, ot=0, played=0;
+    for (const g of effG) {
+      if (g.result === "home") { hw++; played++; }
+      else if (g.result === "away") { aw++; played++; }
+      if (typeof g.homeScore === "number" && typeof g.awayScore === "number") {
+        gH += g.homeScore; gA += g.awayScore;
+        if (g.homeScore === 0 || g.awayScore === 0) sh++;
+      }
+      if (g.wentOT || g.ot || g.result === "ot") ot++;
+    }
+    return {hw, aw, goalsH:gH, goalsA:gA, shutouts:sh, otGames:ot, gamesPlayed:played, gamesRemaining:Math.max(0, 7-played), seriesOver: hw>=4 || aw>=4};
+  }, [effKey]);
+
+  // v31 (hoisted): helper — derive O/U rows from a sim PMF, with settled detection.
+  function ouFromSimPMF(pmf, lines, marginVal, realizedCount=0, maxAdditional=Infinity) {
+    return lines.map(line => {
+      const lineCeil = Math.ceil(line - 0.001);
+      const settledOver = realizedCount > line;
+      const settledUnder = (realizedCount + maxAdditional) < lineCeil;
+      let pOver, pUnder;
+      if (settledOver) { pOver = 1; pUnder = 0; }
+      else if (settledUnder) { pOver = 0; pUnder = 1; }
+      else { pOver = pAtLeast(pmf, lineCeil); pUnder = 1 - pOver; }
+      const [ao, au] = (settledOver || settledUnder)
+        ? [pOver, pUnder]
+        : applyMargin([pOver, pUnder], marginVal);
+      return {line, pOver, pUnder, ao, au, _settled: settledOver || settledUnder, _settledSide: settledOver ? "over" : settledUnder ? "under" : null};
+    });
+  }
+  function sortSettled(rows) {
+    return [...rows].sort((a,b) => {
+      if (!!a._settled !== !!b._settled) return a._settled ? 1 : -1;
+      return (a.line ?? 0) - (b.line ?? 0);
+    });
+  }
+
   // v16 fix: per-game effective weight.
   // v23: extended with goalie-faced multiplier for scoring stats.
   // For scoring stats, the opposing goalie's quality scales the game's contribution.
@@ -2777,45 +2816,6 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
   },[effKey,margins.teamGoals,simResult,realized]);
 
   // v31: realized state of this series — used to mark settled outcomes across all market panels.
-  const realized = useMemo(()=>{
-    let hw=0, aw=0, gH=0, gA=0, sh=0, ot=0, played=0;
-    for (const g of effG) {
-      if (g.result === "home") { hw++; played++; }
-      else if (g.result === "away") { aw++; played++; }
-      if (typeof g.homeScore === "number" && typeof g.awayScore === "number") {
-        gH += g.homeScore; gA += g.awayScore;
-        if (g.homeScore === 0 || g.awayScore === 0) sh++;
-      }
-      if (g.wentOT || g.ot || g.result === "ot") ot++;
-    }
-    return {hw, aw, goalsH:gH, goalsA:gA, shutouts:sh, otGames:ot, gamesPlayed:played, gamesRemaining:Math.max(0, 7-played), seriesOver: hw>=4 || aw>=4};
-  }, [effKey]);
-
-  // v31: helper — derive O/U rows from a sim PMF, with settled detection.
-  // A line is SETTLED OVER if realized count > line; SETTLED UNDER if realized count + maxRemaining < line ceil.
-  function ouFromSimPMF(pmf, lines, marginVal, realizedCount=0, maxAdditional=Infinity) {
-    return lines.map(line => {
-      const lineCeil = Math.ceil(line - 0.001);
-      const settledOver = realizedCount > line;
-      const settledUnder = (realizedCount + maxAdditional) < lineCeil;
-      let pOver, pUnder;
-      if (settledOver) { pOver = 1; pUnder = 0; }
-      else if (settledUnder) { pOver = 0; pUnder = 1; }
-      else { pOver = pAtLeast(pmf, lineCeil); pUnder = 1 - pOver; }
-      const [ao, au] = (settledOver || settledUnder)
-        ? [pOver, pUnder]
-        : applyMargin([pOver, pUnder], marginVal);
-      return {line, pOver, pUnder, ao, au, _settled: settledOver || settledUnder, _settledSide: settledOver ? "over" : settledUnder ? "under" : null};
-    });
-  }
-  // Sort: live rows first (by line), settled rows at bottom
-  function sortSettled(rows) {
-    return [...rows].sort((a,b) => {
-      if (!!a._settled !== !!b._settled) return a._settled ? 1 : -1;
-      return (a.line ?? 0) - (b.line ?? 0);
-    });
-  }
-
   // Parlays
   const parlayMkt=useMemo(()=>{
     const rows=computeParlays(effG,outcomes);
