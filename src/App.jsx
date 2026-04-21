@@ -1331,6 +1331,53 @@ function defaultMatchup(id) {
   return { id, homeTeam:"", awayTeam:"", homeAbbr:"", awayAbbr:"",
     homeWinPct:0.55, expTotal:5.5, homeWins:0, awayWins:0, expGames:5.82 };
 }
+// v38: round-aware data structure. Each round holds its own series/matchup arrays.
+//   r1: 8 series, r2: 4 series, r3: 2 series, f: 1 series.
+// The `bracket` defines how R1 winners pair into R2 (and so on). Default = sequential pairs.
+const ROUND_IDS = ["r1", "r2", "r3", "f"];
+const ROUND_LABELS = { r1: "R1", r2: "R2", r3: "R3", f: "Final" };
+const ROUND_SERIES_COUNT = { r1: 8, r2: 4, r3: 2, f: 1 };
+const DEFAULT_BRACKET = {
+  // r2pairs[i] = [r1SeriesIdxA, r1SeriesIdxB] — winners of those two series face off in r2 series i
+  r2pairs: [[0, 1], [2, 3], [4, 5], [6, 7]],
+  r3pairs: [[0, 1], [2, 3]],   // r2 winners → r3 series
+  fpair:   [0, 1],             // r3 winners → final
+};
+function defaultRoundedSeries() {
+  const out = {};
+  for (const r of ROUND_IDS) out[r] = Array.from({length: ROUND_SERIES_COUNT[r]}, (_, i) => defaultSeries(i));
+  return out;
+}
+function defaultRoundedMatchups() {
+  const out = {};
+  for (const r of ROUND_IDS) out[r] = Array.from({length: ROUND_SERIES_COUNT[r]}, (_, i) => defaultMatchup(i));
+  return out;
+}
+// v38: migration — old localStorage stored a flat 8-series array under "nhl_s". If we encounter that
+// shape, wrap it as r1, fresh defaults for r2/r3/f. Detected by Array.isArray.
+function migrateSeries(loaded) {
+  if (!loaded) return defaultRoundedSeries();
+  if (Array.isArray(loaded)) {
+    const fresh = defaultRoundedSeries();
+    fresh.r1 = loaded.length === 8 ? loaded : fresh.r1;
+    return fresh;
+  }
+  // Already round-keyed — fill any missing rounds with defaults
+  const out = {};
+  for (const r of ROUND_IDS) out[r] = (loaded[r] && Array.isArray(loaded[r])) ? loaded[r] : Array.from({length: ROUND_SERIES_COUNT[r]}, (_, i) => defaultSeries(i));
+  return out;
+}
+function migrateMatchups(loaded) {
+  if (!loaded) return defaultRoundedMatchups();
+  if (Array.isArray(loaded)) {
+    const fresh = defaultRoundedMatchups();
+    fresh.r1 = loaded.length === 8 ? loaded : fresh.r1;
+    return fresh;
+  }
+  const out = {};
+  for (const r of ROUND_IDS) out[r] = (loaded[r] && Array.isArray(loaded[r])) ? loaded[r] : Array.from({length: ROUND_SERIES_COUNT[r]}, (_, i) => defaultMatchup(i));
+  return out;
+}
 const DEFAULT_MARGINS = {
   eightWay:1.12, winner:1.04, length:1.08, spread:1.04,
   totalGoals:1.05, winOrder:1.15, shutouts:1.05, correctScore:1.12,
@@ -1606,9 +1653,19 @@ function AppInner() {
     }catch{return null;}
   });
   const [goalies,setGoalies] = useState(()=>{try{const s=localStorage.getItem("nhl_g");return s?JSON.parse(s):null;}catch{return null;}});
-  const [matchups,setMatchups] = useState(()=>{try{const s=localStorage.getItem("nhl_m");return s?JSON.parse(s):Array.from({length:8},(_,i)=>defaultMatchup(i));}catch{return Array.from({length:8},(_,i)=>defaultMatchup(i));}});
+  const [matchups,setMatchups] = useState(()=>{
+    try{const s=localStorage.getItem("nhl_m");return migrateMatchups(s?JSON.parse(s):null);}
+    catch{return defaultRoundedMatchups();}
+  });
   const [advancement,setAdvancement] = useState(()=>{try{const s=localStorage.getItem("nhl_adv");return s?JSON.parse(s):PLAYOFF_TEAMS.reduce((a,t)=>({...a,[t]:{winR1:0.5,winConf:0.25,winCup:0.1}}),{});}catch{return PLAYOFF_TEAMS.reduce((a,t)=>({...a,[t]:{winR1:0.5,winConf:0.25,winCup:0.1}}),{});}});
-  const [allSeries,setAllSeries] = useState(()=>{try{const s=localStorage.getItem("nhl_s");return s?JSON.parse(s):Array.from({length:8},(_,i)=>defaultSeries(i));}catch{return Array.from({length:8},(_,i)=>defaultSeries(i));}});
+  const [allSeries,setAllSeries] = useState(()=>{
+    try{const s=localStorage.getItem("nhl_s");return migrateSeries(s?JSON.parse(s):null);}
+    catch{return defaultRoundedSeries();}
+  });
+  // v38: bracket structure — defines how series in each round chain to the next.
+  const [bracket,setBracket] = useState(()=>{try{const s=localStorage.getItem("nhl_bracket");return s?{...DEFAULT_BRACKET,...JSON.parse(s)}:DEFAULT_BRACKET;}catch{return DEFAULT_BRACKET;}});
+  // v38: which round is currently being viewed in the Series Pricer / Leader Markets tabs.
+  const [currentRound,setCurrentRound] = useState(()=>{try{return localStorage.getItem("nhl_round")||"r1";}catch{return "r1";}});
   // v31: cross-component signal — every time GameStatImporter commits a game upload, this bumps.
   // SeriesTab watches it and auto-runs the unified sim so prices reflect the new state without a manual click.
   const [gameUploadCounter, setGameUploadCounter] = useState(0);
@@ -1632,6 +1689,8 @@ function AppInner() {
   useEffect(()=>{localStorage.setItem("nhl_m",JSON.stringify(matchups));},[matchups]);
   useEffect(()=>{localStorage.setItem("nhl_adv",JSON.stringify(advancement));},[advancement]);
   useEffect(()=>{localStorage.setItem("nhl_s",JSON.stringify(allSeries));},[allSeries]);
+  useEffect(()=>{localStorage.setItem("nhl_bracket",JSON.stringify(bracket));},[bracket]);
+  useEffect(()=>{localStorage.setItem("nhl_round",currentRound);},[currentRound]);
   useEffect(()=>{localStorage.setItem("nhl_globals",JSON.stringify(globals));},[globals]);
   useEffect(()=>{localStorage.setItem("nhl_margins",JSON.stringify(margins));},[margins]);
   useEffect(()=>{
@@ -1669,6 +1728,28 @@ function AppInner() {
   function setSeries(v){
     setAllSeries(prev => { const next = typeof v === "function" ? v(prev) : v; scheduleSync("series", next); return next; });
   }
+  // v38: per-round adapter — components see a flat array for the active round, but writes
+  // route into the round-keyed structure. Backward-compatible with all flat-array consumers.
+  const seriesForRound = (allSeries[currentRound] || []);
+  const setSeriesForRound = useCallback((v) => {
+    setAllSeries(prev => {
+      const cur = prev[currentRound] || [];
+      const next = typeof v === "function" ? v(cur) : v;
+      const updated = {...prev, [currentRound]: next};
+      scheduleSync("series", updated);
+      return updated;
+    });
+  }, [currentRound]);
+  const matchupsForRound = (matchups[currentRound] || []);
+  const setMatchupsForRound = useCallback((v) => {
+    setMatchups(prev => {
+      const cur = prev[currentRound] || [];
+      const next = typeof v === "function" ? v(cur) : v;
+      const updated = {...prev, [currentRound]: next};
+      scheduleSync("matchups", updated);
+      return updated;
+    });
+  }, [currentRound]);
 
   useEffect(()=>{
     if(!SUPABASE_ENABLED)return;
@@ -1679,11 +1760,13 @@ function AppInner() {
       const keys=["players","goalies","matchups","advancement","series"];
       const localKeys=["nhl_p","nhl_g","nhl_m","nhl_adv","nhl_s"];
       const setters=[setPlayers,setGoalies,setMatchups,setAdvancement,setAllSeries];
+      // v38: matchups/series may be a flat array from old cloud data — migrate to round-keyed.
+      const adapters = [null, null, migrateMatchups, null, migrateSeries];
       for(let i=0;i<keys.length;i++){
         const haveLocal = !!localStorage.getItem(localKeys[i]);
-        if (haveLocal) continue; // local wins; don't touch
+        if (haveLocal) continue;
         const v=await sbLoad(keys[i]);
-        if(v) setters[i](v);
+        if(v) setters[i](adapters[i] ? adapters[i](v) : v);
       }
       setSyncStatus("ok");
     })();
@@ -1691,9 +1774,198 @@ function AppInner() {
 
   const teamExpGR1 = useMemo(()=>{
     const m={};
-    for(const x of matchups){if(x.homeAbbr)m[x.homeAbbr]=(m[x.homeAbbr]||0)+x.expGames;if(x.awayAbbr)m[x.awayAbbr]=(m[x.awayAbbr]||0)+x.expGames;}
+    for(const x of (matchups.r1||[])){if(x.homeAbbr)m[x.homeAbbr]=(m[x.homeAbbr]||0)+x.expGames;if(x.awayAbbr)m[x.awayAbbr]=(m[x.awayAbbr]||0)+x.expGames;}
     return m;
-  },[matchups]);
+  },[matchups.r1]);
+
+  // v38: helper to compute one series' (hwp, awp) from sim cache or closed-form.
+  // Round-aware: sim cache key now includes round prefix.
+  function seriesWinProbs(sr, roundId) {
+    if (!sr || !sr.homeAbbr || !sr.awayAbbr) return null;
+    const seriesKey = roundId + "|" + sr.homeAbbr + "|" + sr.awayAbbr;
+    // Backward-compat fallback to old non-round keys (R1 only)
+    const cached = (simResultsBySeries||{})[seriesKey] || (roundId === "r1" ? (simResultsBySeries||{})[sr.homeAbbr + "|" + sr.awayAbbr] : null);
+    if (cached && cached.result && cached.result.winnerProb) {
+      return { hwp: cached.result.winnerProb.H, awp: cached.result.winnerProb.A };
+    }
+    if (sr.games && sr.games.length) {
+      const games = sr.games.map(g => ({...g, winPct: g.winPct ?? 0.5}));
+      try {
+        const outcomes = computeOutcomes(games);
+        const hwp = ["4-0","4-1","4-2","4-3"].reduce((a,k)=>a+(outcomes[k]||0), 0);
+        return { hwp, awp: 1 - hwp };
+      } catch { return null; }
+    }
+    return null;
+  }
+
+  // v38: P(team wins R1) — direct from R1 series.
+  const autoR1ByTeam = useMemo(()=>{
+    const out = {};
+    for (const sr of ((allSeries.r1)||[])) {
+      const wp = seriesWinProbs(sr, "r1");
+      if (wp != null) {
+        out[sr.homeAbbr] = wp.hwp;
+        out[sr.awayAbbr] = wp.awp;
+      }
+    }
+    return out;
+  }, [allSeries.r1, simResultsBySeries]);
+
+  // v38: For each team, compute P(team in R2 series i) and P(team wins R2 | in series i).
+  // Then sum: P(team wins R2) = Σ_i P(team in series i) × P(team wins series i | in it).
+  // For "in series i": team needs to win their R1 series. Series i in R2 is fed by bracket.r2pairs[i] = [r1A, r1B].
+  // P(team is in r2 series i) = P(team wins one of those R1 series).
+  // P(team wins r2 series i | in it) = avg over R1 opponents weighted by their R1 win prob.
+  // Opponent in r2 = winner of the OTHER r1 series in the pair.
+  const autoConfByTeam = useMemo(()=>{
+    // First, build R1 winner distributions per series: r1Winners[seriesIdx] = { teamAbbr: prob }
+    const r1Winners = (allSeries.r1||[]).map((sr, i) => {
+      const wp = seriesWinProbs(sr, "r1");
+      if (!wp || !sr.homeAbbr || !sr.awayAbbr) return {};
+      return { [sr.homeAbbr]: wp.hwp, [sr.awayAbbr]: wp.awp };
+    });
+    // Now build R2 series pairings: r2 series i is fed by r1 series indexes bracket.r2pairs[i]
+    // For each team, for each r2 series i, P(team is in it) and P(team wins it).
+    // P(team in r2 series i) = P(team wins their r1 series IF that series is in the r2 pair) summed over the two source series.
+    // P(team wins r2 series i | in it) — needs an estimate. Cleanest pre-matchup:
+    //   - If user has set up an r2 series (sr.homeAbbr/awayAbbr filled), use the actual sim/closed-form.
+    //   - Otherwise, fallback to xG-strength matchup vs each potential r2 opponent.
+    const out = {};
+    for (let r2Idx = 0; r2Idx < (bracket.r2pairs||[]).length; r2Idx++) {
+      const [r1IdxA, r1IdxB] = bracket.r2pairs[r2Idx];
+      const winnersA = r1Winners[r1IdxA] || {};
+      const winnersB = r1Winners[r1IdxB] || {};
+      const r2Series = (allSeries.r2||[])[r2Idx];
+      const r2WP = r2Series ? seriesWinProbs(r2Series, "r2") : null;
+      // For each candidate team (winner of A): they would face winner of B.
+      for (const [teamA, pA] of Object.entries(winnersA)) {
+        for (const [teamB, pB] of Object.entries(winnersB)) {
+          const pInR2 = pA * pB; // both must win to face each other
+          let pWinThisR2;
+          if (r2WP && r2Series.homeAbbr === teamA) pWinThisR2 = r2WP.hwp;
+          else if (r2WP && r2Series.awayAbbr === teamA) pWinThisR2 = r2WP.awp;
+          else if (r2WP && r2Series.homeAbbr === teamB) pWinThisR2 = r2WP.awp;
+          else if (r2WP && r2Series.awayAbbr === teamB) pWinThisR2 = r2WP.hwp;
+          else {
+            // Fall back to xG-strength matchup
+            const sA = computeTeamStrength(players, teamA);
+            const sB = computeTeamStrength(players, teamB);
+            pWinThisR2 = winProbFromStrength(sA, sB, 0, 1.0);
+            if (pWinThisR2 == null) pWinThisR2 = 0.5;
+          }
+          out[teamA] = (out[teamA] || 0) + pInR2 * pWinThisR2;
+          // And the inverse: team B winning vs team A
+          const pWinForB = 1 - pWinThisR2;
+          out[teamB] = (out[teamB] || 0) + pInR2 * pWinForB;
+        }
+      }
+    }
+    return out;
+  }, [allSeries.r1, allSeries.r2, simResultsBySeries, bracket, players]);
+
+  // v38: P(team wins Cup) = P(team wins Conf) × P(team wins F | in it).
+  // Conf final pairing = bracket.r3pairs / fpair chains. Cleanest approximation:
+  //   - For each team: P(in F) = P(wins R1) × P(wins R2 | in R1 winner pool) × P(wins R3 | in R2 winner pool)
+  //   - Build via convolution over bracket structure.
+  // For now we approximate Conf-winner = winning your conference (both r3 series), and Cup = winning both Conf and Final.
+  // Skip fully chained F sim — use xG-strength head-to-head once both conf champs are determined.
+  const autoCupByTeam = useMemo(()=>{
+    // P(team makes conference final) ≈ P(wins R2 chain) — already in autoConfByTeam IF we interpret it that way.
+    // But autoConfByTeam is "P(wins R2)" not "P(wins Conf)". To get Conf, need to chain R2 winners through R3.
+    // For each R3 series (= conference final): bracket.r3pairs[i] = [r2IdxA, r2IdxB].
+    // P(team wins R3 series i) = sum over (teamX from r2A, teamY from r2B) of P(both there) × P(team beats opponent).
+    // But P(team in r2A as winner) is not in autoConfByTeam directly — it's P(wins R2) summed across all R2 series.
+    // Need per-R2-series winner probabilities.
+    const r1Winners = (allSeries.r1||[]).map((sr) => {
+      const wp = seriesWinProbs(sr, "r1");
+      if (!wp || !sr.homeAbbr || !sr.awayAbbr) return {};
+      return { [sr.homeAbbr]: wp.hwp, [sr.awayAbbr]: wp.awp };
+    });
+    // r2WinnerByR2Series[i] = { team: prob_wins_r2_series_i }
+    const r2WinnerByR2Series = (bracket.r2pairs||[]).map((pair, r2Idx) => {
+      const [a, b] = pair;
+      const wA = r1Winners[a] || {}, wB = r1Winners[b] || {};
+      const r2Series = (allSeries.r2||[])[r2Idx];
+      const r2WP = r2Series ? seriesWinProbs(r2Series, "r2") : null;
+      const dist = {};
+      for (const [tA, pA] of Object.entries(wA)) {
+        for (const [tB, pB] of Object.entries(wB)) {
+          const pBothThere = pA * pB;
+          let pAWins;
+          if (r2WP && r2Series.homeAbbr === tA) pAWins = r2WP.hwp;
+          else if (r2WP && r2Series.awayAbbr === tA) pAWins = r2WP.awp;
+          else {
+            const sA = computeTeamStrength(players, tA);
+            const sB = computeTeamStrength(players, tB);
+            pAWins = winProbFromStrength(sA, sB, 0, 1.0);
+            if (pAWins == null) pAWins = 0.5;
+          }
+          dist[tA] = (dist[tA] || 0) + pBothThere * pAWins;
+          dist[tB] = (dist[tB] || 0) + pBothThere * (1 - pAWins);
+        }
+      }
+      return dist;
+    });
+    // r3WinnerByR3Series[i] = { team: prob } — conference champ
+    const r3WinnerByR3Series = (bracket.r3pairs||[]).map((pair, r3Idx) => {
+      const [a, b] = pair;
+      const wA = r2WinnerByR2Series[a] || {}, wB = r2WinnerByR2Series[b] || {};
+      const r3Series = (allSeries.r3||[])[r3Idx];
+      const r3WP = r3Series ? seriesWinProbs(r3Series, "r3") : null;
+      const dist = {};
+      for (const [tA, pA] of Object.entries(wA)) {
+        for (const [tB, pB] of Object.entries(wB)) {
+          const pBothThere = pA * pB;
+          let pAWins;
+          if (r3WP && r3Series.homeAbbr === tA) pAWins = r3WP.hwp;
+          else if (r3WP && r3Series.awayAbbr === tA) pAWins = r3WP.awp;
+          else {
+            const sA = computeTeamStrength(players, tA);
+            const sB = computeTeamStrength(players, tB);
+            pAWins = winProbFromStrength(sA, sB, 0, 1.0);
+            if (pAWins == null) pAWins = 0.5;
+          }
+          dist[tA] = (dist[tA] || 0) + pBothThere * pAWins;
+          dist[tB] = (dist[tB] || 0) + pBothThere * (1 - pAWins);
+        }
+      }
+      return dist;
+    });
+    // Final (Cup): bracket.fpair = [r3IdxA, r3IdxB]
+    const cupDist = {};
+    if (bracket.fpair && bracket.fpair.length === 2) {
+      const [a, b] = bracket.fpair;
+      const wA = r3WinnerByR3Series[a] || {}, wB = r3WinnerByR3Series[b] || {};
+      const fSeries = (allSeries.f||[])[0];
+      const fWP = fSeries ? seriesWinProbs(fSeries, "f") : null;
+      for (const [tA, pA] of Object.entries(wA)) {
+        for (const [tB, pB] of Object.entries(wB)) {
+          const pBothThere = pA * pB;
+          let pAWins;
+          if (fWP && fSeries.homeAbbr === tA) pAWins = fWP.hwp;
+          else if (fWP && fSeries.awayAbbr === tA) pAWins = fWP.awp;
+          else {
+            const sA = computeTeamStrength(players, tA);
+            const sB = computeTeamStrength(players, tB);
+            pAWins = winProbFromStrength(sA, sB, 0, 1.0);
+            if (pAWins == null) pAWins = 0.5;
+          }
+          cupDist[tA] = (cupDist[tA] || 0) + pBothThere * pAWins;
+          cupDist[tB] = (cupDist[tB] || 0) + pBothThere * (1 - pAWins);
+        }
+      }
+    }
+    // Conference winners = sum over r3 series (a team appears in only one)
+    const confDist = {};
+    for (const dist of r3WinnerByR3Series) {
+      for (const [t, p] of Object.entries(dist)) confDist[t] = (confDist[t] || 0) + p;
+    }
+    return { conf: confDist, cup: cupDist };
+  }, [allSeries, simResultsBySeries, bracket, players]);
+
+  const autoConfByTeamFinal = autoCupByTeam.conf;
+  const autoCupByTeamFinal = autoCupByTeam.cup;
 
   const computeLambda = useCallback((p,stat,scope)=>{
     const rm=roleMultiplier(p.lineRole);
@@ -1707,12 +1979,20 @@ function AppInner() {
     const rr = shrunk * rm * globals.rateDiscount * statRateMultiplier(stat);
     let expTotal,actualGP;
     if(scope==="r1"){expTotal=teamExpGR1[p.team]||5.82;actualGP=p.pGP||0;}
-    else{const adv=advancement[p.team]||{winR1:0.5,winConf:0.25,winCup:0.1};expTotal=5.82+5.82*adv.winR1+5.82*adv.winConf+5.82*adv.winCup;actualGP=p.pGP||0;}
+    else{
+      const adv=advancement[p.team]||{winR1:0.5,winConf:0.25,winCup:0.1};
+      // v38: prefer auto-derived values; fall back to manually entered advancement
+      const r1 = autoR1ByTeam[p.team] != null ? autoR1ByTeam[p.team] : adv.winR1;
+      const conf = (autoConfByTeamFinal||{})[p.team] != null ? autoConfByTeamFinal[p.team] : adv.winConf;
+      const cup = (autoCupByTeamFinal||{})[p.team] != null ? autoCupByTeamFinal[p.team] : adv.winCup;
+      expTotal=5.82+5.82*r1+5.82*conf+5.82*cup;
+      actualGP=p.pGP||0;
+    }
     const actual = p[actKey]||0;
     const futureLam = Math.max(0.0001, rr * Math.max(0, expTotal - actualGP));
     const lam = Math.max(0.0001, actual + futureLam);
     return {actual, futureLam, lam};
-  },[globals.rateDiscount,teamExpGR1,advancement]);
+  },[globals.rateDiscount,teamExpGR1,advancement,autoR1ByTeam,autoConfByTeamFinal,autoCupByTeamFinal]);
 
   // v24 Phase E Pt3: Per-matchup series sims. Cached by matchups + globals + players.
   // Stat-independent — running all 9 stats per sim gives us PMFs for every leader market.
@@ -1720,7 +2000,7 @@ function AppInner() {
     if (tab !== "leaders") return null;
     if (lScope !== "r1") return null;
     if (!players || !players.length) return null;
-    const activeMatchups = matchups.filter(m => m.homeAbbr && m.awayAbbr);
+    const activeMatchups = (matchups.r1 || []).filter(m => m.homeAbbr && m.awayAbbr);
     if (!activeMatchups.length) return null;
     const r = globals.dispersion;
     const HOME_IS_MATCHUP_HOME = [true,true,true,false,false,true,false,true];
@@ -1789,7 +2069,7 @@ function AppInner() {
     const pf=globals.powerFactor;
     const r = globals.dispersion;
     let pool=players.filter(p=>roleMultiplier(p.lineRole)>0);
-    if(lScope==="r1"){const active=new Set([...matchups.filter(m=>m.homeAbbr).map(m=>m.homeAbbr),...matchups.filter(m=>m.awayAbbr).map(m=>m.awayAbbr)]);if(active.size>0)pool=pool.filter(p=>active.has(p.team));}
+    if(lScope==="r1"){const r1m=matchups.r1||[];const active=new Set([...r1m.filter(m=>m.homeAbbr).map(m=>m.homeAbbr),...r1m.filter(m=>m.awayAbbr).map(m=>m.awayAbbr)]);if(active.size>0)pool=pool.filter(p=>active.has(p.team));}
     // v24: Monte Carlo leader probabilities. Handles ties correctly + uses NB dispersion consistent with props.
     const computed = pool.map(p=>computeLambda(p,lStat,lScope));
     const entries = computed.map(c=>({futureLam:c.futureLam, actual:c.actual}));
@@ -1800,8 +2080,8 @@ function AppInner() {
     return pool.map((p,i)=>({...p,lambda:computed[i].lam,futureLam:computed[i].futureLam,actualStat:computed[i].actual,trueProb:raw[i],adjProb:adj[i]})).sort((a,b)=>b.adjProb-a.adjProb).slice(0,lTopN);
   },[players,lStat,lScope,globals,computeLambda,matchups,advancement,lTopN,r1LeaderMarket]);
 
-  function exportState(){const s={players,goalies,matchups,allSeries,advancement,globals,margins};return JSON.stringify(s,null,2);}
-  function importState(text){try{const s=JSON.parse(text);if(s.players){setPlayers(s.players);scheduleSync("players",s.players);}if(s.goalies){setGoalies(s.goalies);scheduleSync("goalies",s.goalies);}if(s.matchups){setMatchups(s.matchups);}if(s.allSeries){setAllSeries(s.allSeries);}if(s.advancement){setAdvancement(s.advancement);}if(s.globals)setGlobals(s.globals);if(s.margins)setMargins(s.margins);return{ok:true};}catch(e){return{ok:false,error:e.message};}}
+  function exportState(){const s={players,goalies,matchups,allSeries,advancement,globals,margins,bracket};return JSON.stringify(s,null,2);}
+  function importState(text){try{const s=JSON.parse(text);if(s.players){setPlayers(s.players);scheduleSync("players",s.players);}if(s.goalies){setGoalies(s.goalies);scheduleSync("goalies",s.goalies);}if(s.matchups){setMatchups(migrateMatchups(s.matchups));}if(s.allSeries){setAllSeries(migrateSeries(s.allSeries));}if(s.advancement){setAdvancement(s.advancement);}if(s.globals)setGlobals(s.globals);if(s.margins)setMargins(s.margins);if(s.bracket)setBracket(s.bracket);return{ok:true};}catch(e){return{ok:false,error:e.message};}}
 
   const STATS=[
     {id:"g",label:"Goals"},{id:"a",label:"Assists"},{id:"pts",label:"Points"},
@@ -1831,19 +2111,24 @@ function AppInner() {
       </div>
 
       <div style={{maxWidth:1440,margin:"0 auto",padding:"20px"}}>
-        {tab==="leaders"&&<LeadersTab players={players} setPlayers={setP} matchups={matchups} setMatchups={setM}
+        {tab==="leaders"&&<LeadersTab players={players} setPlayers={setP} matchups={matchupsForRound} setMatchups={setMatchupsForRound}
           advancement={advancement} setAdvancement={setAdv} globals={globals} setGlobals={setGlobals}
           leaderMarket={leaderMarket} STATS={STATS} lStat={lStat} setLStat={setLStat}
           lScope={lScope} setLScope={setLScope} lTopN={lTopN} setLTopN={setLTopN}
-          showTrue={showTrue} setShowTrue={setShowTrue} showDec={showDec} dark={dark}/>}
-        {tab==="series"&&<SeriesTab allSeries={allSeries} setAllSeries={setSeries}
+          showTrue={showTrue} setShowTrue={setShowTrue} showDec={showDec} dark={dark}
+          allSeries={seriesForRound} simResultsBySeries={simResultsBySeries}
+          autoR1ByTeam={autoR1ByTeam} autoConfByTeam={autoConfByTeamFinal} autoCupByTeam={autoCupByTeamFinal}
+          currentRound={currentRound} setCurrentRound={setCurrentRound}/>}
+        {tab==="series"&&<SeriesTab allSeries={seriesForRound} setAllSeries={setSeriesForRound}
           players={players} goalies={goalies} margins={margins} setMargins={setMargins}
           globals={globals} showTrue={showTrue} dark={dark} onEnterGame={setGameModal}
           gameUploadCounter={gameUploadCounter}
-          simResultsBySeries={simResultsBySeries} setSimForSeries={setSimForSeries}/>}
+          simResultsBySeries={simResultsBySeries} setSimForSeries={setSimForSeries}
+          currentRound={currentRound} setCurrentRound={setCurrentRound}/>}
         {tab==="upload"&&<UploadTab players={players} setPlayers={setP} goalies={goalies} setGoalies={setG}
-          exportState={exportState} importState={importState} syncStatus={syncStatus} allSeries={allSeries} setAllSeries={setSeries} dark={dark}
-          onGameUploaded={bumpGameUpload}/>}
+          exportState={exportState} importState={importState} syncStatus={syncStatus}
+          allSeries={seriesForRound} setAllSeries={setSeriesForRound} dark={dark}
+          onGameUploaded={bumpGameUpload} currentRound={currentRound}/>}
         {tab==="compare"&&<CompareTab leaderMarket={leaderMarket} STATS={STATS} lStat={lStat} setLStat={setLStat} lScope={lScope} setLScope={setLScope} dark={dark}/>}
         {tab==="stats"&&<PlayerStatsTab players={players} setPlayers={setP} dark={dark}/>}
         {tab==="roles"&&<RolesTab players={players} setPlayers={setP} dark={dark}/>}
@@ -1854,15 +2139,15 @@ function AppInner() {
 
       {gameModal!==null&&<GameEntryModal
         dark={dark}
-        allSeries={allSeries}
+        allSeries={seriesForRound}
         players={players}
         goalies={goalies}
         initialSeriesIdx={gameModal.seriesIdx}
         initialGameIdx={gameModal.gameIdx}
         onClose={()=>setGameModal(null)}
         onCommit={(seriesIdx,gameIdx,result,homeScore,awayScore,playerDeltas,goalieDeltas)=>{
-          // 1. Update series game result
-          setSeries(prev=>{
+          // 1. Update series game result (round-aware)
+          setSeriesForRound(prev=>{
             const u=[...prev];
             const games=[...u[seriesIdx].games];
             games[gameIdx]={...games[gameIdx],result,homeScore,awayScore};
@@ -2240,7 +2525,7 @@ function GameEntryModal({dark,allSeries,players,goalies,initialSeriesIdx,initial
 // ═══════════════════════════════════════════════════════════════════════════════
 // LEADERS TAB
 // ═══════════════════════════════════════════════════════════════════════════════
-function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdvancement,globals,setGlobals,leaderMarket,STATS,lStat,setLStat,lScope,setLScope,lTopN,setLTopN,showTrue,setShowTrue,showDec,dark}) {
+function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdvancement,globals,setGlobals,leaderMarket,STATS,lStat,setLStat,lScope,setLScope,lTopN,setLTopN,showTrue,setShowTrue,showDec,dark,allSeries,simResultsBySeries,autoR1ByTeam,autoConfByTeam,autoCupByTeam,currentRound,setCurrentRound}) {
   const [showR1,setShowR1]=useState(false);
   const [showAdv,setShowAdv]=useState(false);
   const [filterTeam,setFilterTeam]=useState("ALL");
@@ -2252,6 +2537,22 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
 
   return (
     <div>
+      {/* v38: Round selector — same as Series Pricer. Affects which series feed leader markets. */}
+      <div style={{display:"flex",gap:6,marginBottom:10,alignItems:"center"}}>
+        <span style={{fontSize:10,fontWeight:500,letterSpacing:"0.1em",color:"var(--color-text-tertiary)",marginRight:6}}>ROUND</span>
+        {ROUND_IDS.map(rid => (
+          <button key={rid} onClick={()=>setCurrentRound&&setCurrentRound(rid)}
+            style={{
+              padding:"5px 14px",fontSize:11,fontWeight:500,borderRadius:"var(--border-radius-md)",cursor:"pointer",
+              border:"0.5px solid",
+              borderColor: currentRound===rid ? "#7c3aed" : "var(--color-border-secondary)",
+              background: currentRound===rid ? "rgba(124,58,237,0.18)" : "var(--color-background-secondary)",
+              color: currentRound===rid ? "#a78bfa" : "var(--color-text-secondary)",
+            }}>
+            {ROUND_LABELS[rid]}
+          </button>
+        ))}
+      </div>
       <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",marginBottom:14}}>
         <Seg options={[{id:"r1",label:"Round 1"},{id:"full",label:"Full Playoff"}]} value={lScope} onChange={setLScope}/>
         <Seg options={STATS} value={lStat} onChange={setLStat} accent="#1d4ed8"/>
@@ -2324,17 +2625,38 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
       </Card>}
 
       {showAdv&&lScope==="full"&&<Card style={{marginBottom:14}}>
-        <SH title="Team Advancement"/>
+        <SH title="Team Advancement" sub="P(Win R1) auto from Series Pricer; Conf/Cup chained through bracket (sim → xG fallback). Override with input if needed."/>
         <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
           <TH cols={["Team","P(Win R1)","P(Win Conf)","P(Win Cup)"]}/>
-          <tbody>{PLAYOFF_TEAMS.map(t=>{const adv=advancement[t]||{winR1:0.5,winConf:0.25,winCup:0.1};return(
+          <tbody>{PLAYOFF_TEAMS.map(t=>{
+            const adv=advancement[t]||{winR1:0.5,winConf:0.25,winCup:0.1};
+            const autoR1 = autoR1ByTeam[t];
+            const autoConf = (autoConfByTeam||{})[t];
+            const autoCup = (autoCupByTeam||{})[t];
+            const r1Display = autoR1 != null ? autoR1 : adv.winR1;
+            const confDisplay = autoConf != null ? autoConf : adv.winConf;
+            const cupDisplay = autoCup != null ? autoCup : adv.winCup;
+            return (
             <tr key={t} style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
               <td style={{padding:"4px 8px",fontWeight:500}}>{t} <span style={{color:"var(--color-text-secondary)",fontWeight:400}}>{TEAM_NAMES[t]}</span></td>
-              {["winR1","winConf","winCup"].map(k=>(
-                <td key={k} style={{padding:"3px 6px",textAlign:"right"}}>
-                  <NI value={adv[k]} onChange={v=>setAdvancement(p=>({...p,[t]:{...p[t],[k]:v}}))} min={0} max={1} step={0.01} style={{width:58}}/>
-                </td>
-              ))}
+              <td style={{padding:"3px 6px",textAlign:"right"}}>
+                <div style={{display:"flex",gap:4,alignItems:"center",justifyContent:"flex-end"}}>
+                  {autoR1 != null && <span style={{fontSize:9,padding:"1px 5px",background:"rgba(59,130,246,0.15)",color:"#60a5fa",borderRadius:3,letterSpacing:0.3}} title="auto from Series Pricer">AUTO</span>}
+                  <NI value={+r1Display.toFixed(3)} onChange={v=>setAdvancement(p=>({...p,[t]:{...(p[t]||{winR1:0.5,winConf:0.25,winCup:0.1}),winR1:v}}))} min={0} max={1} step={0.01} style={{width:58}}/>
+                </div>
+              </td>
+              <td style={{padding:"3px 6px",textAlign:"right"}}>
+                <div style={{display:"flex",gap:4,alignItems:"center",justifyContent:"flex-end"}}>
+                  {autoConf != null && <span style={{fontSize:9,padding:"1px 5px",background:"rgba(59,130,246,0.15)",color:"#60a5fa",borderRadius:3,letterSpacing:0.3}} title="chained R1 → R2 → R3 (sim or xG)">AUTO</span>}
+                  <NI value={+confDisplay.toFixed(3)} onChange={v=>setAdvancement(p=>({...p,[t]:{...(p[t]||{winR1:0.5,winConf:0.25,winCup:0.1}),winConf:v}}))} min={0} max={1} step={0.01} style={{width:58}}/>
+                </div>
+              </td>
+              <td style={{padding:"3px 6px",textAlign:"right"}}>
+                <div style={{display:"flex",gap:4,alignItems:"center",justifyContent:"flex-end"}}>
+                  {autoCup != null && <span style={{fontSize:9,padding:"1px 5px",background:"rgba(59,130,246,0.15)",color:"#60a5fa",borderRadius:3,letterSpacing:0.3}} title="chained R1 → R2 → R3 → F (sim or xG)">AUTO</span>}
+                  <NI value={+cupDisplay.toFixed(3)} onChange={v=>setAdvancement(p=>({...p,[t]:{...(p[t]||{winR1:0.5,winConf:0.25,winCup:0.1}),winCup:v}}))} min={0} max={1} step={0.01} style={{width:58}}/>
+                </div>
+              </td>
             </tr>);})}</tbody>
         </table>
       </Card>}
@@ -2379,11 +2701,17 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
 // ═══════════════════════════════════════════════════════════════════════════════
 // SERIES TAB
 // ═══════════════════════════════════════════════════════════════════════════════
-function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,globals,showTrue,dark,onEnterGame,gameUploadCounter,simResultsBySeries,setSimForSeries}) {
+function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,globals,showTrue,dark,onEnterGame,gameUploadCounter,simResultsBySeries,setSimForSeries,currentRound,setCurrentRound}) {
   const [si,setSi]=useState(0);
+  // v38: reset to series 0 when round changes (different rounds have different series counts)
+  useEffect(()=>{
+    setSi(0);
+  }, [currentRound]);
+  // Defensive: clamp si if it exceeds available series
+  const safeSi = Math.min(si, Math.max(0, (allSeries.length||1) - 1));
   const [mkt,setMkt]=useState("winner");
   const [showMgn,setShowMgn]=useState(false);
-  const s=allSeries[si];
+  const s=allSeries[safeSi] || defaultSeries(0);
 
   // v24: compute team strengths from on-ice xG for auto win% generation
   const homeStrength = useMemo(()=>s.homeAbbr?computeTeamStrength(players,s.homeAbbr):null, [players,s.homeAbbr]);
@@ -2393,15 +2721,15 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
     return winProbFromStrength(homeStrength,awayStrength,0.05,1.0);
   },[homeStrength,awayStrength]);
 
-  function updS(f,v){setAllSeries(p=>{const u=[...p];u[si]={...u[si],[f]:v};return u;});}
-  function updG(gi,f,v){setAllSeries(p=>{const u=[...p],games=[...u[si].games];
+  function updS(f,v){setAllSeries(p=>{const u=[...p];u[safeSi]={...u[safeSi],[f]:v};return u;});}
+  function updG(gi,f,v){setAllSeries(p=>{const u=[...p],games=[...u[safeSi].games];
     // v22: setting pOT directly flags it as manual
     if(f==="pOT") games[gi]={...games[gi],pOT:v,pOT_manual:true};
     else games[gi]={...games[gi],[f]:v};
     if(gi===0&&f==="winPct")for(let i=1;i<7;i++)if(games[i].winPct===null)games[i]={...games[i],winPct:HOME_PATTERN[i+1]?v:1-v};
     if(gi===0&&f==="expTotal")for(let i=1;i<7;i++)if(games[i].expTotal===null)games[i]={...games[i],expTotal:v};
     if(gi===0&&f==="pOT")for(let i=1;i<7;i++)if(!games[i].pOT_manual)games[i]={...games[i],pOT:v,pOT_manual:true};
-    u[si]={...u[si],games};return u;});}
+    u[safeSi]={...u[safeSi],games};return u;});}
 
   const effG=s.games.map((g,i)=>{
     const winPct = g.winPct??(HOME_PATTERN[i+1]?(s.games[0].winPct||0.55):1-(s.games[0].winPct||0.55));
@@ -2539,9 +2867,8 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
     return total;
   };
 
-  // v34: sim state lives at App level (simResultsBySeries) keyed by `${homeAbbr}|${awayAbbr}`
-  // so it survives tab/series navigation. Local state is only the running flag.
-  const seriesKey = (s.homeAbbr||"") + "|" + (s.awayAbbr||"");
+  // v38: sim cache key now includes round prefix so PIT in R1 vs PIT in R2 don't collide.
+  const seriesKey = (currentRound||"r1") + "|" + (s.homeAbbr||"") + "|" + (s.awayAbbr||"");
   const cached = simResultsBySeries[seriesKey];
   const simResult = cached ? cached.result : null;
   const simKey = cached ? cached.key : null;
@@ -2566,7 +2893,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
         setSimRunning(false);
       }
     }, 30);
-  }, [effKey, s.homeAbbr, s.awayAbbr, players, goalies, globals, seriesKey, setSimForSeries]);
+  }, [effKey, s.homeAbbr, s.awayAbbr, players, goalies, globals, seriesKey, setSimForSeries, currentRound]);
 
   // v34: NO LONGER clear sim on series switch. The per-series cache means each series
   // keeps its own sim result. Switching back retrieves it. Only re-run on explicit click.
@@ -2916,10 +3243,26 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
 
   return (
     <div>
+      {/* v38: Round selector — switch between R1/R2/R3/Final. Each round has its own series array. */}
+      <div style={{display:"flex",gap:6,marginBottom:10,alignItems:"center"}}>
+        <span style={{fontSize:10,fontWeight:500,letterSpacing:"0.1em",color:"var(--color-text-tertiary)",marginRight:6}}>ROUND</span>
+        {ROUND_IDS.map(rid => (
+          <button key={rid} onClick={()=>setCurrentRound&&setCurrentRound(rid)}
+            style={{
+              padding:"5px 14px",fontSize:11,fontWeight:500,borderRadius:"var(--border-radius-md)",cursor:"pointer",
+              border:"0.5px solid",
+              borderColor: currentRound===rid ? "#7c3aed" : "var(--color-border-secondary)",
+              background: currentRound===rid ? "rgba(124,58,237,0.18)" : "var(--color-background-secondary)",
+              color: currentRound===rid ? "#a78bfa" : "var(--color-text-secondary)",
+            }}>
+            {ROUND_LABELS[rid]}
+          </button>
+        ))}
+      </div>
       <div style={{display:"flex",gap:6,marginBottom:14,flexWrap:"wrap",alignItems:"center"}}>
         {allSeries.map((sr,i)=><button key={i} onClick={()=>setSi(i)} style={{padding:"5px 11px",fontSize:11,borderRadius:"var(--border-radius-md)",border:"0.5px solid",cursor:"pointer",
-          borderColor:si===i?"#3b82f6":"var(--color-border-secondary)",background:si===i?"#3b82f6":"var(--color-background-secondary)",color:si===i?"white":"var(--color-text-secondary)"}}>
-          {sr.homeAbbr&&sr.awayAbbr?`${sr.homeAbbr} v ${sr.awayAbbr}`:`S${i+1}`}</button>)}
+          borderColor:safeSi===i?"#3b82f6":"var(--color-border-secondary)",background:safeSi===i?"#3b82f6":"var(--color-background-secondary)",color:safeSi===i?"white":"var(--color-text-secondary)"}}>
+          {sr.homeAbbr&&sr.awayAbbr?`${sr.homeAbbr} v ${sr.awayAbbr}`:`${ROUND_LABELS[currentRound]||"S"} #${i+1}`}</button>)}
         <button onClick={()=>setShowMgn(v=>!v)} style={{marginLeft:"auto",padding:"4px 10px",fontSize:11,borderRadius:"var(--border-radius-md)",cursor:"pointer",
           background:showMgn?"#1d4ed820":"var(--color-background-secondary)",border:showMgn?"0.5px solid #3b82f6":"0.5px solid var(--color-border-secondary)",
           color:showMgn?"#60a5fa":"var(--color-text-secondary)"}}>⚙ Margins</button>
@@ -3062,7 +3405,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
                 <label style={{color:"var(--color-text-secondary)",display:"flex",gap:4,alignItems:"center"}}>
                   Goal shift: <NI value={s.winnerGoalShift??0.15} onChange={v=>updS("winnerGoalShift",v)} min={0} max={0.4} step={0.01} style={{width:44}}/>
                 </label>
-                <button onClick={()=>setAllSeries(p=>{const u=[...p];u[si]={...u[si],games:u[si].games.map(g=>({...g,pOT_manual:false,pOT:null}))};return u;})}
+                <button onClick={()=>setAllSeries(p=>{const u=[...p];u[safeSi]={...u[safeSi],games:u[safeSi].games.map(g=>({...g,pOT_manual:false,pOT:null}))};return u;})}
                   style={{fontSize:9,padding:"3px 8px",background:"transparent",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-secondary)",cursor:"pointer"}}
                   title="Reset all games' OT% to auto-computed values from expTotal and winPct">
                   Auto OT%
@@ -3071,12 +3414,12 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
                   // Seed Game 1 with xG-derived win% from team strength; pattern propagates to other games via updG logic
                   setAllSeries(p=>{
                     const u=[...p];
-                    const games=[...u[si].games];
+                    const games=[...u[safeSi].games];
                     games[0]={...games[0],winPct:+autoWinPct.toFixed(3)};
                     for(let i=1;i<7;i++){
                       games[i]={...games[i],winPct:HOME_PATTERN[i+1]?+autoWinPct.toFixed(3):+(1-autoWinPct).toFixed(3)};
                     }
-                    u[si]={...u[si],games};
+                    u[safeSi]={...u[safeSi],games};
                     return u;
                   });
                 }}
@@ -3097,7 +3440,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
           {goalies && s.homeAbbr && s.awayAbbr && <Card style={{marginBottom:10}}>
             <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
               <SH title="Goalie Assignments" sub="Overrides apply to scoring props only"/>
-              <button onClick={()=>setAllSeries(p=>{const u=[...p];u[si]={...u[si],games:u[si].games.map(g=>({...g,homeGoalie:null,awayGoalie:null}))};return u;})}
+              <button onClick={()=>setAllSeries(p=>{const u=[...p];u[safeSi]={...u[safeSi],games:u[safeSi].games.map(g=>({...g,homeGoalie:null,awayGoalie:null}))};return u;})}
                 style={{marginLeft:"auto",fontSize:9,padding:"3px 8px",background:"transparent",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-secondary)",cursor:"pointer"}}
                 title="Clear all per-game goalie overrides; revert to team starters">
                 Auto
@@ -4988,7 +5331,7 @@ function PlayoffTotalsTable({players,dark}) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // UPLOAD TAB
 // ═══════════════════════════════════════════════════════════════════════════════
-function UploadTab({players,setPlayers,goalies,setGoalies,exportState,importState,syncStatus,allSeries,setAllSeries,dark,onGameUploaded}) {
+function UploadTab({players,setPlayers,goalies,setGoalies,exportState,importState,syncStatus,allSeries,setAllSeries,dark,onGameUploaded,currentRound}) {
   const [fileErr,setFileErr]=useState("");
   const setErr=setFileErr; // alias used in file handlers
 
