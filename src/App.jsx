@@ -2424,13 +2424,13 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
                   <td style={{padding:"1px 2px",fontSize:9,color:"var(--color-text-tertiary)"}}>G{i+1}</td>
                   <td style={{padding:"1px 2px"}}>
                     <select value={selHome} onChange={e=>updG(i,"homeGoalie",e.target.value||null)} style={inp}>
-                      {homeG.map(gg=>(<option key={gg.name} value={gg.name}>{gg.name.split(" ").pop()} ({gg.quality.toFixed(2)})</option>))}
+                      {homeG.map(gg=>(<option key={gg.name} value={gg.name}>{gg.name.split(" ").pop()} ({(gg.quality??1).toFixed(2)})</option>))}
                     </select>
                     {g.homeGoalie && <span title="manually overridden" style={{fontSize:8,color:"#f59e0b"}}>*</span>}
                   </td>
                   <td style={{padding:"1px 2px"}}>
                     <select value={selAway} onChange={e=>updG(i,"awayGoalie",e.target.value||null)} style={inp}>
-                      {awayG.map(gg=>(<option key={gg.name} value={gg.name}>{gg.name.split(" ").pop()} ({gg.quality.toFixed(2)})</option>))}
+                      {awayG.map(gg=>(<option key={gg.name} value={gg.name}>{gg.name.split(" ").pop()} ({(gg.quality??1).toFixed(2)})</option>))}
                     </select>
                     {g.awayGoalie && <span title="manually overridden" style={{fontSize:8,color:"#f59e0b"}}>*</span>}
                   </td>
