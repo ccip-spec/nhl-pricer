@@ -1024,8 +1024,6 @@ function ouTable(lambda, lines, dispersion=1) {
 function defaultSeries(id) {
   return { id, homeTeam:"", awayTeam:"", homeAbbr:"", awayAbbr:"",
     shutoutRate:0.08, winnerGoalShift:0.15,
-    // v24: per-series HFA. Default symmetric +0.05. Modes: "manual" (no auto-propagation, user enters each game), "symmetric" (single hfa applies both ways), "asymmetric" (hfaHome + hfaRoad separately).
-    hfaMode:"manual", hfa:0.05, hfaHome:0.05, hfaRoad:0.05,
     games: Array.from({length:7},(_,i)=>({gameNum:i+1,winPct:i===0?0.55:null,expTotal:i===0?5.5:null,pOT:i===0?0.22:null,result:null,homeGoalie:null,awayGoalie:null})) };
 }
 function defaultMatchup(id) {
@@ -1929,69 +1927,17 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
   },[homeStrength,awayStrength]);
 
   function updS(f,v){setAllSeries(p=>{const u=[...p];u[si]={...u[si],[f]:v};return u;});}
-  // v24: HFA-aware winPct derivation.
-  // G1 winPct is treated as the series-home team's win% WHEN HOSTING.
-  // Away games use (base - hfaRoad) where base = G1 - hfaHome in asymmetric, G1 - hfa in symmetric.
-  // Manual mode: legacy behavior (symmetric flip via HOME_PATTERN).
-  function deriveWinPct(gameIdx, g1winPct, mode, hfa, hfaHome, hfaRoad) {
-    const isHome = HOME_PATTERN[gameIdx+1] === 1;
-    if (mode === "symmetric") {
-      const base = g1winPct - hfa;
-      return isHome ? Math.max(0.05, Math.min(0.95, base + hfa)) : Math.max(0.05, Math.min(0.95, base - hfa));
-    } else if (mode === "asymmetric") {
-      const base = g1winPct - hfaHome;
-      return isHome ? Math.max(0.05, Math.min(0.95, base + hfaHome)) : Math.max(0.05, Math.min(0.95, base - hfaRoad));
-    } else {
-      // manual: legacy flip
-      return isHome ? g1winPct : 1 - g1winPct;
-    }
-  }
   function updG(gi,f,v){setAllSeries(p=>{const u=[...p],games=[...u[si].games];
     // v22: setting pOT directly flags it as manual
     if(f==="pOT") games[gi]={...games[gi],pOT:v,pOT_manual:true};
     else games[gi]={...games[gi],[f]:v};
-    // v24: HFA auto-propagation. In symmetric/asymmetric mode, G1.winPct drives all other games.
-    if(gi===0&&f==="winPct"){
-      const mode = u[si].hfaMode || "manual";
-      const hfa = u[si].hfa ?? 0.05;
-      const hfaHome = u[si].hfaHome ?? 0.05;
-      const hfaRoad = u[si].hfaRoad ?? 0.05;
-      for(let i=1;i<7;i++){
-        if (mode !== "manual" || games[i].winPct === null) {
-          games[i] = {...games[i], winPct: +deriveWinPct(i, v, mode, hfa, hfaHome, hfaRoad).toFixed(3)};
-        }
-      }
-    }
+    if(gi===0&&f==="winPct")for(let i=1;i<7;i++)if(games[i].winPct===null)games[i]={...games[i],winPct:HOME_PATTERN[i+1]?v:1-v};
     if(gi===0&&f==="expTotal")for(let i=1;i<7;i++)if(games[i].expTotal===null)games[i]={...games[i],expTotal:v};
     if(gi===0&&f==="pOT")for(let i=1;i<7;i++)if(!games[i].pOT_manual)games[i]={...games[i],pOT:v,pOT_manual:true};
     u[si]={...u[si],games};return u;});}
-  // v24: when user toggles HFA mode or changes HFA values, re-derive games 2-7 from G1
-  function applyHFA(newSeriesState) {
-    setAllSeries(p=>{
-      const u = [...p];
-      const cur = {...u[si], ...newSeriesState};
-      const mode = cur.hfaMode || "manual";
-      if (mode === "manual") { u[si] = cur; return u; }
-      const hfa = cur.hfa ?? 0.05;
-      const hfaHome = cur.hfaHome ?? 0.05;
-      const hfaRoad = cur.hfaRoad ?? 0.05;
-      const g1wp = cur.games[0].winPct ?? 0.55;
-      const games = cur.games.map((g,i) => i===0 ? g : ({...g, winPct: +deriveWinPct(i, g1wp, mode, hfa, hfaHome, hfaRoad).toFixed(3)}));
-      u[si] = {...cur, games};
-      return u;
-    });
-  }
 
   const effG=s.games.map((g,i)=>{
-    // v24: if HFA mode is symmetric/asymmetric, always derive from G1; otherwise use stored g.winPct.
-    const mode = s.hfaMode || "manual";
-    let winPct;
-    if (mode === "manual") {
-      winPct = g.winPct??(HOME_PATTERN[i+1]?(s.games[0].winPct||0.55):1-(s.games[0].winPct||0.55));
-    } else {
-      const g1wp = s.games[0].winPct ?? 0.55;
-      winPct = i === 0 ? g1wp : deriveWinPct(i, g1wp, mode, s.hfa??0.05, s.hfaHome??0.05, s.hfaRoad??0.05);
-    }
+    const winPct = g.winPct??(HOME_PATTERN[i+1]?(s.games[0].winPct||0.55):1-(s.games[0].winPct||0.55));
     const expTotal = g.expTotal??(s.games[0].expTotal||5.5);
     // v22: auto-compute pOT from expTotal+winPct unless user has manually overridden (pOT_manual flag set)
     const pOT = g.pOT_manual ? (g.pOT??0.22) : pOTGame(expTotal, winPct);
@@ -2076,18 +2022,37 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
     return total;
   };
 
-  // v24 Phase E: unified series simulation (L1 correlation).
-  // One sim drives every market — guarantees internal consistency across winner/goals/shutouts/props/leaders/correct-score.
-  // 20k trials; cost ~1-2s on first render, then memoized until inputs change.
-  const simResult = useMemo(()=>{
-    if (!players || !s.homeAbbr || !s.awayAbbr) return null;
-    const inputs = buildSimInputs(effG, s.homeAbbr, s.awayAbbr, players, globals, goalieQualityFaced, pGamePlayed);
-    if (!inputs.pool.length) return null;
-    const t0 = (typeof performance!=="undefined"?performance.now():Date.now());
-    const result = simulateSeries(inputs, globals.dispersion, 20000, 31337);
-    const t1 = (typeof performance!=="undefined"?performance.now():Date.now());
-    return { ...result, simMs: Math.round(t1-t0) };
-  }, [effKey, s.homeAbbr, s.awayAbbr, players, globals, goalieQualityFaced, pGamePlayed]);
+  // v25: unified series simulation is NOW ON-DEMAND (runs when user clicks button).
+  // Prior auto-run was causing Series Pricer page to re-simulate on every keystroke.
+  // Result persists until user clicks Run again. Input changes are detected via effKey; when stale, UI shows a warning.
+  const [simResult, setSimResult] = useState(null);
+  const [simKey, setSimKey] = useState(null); // the effKey at time of last sim run
+  const [simRunning, setSimRunning] = useState(false);
+  const simStale = simResult && simKey !== effKey+"|"+(s.homeAbbr||"")+"|"+(s.awayAbbr||"");
+  const runSim = useCallback(()=>{
+    if (!players || !s.homeAbbr || !s.awayAbbr) return;
+    setSimRunning(true);
+    // Defer so React paints the "running" state before the heavy loop
+    setTimeout(()=>{
+      try {
+        const inputs = buildSimInputs(effG, s.homeAbbr, s.awayAbbr, players, globals, goalieQualityFaced, pGamePlayed);
+        if (!inputs.pool.length) { setSimResult(null); setSimRunning(false); return; }
+        const t0 = (typeof performance!=="undefined"?performance.now():Date.now());
+        const result = simulateSeries(inputs, globals.dispersion, 20000, 31337);
+        const t1 = (typeof performance!=="undefined"?performance.now():Date.now());
+        setSimResult({ ...result, simMs: Math.round(t1-t0) });
+        setSimKey(effKey+"|"+s.homeAbbr+"|"+s.awayAbbr);
+      } finally {
+        setSimRunning(false);
+      }
+    }, 30);
+  }, [effKey, s.homeAbbr, s.awayAbbr, players, goalies, globals]);
+
+  // Clear stale sim when user switches series (avoids showing wrong team's sim)
+  useEffect(()=>{
+    setSimResult(null);
+    setSimKey(null);
+  }, [s.homeAbbr, s.awayAbbr, si]);
 
   // Legacy single-number scale kept for rollbackability, but real weight is gameEquivalents
   const seriesGameGoalMean = (() => {
@@ -2245,11 +2210,16 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
         </div>
       </Card>}
 
-      {simResult && <Card style={{marginBottom:10,background:"rgba(124,58,237,0.04)",border:"0.5px solid rgba(124,58,237,0.25)"}}>
-        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8,flexWrap:"wrap"}}>
-          <SH title="Unified Sim (MC 20k)" sub={`L1 correlation · ${simResult.simMs}ms · ${simResult.pool.length} skaters`}/>
-          <span style={{fontSize:9,padding:"2px 6px",borderRadius:3,background:"rgba(124,58,237,0.15)",color:"#a78bfa",letterSpacing:0.4,fontWeight:500}}>DUAL-TRACK</span>
+      {s.homeAbbr && s.awayAbbr && <Card style={{marginBottom:10,background:simStale?"rgba(245,158,11,0.04)":"rgba(124,58,237,0.04)",border:`0.5px solid ${simStale?"rgba(245,158,11,0.25)":"rgba(124,58,237,0.25)"}`}}>
+        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:simResult?8:0,flexWrap:"wrap"}}>
+          <SH title="Unified Sim (MC 20k)" sub={simResult?`L1 correlation · ${simResult.simMs}ms · ${simResult.pool.length} skaters${simStale?" · STALE — inputs changed, re-run to refresh":""}`:"Click Run to simulate. Independent of closed-form prices above."}/>
+          {simResult && !simStale && <span style={{fontSize:9,padding:"2px 6px",borderRadius:3,background:"rgba(124,58,237,0.15)",color:"#a78bfa",letterSpacing:0.4,fontWeight:500}}>DUAL-TRACK</span>}
+          {simStale && <span style={{fontSize:9,padding:"2px 6px",borderRadius:3,background:"rgba(245,158,11,0.15)",color:"#f59e0b",letterSpacing:0.4,fontWeight:500}}>STALE</span>}
+          <button onClick={runSim} disabled={simRunning||!players} style={{marginLeft:"auto",padding:"4px 12px",fontSize:11,fontWeight:500,borderRadius:4,cursor:simRunning?"wait":"pointer",background:simRunning?"var(--color-background-secondary)":simStale?"#f59e0b":"#7c3aed",color:simRunning?"var(--color-text-tertiary)":"white",border:"none"}}>
+            {simRunning?"Running…":simResult?(simStale?"Re-run":"Re-run"):"Run Unified Sim"}
+          </button>
         </div>
+        {simResult && <>
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:10,fontSize:11}}>
           <div>
             <div style={{fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4,textTransform:"uppercase",marginBottom:3}}>Winner</div>
@@ -2264,7 +2234,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
               {[4,5,6,7].map(n=>{
                 const cfLen=n===4?((outcomes["4-0"]||0)+(outcomes["0-4"]||0)):n===5?((outcomes["4-1"]||0)+(outcomes["1-4"]||0)):n===6?((outcomes["4-2"]||0)+(outcomes["2-4"]||0)):((outcomes["4-3"]||0)+(outcomes["3-4"]||0));
                 const mc=simResult.seriesLengthProb[n];
-                return <div key={n}>{n}g: <span style={{color:"#60a5fa"}}>{(mc*100).toFixed(1)}%</span> <span style={{color:"var(--color-text-tertiary)",fontSize:10}}>(CF: {(cfLen*100).toFixed(1)}%)</span></div>;
+                return <div key={n}>{n}g: <span style={{color:"#60a5fa"}}>{((mc||0)*100).toFixed(1)}%</span> <span style={{color:"var(--color-text-tertiary)",fontSize:10}}>(CF: {(cfLen*100).toFixed(1)}%)</span></div>;
               })}
             </div>
           </div>
@@ -2283,8 +2253,9 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
           </div>
         </div>
         <div style={{marginTop:6,fontSize:9,color:"var(--color-text-tertiary)"}}>
-          CF = closed-form (current production prices). Δ = MC − CF. Expect small non-zero deltas from sampling noise (~0.3–0.5%). Consistent bias &gt; 1% = signal.
+          CF = closed-form (current production prices). Δ = MC − CF. Expect small non-zero deltas from sampling noise (~0.2–0.3% at 20k). Consistent bias &gt; 1% = signal.
         </div>
+        </>}
       </Card>}
 
       <div style={{display:"grid",gridTemplateColumns:"340px minmax(0,1fr)",gap:14,alignItems:"start"}}>
@@ -2296,36 +2267,6 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
                 <input key={f} placeholder={ph} value={s[f]||""} onChange={e=>updS(f,f.includes("Abbr")?e.target.value.toUpperCase():e.target.value)}
                   style={{padding:"4px 7px",fontSize:12,background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:4,color:"var(--color-text-primary)"}}/>
               ))}
-            </div>
-            {/* v24: HFA config */}
-            <div style={{marginBottom:8,padding:"6px 8px",background:"var(--color-background-secondary)",borderRadius:4,border:"0.5px solid var(--color-border-tertiary)"}}>
-              <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:(s.hfaMode||"manual")==="manual"?0:5,flexWrap:"wrap"}}>
-                <span style={{fontSize:10,color:"var(--color-text-tertiary)",letterSpacing:0.4,textTransform:"uppercase",fontWeight:500}}>HFA</span>
-                {[["manual","Manual"],["symmetric","Symmetric"],["asymmetric","Asymmetric"]].map(([id,label])=>(
-                  <button key={id} onClick={()=>applyHFA({hfaMode:id})}
-                    style={{fontSize:9,padding:"2px 7px",borderRadius:3,cursor:"pointer",
-                      background:(s.hfaMode||"manual")===id?"rgba(124,58,237,0.18)":"transparent",
-                      border:`0.5px solid ${(s.hfaMode||"manual")===id?"#a78bfa":"var(--color-border-secondary)"}`,
-                      color:(s.hfaMode||"manual")===id?"#a78bfa":"var(--color-text-secondary)",
-                      fontWeight:(s.hfaMode||"manual")===id?500:400}}>{label}</button>
-                ))}
-              </div>
-              {(s.hfaMode||"manual")==="symmetric" && <div style={{display:"flex",gap:6,alignItems:"center",fontSize:10}}>
-                <label style={{display:"flex",gap:3,alignItems:"center",color:"var(--color-text-secondary)"}}>
-                  HFA: <NI value={+(s.hfa??0.05).toFixed(3)} onChange={v=>applyHFA({hfa:v})} min={0} max={0.25} step={0.005} style={{width:44}}/>
-                </label>
-                <span style={{color:"var(--color-text-tertiary)",fontSize:9}}>+{((s.hfa??0.05)*100).toFixed(1)}pp home / −{((s.hfa??0.05)*100).toFixed(1)}pp away</span>
-              </div>}
-              {(s.hfaMode||"manual")==="asymmetric" && <div style={{display:"flex",gap:6,alignItems:"center",fontSize:10,flexWrap:"wrap"}}>
-                <label style={{display:"flex",gap:3,alignItems:"center",color:"var(--color-text-secondary)"}}>
-                  Home+: <NI value={+(s.hfaHome??0.05).toFixed(3)} onChange={v=>applyHFA({hfaHome:v})} min={0} max={0.25} step={0.005} style={{width:44}}/>
-                </label>
-                <label style={{display:"flex",gap:3,alignItems:"center",color:"var(--color-text-secondary)"}}>
-                  Road−: <NI value={+(s.hfaRoad??0.05).toFixed(3)} onChange={v=>applyHFA({hfaRoad:v})} min={0} max={0.25} step={0.005} style={{width:44}}/>
-                </label>
-                <span style={{color:"var(--color-text-tertiary)",fontSize:9}}>home game = base+{((s.hfaHome??0.05)*100).toFixed(1)}pp · away game = base−{((s.hfaRoad??0.05)*100).toFixed(1)}pp</span>
-              </div>}
-              {(s.hfaMode||"manual")!=="manual" && <div style={{marginTop:4,fontSize:9,color:"var(--color-text-tertiary)",fontStyle:"italic"}}>G1 winPct drives games 2–7. Edit game rows disabled.</div>}
             </div>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:11,tableLayout:"fixed"}}>
               <colgroup>
@@ -2359,12 +2300,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
                 <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:g.result?0.5:1}}>
                   <td style={{padding:"2px 3px",color:"var(--color-text-tertiary)",fontSize:9}}>G{i+1}</td>
                   <td style={{padding:"2px 3px",fontSize:9,color:"var(--color-text-secondary)"}}>{homeLabel}</td>
-                  <td style={{padding:"1px 2px"}}>
-                    {((s.hfaMode||"manual")!=="manual" && i>0)
-                      ? <span style={{fontSize:10,fontFamily:"var(--font-mono)",color:"var(--color-text-tertiary)",padding:"2px 4px",display:"inline-block",width:46,textAlign:"right"}} title="Auto-derived from G1 via HFA. Switch to Manual mode to edit.">{(+g.winPct).toFixed(3)}</span>
-                      : <NI value={+g.winPct.toFixed(3)} onChange={v=>updG(i,"winPct",v)} min={0} max={1} step={0.01} style={{width:46}}/>
-                    }
-                  </td>
+                  <td style={{padding:"1px 2px"}}><NI value={+g.winPct.toFixed(3)} onChange={v=>updG(i,"winPct",v)} min={0} max={1} step={0.01} style={{width:46}}/></td>
                   <td style={{padding:"1px 2px"}}><NI value={+g.expTotal.toFixed(1)} onChange={v=>updG(i,"expTotal",v)} min={0.5} max={12} step={0.1} style={{width:40}}/></td>
                   <td style={{padding:"1px 2px",position:"relative"}}>
                     <NI value={+(g.pOT??0.22).toFixed(2)} onChange={v=>updG(i,"pOT",v)} min={0} max={0.5} step={0.01} style={{width:38}}/>
@@ -4296,6 +4232,32 @@ function UploadTab({players,setPlayers,goalies,setGoalies,exportState,importStat
           <div style={{fontSize:9,color:"var(--color-text-tertiary)",padding:"6px 8px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",fontFamily:"var(--font-mono)"}}>
             CREATE TABLE pricer_state (key TEXT PRIMARY KEY, value JSONB, updated_at TIMESTAMPTZ);
           </div>
+        </Card>
+
+        <Card style={{border:"0.5px solid rgba(239,68,68,0.25)"}}>
+          <SH title="Reset Playoff Data" sub="Wipe all entered game results + player playoff stats. Keeps team abbreviations, win%, and expected total inputs."/>
+          <button onClick={()=>{
+            if (!confirm("Reset all playoff stats and game results?\n\n• All player pGames arrays → empty\n• All player pG/pA/pSOG/pHIT/pBLK/pTK/pPIM/pTSA/pGIVE → 0\n• All series game results (winners, scores) → cleared\n• Team abbreviations, win%, expTotal are PRESERVED\n\nThis cannot be undone.")) return;
+            // Wipe player playoff stats
+            if (players) {
+              const wiped = players.map(p => ({
+                ...p,
+                pGames: [],
+                pGP: 0, pG: 0, pA: 0, pSOG: 0, pHIT: 0, pBLK: 0, pTK: 0, pPIM: 0, pTSA: 0, pGIVE: 0,
+              }));
+              setPlayers(wiped);
+            }
+            // Clear all series game results (keep winPct/expTotal)
+            setAllSeries(prev => prev.map(sr => ({
+              ...sr,
+              games: sr.games.map(g => ({
+                ...g,
+                result: null, homeScore: null, awayScore: null, wentOT: false,
+              })),
+            })));
+          }} style={{padding:"6px 14px",fontSize:12,borderRadius:"var(--border-radius-md)",background:"#ef4444",color:"white",border:"none",cursor:"pointer",fontWeight:500}}>
+            Wipe All Playoff Stats
+          </button>
         </Card>
 
         <Card>
