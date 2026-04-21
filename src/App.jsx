@@ -749,6 +749,307 @@ function migratePlayer(p) {
   return {...p, pGames:[synthetic]};
 }
 
+// v28: goalie playoff rollups. Each goalie has `pGames`: [{round, game, ga, sa, sv, so, toi, dec}]
+function rollupGoalie(pGames) {
+  const r = {pGP:0, pSaves:0, pSA:0, pGA:0, pSO:0, pTOI:0, pW:0, pL:0};
+  if (!Array.isArray(pGames)) return r;
+  for (const e of pGames) {
+    r.pGP++;
+    r.pSaves += e.sv||0;
+    r.pSA    += e.sa||0;
+    r.pGA    += e.ga||0;
+    r.pSO    += e.so||0;
+    r.pTOI   += e.toi||0;
+    if (e.dec === "W") r.pW++;
+    else if (e.dec === "L") r.pL++;
+  }
+  return r;
+}
+function withGoalieRollups(g) {
+  if (!g.pGames) return g;
+  return {...g, ...rollupGoalie(g.pGames)};
+}
+
+// v28: full-page Hockey Reference box-score parser.
+// Input: paste of the entire HR game page (header + scoring summary + both teams' skater tables
+// + goalie tables + advanced tables). Output: structured game with both teams' stats + goalies.
+//
+// Detection strategy:
+// - Find lines matching "<TeamName>" headers (e.g., "Pittsburgh Penguins")
+// - The TWO header lines at the top of the page are the score banner: each team appears with
+//   its score on the next non-empty line ("3", "1-0"). The team listed FIRST is the AWAY team
+//   (HR convention: away team appears in top banner, home team second).
+//   ↑ correction: actually HR shows away first, then home. We use arena/PPG Paints to confirm.
+// - For player tables, we look for blocks like "<TeamName>" followed by a "Rk\tPlayer\t..." header.
+// - Two skater tables (one per team), two goalie tables.
+// - "Advanced" tables (one per team) provide HIT/BLK columns.
+function parseHRFullPage(text) {
+  const NAME_TO_ABBR = {
+    "Anaheim Ducks":"ANA","Boston Bruins":"BOS","Buffalo Sabres":"BUF","Calgary Flames":"CGY",
+    "Carolina Hurricanes":"CAR","Chicago Blackhawks":"CHI","Colorado Avalanche":"COL",
+    "Columbus Blue Jackets":"CBJ","Dallas Stars":"DAL","Detroit Red Wings":"DET",
+    "Edmonton Oilers":"EDM","Florida Panthers":"FLA","Los Angeles Kings":"LAK",
+    "Minnesota Wild":"MIN","Montreal Canadiens":"MTL","Nashville Predators":"NSH",
+    "New Jersey Devils":"NJD","New York Islanders":"NYI","New York Rangers":"NYR",
+    "Ottawa Senators":"OTT","Philadelphia Flyers":"PHI","Pittsburgh Penguins":"PIT",
+    "San Jose Sharks":"SJS","Seattle Kraken":"SEA","St. Louis Blues":"STL","St Louis Blues":"STL",
+    "Tampa Bay Lightning":"TBL","Toronto Maple Leafs":"TOR","Utah Mammoth":"UTA","Utah Hockey Club":"UTA",
+    "Vancouver Canucks":"VAN","Vegas Golden Knights":"VEG","Washington Capitals":"WSH",
+    "Winnipeg Jets":"WPG"
+  };
+
+  const lines = text.split(/\r?\n/).map(l=>l.replace(/\s+$/,""));
+
+  // ── 1. SCORE BANNER ─────────────────────────────────────────────────────────
+  // First two team-name occurrences in the page = the score banner (away first, then home).
+  // Each is followed by their score on the next non-empty line.
+  const teamHits = []; // [{name, abbr, lineIdx}]
+  for (let i=0; i<lines.length; i++) {
+    const L = lines[i].trim();
+    if (NAME_TO_ABBR[L]) {
+      teamHits.push({name:L, abbr:NAME_TO_ABBR[L], lineIdx:i});
+    }
+  }
+  if (teamHits.length < 2) return {error:"Could not find two team names. Paste the full HR page including score header."};
+
+  // First two are score banner (away, home). Subsequent occurrences are section headers.
+  const awayHit = teamHits[0], homeHit = teamHits[1];
+
+  // Score = first numeric integer on a line shortly after the team name (within next 5 lines).
+  const findScore = (start) => {
+    for (let i=start+1; i<Math.min(start+6, lines.length); i++) {
+      const L = lines[i].trim();
+      if (/^\d+$/.test(L)) return parseInt(L);
+    }
+    return null;
+  };
+  const awayScore = findScore(awayHit.lineIdx);
+  const homeScore = findScore(homeHit.lineIdx);
+  if (awayScore == null || homeScore == null) return {error:"Could not parse final score from header banner."};
+
+  // ── 2. OT/SO DETECTION ──────────────────────────────────────────────────────
+  // Look for "OT" or "Overtime" or "SO"/"Shootout" or "1st OT", "2nd OT" mentions.
+  const fullText = text;
+  const ot = /\b(overtime|1st OT|2nd OT|3rd OT|4th OT)\b/i.test(fullText)
+          || /\bOT\b/.test(fullText.split("\n").slice(0,40).join(" ")); // OT mentioned in scoring summary
+  const so = /\b(shootout|^SO$)/im.test(fullText);
+
+  // ── 3. DATE ─────────────────────────────────────────────────────────────────
+  let dateISO = null;
+  const dm = fullText.match(/([A-Z][a-z]+\s+\d{1,2},\s+\d{4})/);
+  if (dm) {
+    const d = new Date(dm[1]);
+    if (!isNaN(d)) dateISO = d.toISOString().slice(0,10);
+  }
+
+  // ── 4. PER-TEAM SKATER + GOALIE TABLE EXTRACTION ────────────────────────────
+  // For each team (sections 3+, after the banner), parse the next skater table.
+  // A skater table starts with a header row containing "Player" and ends at "TOTAL" line.
+  // After the skater table comes the goalie table (header has "DEC" and "SV%").
+  function parseSkaterTable(startLine) {
+    // Find the next header row containing "Player"
+    let hi = -1, headers = [];
+    for (let i=startLine; i<lines.length; i++) {
+      const cells = lines[i].split("\t").map(s=>s.trim());
+      const cellsLow = cells.map(c=>c.toLowerCase());
+      if (cellsLow.includes("player") && cellsLow.includes("g") && cellsLow.includes("a")) {
+        hi = i; headers = cells; break;
+      }
+    }
+    if (hi === -1) return null;
+    const col = (alts)=>{for(const a of alts){const i=headers.findIndex(h=>h.toLowerCase()===a.toLowerCase());if(i!==-1)return i;}return -1;};
+    const cm = {
+      name:col(["Player","Skater"]),
+      g:col(["G"]), a:col(["A"]), pim:col(["PIM"]),
+      sog:col(["S","Shots","SOG"]),
+      toi:col(["TOI"]),
+    };
+    const players = [];
+    let endLine = hi;
+    for (let i=hi+1; i<lines.length; i++) {
+      const cells = lines[i].split("\t").map(s=>s.trim());
+      const name = cm.name>=0 ? cells[cm.name] : "";
+      if (!name) { endLine = i; break; }
+      // v28: TOTAL row may have empty Rk, so "TOTAL" lands in cells[0] not in name slot.
+      // Check the WHOLE line for "TOTAL" or "Team Totals" prefix.
+      const lineTrim = lines[i].trim();
+      if (/^TOTAL\b/i.test(lineTrim) || /Team Totals/i.test(lineTrim)) { endLine = i; break; }
+      if (NAME_TO_ABBR[lineTrim]) { endLine = i; break; }
+      // Also: if name slot is purely numeric (like "2" from a TOTAL row that shifted columns), skip
+      if (/^\d+$/.test(name)) continue;
+      // Skip rows that don't look like player rows (need at least a few numeric cells)
+      if (cells.length < 5) continue;
+      // Skip goalie rows that may sneak in (Vladař etc. appear in skater table on HR sometimes — but
+      // they'll show up here with TOI ~60:00 and 0/0 shots; we keep them since they don't contribute
+      // skater stats anyway, but mark with flag for filtering).
+      const g = cm.g>=0 ? parseInt(cells[cm.g])||0 : 0;
+      const a = cm.a>=0 ? parseInt(cells[cm.a])||0 : 0;
+      const sog = cm.sog>=0 ? parseInt(cells[cm.sog])||0 : 0;
+      const pim = cm.pim>=0 ? parseInt(cells[cm.pim])||0 : 0;
+      // TOI parse "MM:SS" → seconds
+      let toi = 0;
+      if (cm.toi>=0 && cells[cm.toi]) {
+        const m = cells[cm.toi].match(/(\d+):(\d+)/);
+        if (m) toi = parseInt(m[1])*60 + parseInt(m[2]);
+      }
+      players.push({name, g, a, sog, pim, toi, hit:0, blk:0, tk:0, give:0});
+    }
+    return {players, endLine};
+  }
+
+  function parseGoalieTable(startLine) {
+    // Goalie tables have headers including "DEC", "SV%", "SA"
+    let hi = -1, headers = [];
+    for (let i=startLine; i<Math.min(startLine+200, lines.length); i++) {
+      const cells = lines[i].split("\t").map(s=>s.trim());
+      const cellsLow = cells.map(c=>c.toLowerCase());
+      // Goalie header: must include DEC and SV% (and Player)
+      if (cellsLow.includes("player") && cellsLow.includes("dec") && cellsLow.some(c=>c==="sv%"||c==="sv")) {
+        hi = i; headers = cells; break;
+      }
+      // Stop searching if we hit another team name (next section)
+      const trimmed = lines[i].trim();
+      if (NAME_TO_ABBR[trimmed]) break;
+    }
+    if (hi === -1) return {goalies:[], endLine:startLine};
+    const col = (alts)=>{for(const a of alts){const i=headers.findIndex(h=>h.toLowerCase()===a.toLowerCase());if(i!==-1)return i;}return -1;};
+    const cm = {
+      name: col(["Player","Goalie"]),
+      dec:  col(["DEC"]),
+      ga:   col(["GA"]),
+      sa:   col(["SA"]),
+      sv:   col(["SV"]),
+      svp:  col(["SV%"]),
+      so:   col(["SO"]),
+      pim:  col(["PIM"]),
+      toi:  col(["TOI"]),
+    };
+    const goalies = [];
+    let endLine = hi;
+    for (let i=hi+1; i<lines.length; i++) {
+      const cells = lines[i].split("\t").map(s=>s.trim());
+      const name = cm.name>=0 ? cells[cm.name] : "";
+      if (!name) { endLine = i; break; }
+      if (/^TOTAL/i.test(name) || NAME_TO_ABBR[name.trim()]) { endLine = i; break; }
+      if (cells.length < 4) continue;
+      const dec = cm.dec>=0 ? cells[cm.dec] : "";
+      const ga = cm.ga>=0 ? parseInt(cells[cm.ga])||0 : 0;
+      const sa = cm.sa>=0 ? parseInt(cells[cm.sa])||0 : 0;
+      const sv = cm.sv>=0 ? parseInt(cells[cm.sv])||0 : Math.max(0,sa-ga);
+      const so = cm.so>=0 ? parseInt(cells[cm.so])||0 : 0;
+      let toi = 0;
+      if (cm.toi>=0 && cells[cm.toi]) {
+        const m = cells[cm.toi].match(/(\d+):(\d+)/);
+        if (m) toi = parseInt(m[1])*60 + parseInt(m[2]);
+      }
+      goalies.push({name, dec, ga, sa, sv, so, toi});
+    }
+    return {goalies, endLine};
+  }
+
+  function parseAdvancedTable(startLine) {
+    // Advanced has header: Player iCF SAT-F SAT-A CF% CRel% ZSO ZSD oZS% HIT BLK
+    let hi = -1, headers = [];
+    for (let i=startLine; i<Math.min(startLine+500, lines.length); i++) {
+      const cells = lines[i].split("\t").map(s=>s.trim());
+      const cellsLow = cells.map(c=>c.toLowerCase());
+      if (cellsLow.includes("player") && cellsLow.some(c=>c==="hit") && cellsLow.some(c=>c==="blk")) {
+        hi = i; headers = cells; break;
+      }
+      const trimmed = lines[i].trim();
+      if (NAME_TO_ABBR[trimmed] && i>startLine+1) break;
+    }
+    if (hi === -1) return {map:new Map(), endLine:startLine};
+    const col = (alts)=>{for(const a of alts){const i=headers.findIndex(h=>h.toLowerCase()===a.toLowerCase());if(i!==-1)return i;}return -1;};
+    const cm = {
+      name: col(["Player"]),
+      hit:  col(["HIT"]),
+      blk:  col(["BLK"]),
+    };
+    const map = new Map();
+    let endLine = hi;
+    for (let i=hi+1; i<lines.length; i++) {
+      const cells = lines[i].split("\t").map(s=>s.trim());
+      const name = cm.name>=0 ? cells[cm.name] : "";
+      if (!name) { endLine = i; break; }
+      if (/^TOTAL/i.test(name) || NAME_TO_ABBR[name.trim()]) { endLine = i; break; }
+      if (cells.length < 3) continue;
+      const hit = cm.hit>=0 ? parseInt(cells[cm.hit])||0 : 0;
+      const blk = cm.blk>=0 ? parseInt(cells[cm.blk])||0 : 0;
+      map.set(name, {hit, blk});
+    }
+    return {map, endLine};
+  }
+
+  // ── 5. PARSE TEAM SECTIONS ──────────────────────────────────────────────────
+  // After the banner, the page has team sections in a deterministic order.
+  // We search forward starting after homeHit.lineIdx for the FIRST team section header
+  // (which will be either away or home, depending on HR layout).
+  // Strategy: find ALL team-name occurrences after lineIdx of homeHit. They mark section starts.
+  // For each team, the next skater table belongs to that team.
+  const sectionStarts = [];
+  for (let i=homeHit.lineIdx+1; i<lines.length; i++) {
+    const L = lines[i].trim();
+    if (NAME_TO_ABBR[L]) sectionStarts.push({abbr:NAME_TO_ABBR[L], name:L, lineIdx:i});
+  }
+
+  // We expect 4 section headers per team (one for skater table, one for goalie table title region,
+  // one for advanced) but in practice HR repeats the team name multiple times. We just need to find
+  // the FIRST skater table after the FIRST occurrence of each team.
+  const firstAway = sectionStarts.find(s=>s.abbr===awayHit.abbr);
+  const firstHome = sectionStarts.find(s=>s.abbr===homeHit.abbr);
+  if (!firstAway || !firstHome) return {error:`Could not find skater section for both teams (away=${awayHit.abbr}, home=${homeHit.abbr})`};
+
+  // Parse in order: away first, then home (HR away usually appears first in body sections too).
+  // But to be robust, sort by lineIdx and parse each in order.
+  const order = [firstAway, firstHome].sort((a,b)=>a.lineIdx - b.lineIdx);
+
+  const teamData = {};
+  for (let k=0; k<order.length; k++) {
+    const sec = order[k];
+    const next = order[k+1] ? order[k+1].lineIdx : lines.length;
+    // Skater table within [sec.lineIdx, next)
+    const sk = parseSkaterTable(sec.lineIdx);
+    if (!sk) { teamData[sec.abbr] = {players:[], goalies:[]}; continue; }
+    const gl = parseGoalieTable(sk.endLine);
+    teamData[sec.abbr] = {players: sk.players, goalies: gl.goalies, _skaterEnd: sk.endLine, _goalieEnd: gl.endLine};
+  }
+
+  // Advanced section markers: "Pittsburgh Penguins Advanced" appears as a section header.
+  // Find these explicitly since they don't appear in NAME_TO_ABBR.
+  const advancedSections = []; // [{abbr, lineIdx}]
+  for (let i=0; i<lines.length; i++) {
+    const L = lines[i].trim();
+    for (const [name, abbr] of Object.entries(NAME_TO_ABBR)) {
+      if (L === name + " Advanced") {
+        advancedSections.push({abbr, lineIdx:i});
+        break;
+      }
+    }
+  }
+
+  // ── 6. ADVANCED TABLES (HIT/BLK) ────────────────────────────────────────────
+  for (const sec of advancedSections) {
+    const adv = parseAdvancedTable(sec.lineIdx);
+    if (adv.map.size === 0) continue;
+    for (const p of (teamData[sec.abbr]?.players || [])) {
+      const stats = adv.map.get(p.name);
+      if (stats) { p.hit = stats.hit; p.blk = stats.blk; }
+    }
+  }
+
+  return {
+    awayAbbr: awayHit.abbr, homeAbbr: homeHit.abbr,
+    awayName: awayHit.name, homeName: homeHit.name,
+    awayScore, homeScore,
+    ot, so, dateISO,
+    awayPlayers: teamData[awayHit.abbr]?.players || [],
+    homePlayers: teamData[homeHit.abbr]?.players || [],
+    awayGoalies: teamData[awayHit.abbr]?.goalies || [],
+    homeGoalies: teamData[homeHit.abbr]?.goalies || [],
+  };
+}
+
 
 // ─── SERIES MATH ──────────────────────────────────────────────────────────────
 function computeOutcomes(games) {
@@ -2015,8 +2316,11 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
     // goalie.quality: >1.0 means saves more than expected → DECREASE opposing scoring.
     // Invert to multiplier on opposing skater rate: lower goalie quality means higher skater rate.
     return {
-      faceByHome: hGoalie ? 1/hGoalie.quality : 1.0,
-      faceByAway: aGoalie ? 1/aGoalie.quality : 1.0,
+      // v28 fix: defensive ?? 1 guards against goalie records loaded without `quality` field
+      // (e.g., from older JSON backup or before goalies.csv was loaded). Bare 1/undefined = NaN
+      // poisons gameEquivalentsFor → λ → every player on that team prices as +50000.
+      faceByHome: hGoalie ? 1/(hGoalie.quality ?? 1) : 1.0,
+      faceByAway: aGoalie ? 1/(aGoalie.quality ?? 1) : 1.0,
     };
   });
 
@@ -3631,385 +3935,493 @@ function ExportImportPanel({exportState,importState}) {
 }
 
 // ─── GAME STAT IMPORTER ──────────────────────────────────────────────────────
-// v15: full rewrite
-// - Tracks each upload as {seriesIdx,game,team,hash,delta} in localStorage
-// - Blocks exact-duplicate pastes (same hash for same series+game+team)
-// - "Undo last" button reverses the most recent import
-// - Auto-pushes scores into Series Pricer game rows once both teams uploaded
-// - Clear per-game status grid: which games have 0/1/2 teams uploaded
-function GameStatImporter({players,setPlayers,allSeries,setAllSeries}) {
-  const [seriesIdx,setSeriesIdx]=useState(0);
-  const [roundNum,setRoundNum]=useState(1);
-  const [gameNum,setGameNum]=useState(1);
+// v28: full rewrite around parseHRFullPage.
+// - Single paste: entire HR game page (header + scoring + both teams + advanced + goalies)
+// - Auto-detects series from team abbrs in the paste
+// - Auto-detects game# = max played gameNum for that series + 1 (with override)
+// - Imports BOTH teams' skater stats + goalie stats + game result (score, OT) in one shot
+// - Shows warnings for unmatched players (late callups not in skaters.csv)
+// - Per-game dedup via paste hash + (seriesIdx, gameNum) key
+// - Undo restores both teams' player + goalie state and clears the game result
+function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAllSeries}) {
   const [paste,setPaste]=useState("");
+  const [preview,setPreview]=useState(null); // parsed preview before commit
+  const [overrideGame,setOverrideGame]=useState(null); // null = use auto-detected
+  const [overrideSeries,setOverrideSeries]=useState(null); // null = use auto-detected
+  const [unmatchedDecisions,setUnmatchedDecisions]=useState({}); // name -> "skip"|"add"
   const [result,setResult]=useState(null);
   const [err,setErr]=useState("");
 
-  // Imports log, persisted to localStorage so it survives refreshes.
-  // Each entry: {id,ts,seriesIdx,seriesLabel,game,teamAbbr,hash,matched,unmatched,delta,goalsFor}
-  // `delta` = array of {name,team,pG,pA,pSOG,pPIM,pGP} added by THIS import (for undo)
-  const [imports,setImports] = useState(()=>{try{const s=localStorage.getItem("nhl_imports");return s?JSON.parse(s):[];}catch{return[];}});
-  useEffect(()=>{try{localStorage.setItem("nhl_imports",JSON.stringify(imports));}catch{}},[imports]);
+  // Imports log persisted to localStorage. Each entry covers BOTH teams of one game.
+  // Schema: {id, ts, seriesIdx, seriesLabel, round, game, hash, awayAbbr, homeAbbr,
+  //          awayScore, homeScore, ot, matched, unmatched, deltaPlayers, deltaGoalies}
+  const [imports,setImports] = useState(()=>{try{const s=localStorage.getItem("nhl_imports_v28");return s?JSON.parse(s):[];}catch{return[];}});
+  useEffect(()=>{try{localStorage.setItem("nhl_imports_v28",JSON.stringify(imports));}catch{}},[imports]);
 
-  const s=allSeries?.[seriesIdx];
-
-  // Simple stable hash of pasted text (dedup fingerprint)
   function hashStr(str){let h=0;for(let i=0;i<str.length;i++){h=((h<<5)-h)+str.charCodeAt(i);h|=0;}return (h>>>0).toString(36);}
+  const norm=s=>(s||"").toLowerCase().replace(/[^a-z]/g,"");
 
-  // Parse HR skater box score
-  function parseHRGame(text){
-    const lines=text.trim().split("\n");
-    let hi=-1,headers=[];
-    for(let i=0;i<lines.length;i++){
-      const c=lines[i].split("\t").map(s=>s.trim());
-      if(c.some(h=>["Player","Skater","Name"].includes(h))){hi=i;headers=c;break;}
-    }
-    if(hi===-1) return {error:"No header row found — copy the full table including headers"};
-    const col=(alts)=>{for(const a of alts){const i=headers.findIndex(h=>h.toLowerCase()===a.toLowerCase());if(i!==-1)return i;}return -1;};
-    const cm={
-      name:col(["Player","Skater","Name"]),
-      g:col(["G","Goals"]),
-      a:col(["A","Assists"]),
-      sog:col(["S","SOG","Shots"]),
-      pim:col(["PIM"]),
-    };
-    if(cm.name===-1) return {error:"Could not find Player column"};
-    const gamePlayers=[];
-    let totalGoals=0;
-    for(let i=hi+1;i<lines.length;i++){
-      const c=lines[i].split("\t").map(s=>s.trim());
-      const name=cm.name!==-1?c[cm.name]:"";
-      if(!name||["Player","Rk","TOTAL","Team Totals"].some(x=>name.includes(x))) continue;
-      const g=cm.g!==-1?parseInt(c[cm.g])||0:0;
-      const a=cm.a!==-1?parseInt(c[cm.a])||0:0;
-      totalGoals += g;
-      gamePlayers.push({
-        name, g, a,
-        sog:cm.sog!==-1?parseInt(c[cm.sog])||0:0,
-        pim:cm.pim!==-1?parseInt(c[cm.pim])||0:0,
-      });
-    }
-    return {players:gamePlayers, totalGoals};
+  // Auto-detect series from team abbrs in parsed result
+  function detectSeriesIdx(awayAbbr, homeAbbr){
+    if (!allSeries) return -1;
+    const teams = new Set([awayAbbr, homeAbbr]);
+    return allSeries.findIndex(sr => teams.has(sr.homeAbbr) && teams.has(sr.awayAbbr));
   }
 
-  // Infer which team was uploaded by looking at the matched players' team field
-  function inferTeamFromParse(parsedPlayers){
-    const norm=s=>s.toLowerCase().replace(/[^a-z]/g,"");
-    const counts={};
-    for(const u of parsedPlayers){
-      const match=players.find(p=>norm(u.name)===norm(p.name));
-      if(match){counts[match.team]=(counts[match.team]||0)+1;}
-    }
-    let best=null,bestCnt=0;
-    for(const [t,c] of Object.entries(counts)){if(c>bestCnt){best=t;bestCnt=c;}}
-    return best;
+  // Auto-detect next game# = max gameNum with a recorded result + 1
+  function detectGameNum(seriesIdx){
+    const sr = allSeries?.[seriesIdx];
+    if (!sr || !sr.games) return 1;
+    let maxPlayed = 0;
+    sr.games.forEach((g, idx) => {
+      if (g && g.result) maxPlayed = Math.max(maxPlayed, idx+1);
+    });
+    return Math.min(7, maxPlayed + 1);
   }
 
-  function handleImport(){
-    setErr("");setResult(null);
+  // Step 1: parse + show preview (no commit yet)
+  function handleParse(){
+    setErr(""); setResult(null); setPreview(null); setUnmatchedDecisions({});
     if(!players){setErr("Load skaters.csv first.");return;}
-    if(!paste.trim()){return;}
-    if(!s||!s.homeAbbr||!s.awayAbbr){setErr("Select a series with both team abbreviations set.");return;}
+    if(!paste.trim()) return;
 
-    const r=parseHRGame(paste);
-    if(r.error){setErr(r.error);return;}
+    const r = parseHRFullPage(paste);
+    if (r.error) { setErr(r.error); return; }
 
-    const hash=hashStr(paste.trim());
+    const detectedSeries = detectSeriesIdx(r.awayAbbr, r.homeAbbr);
+    if (detectedSeries === -1) {
+      setErr(`Parsed teams ${r.awayAbbr} @ ${r.homeAbbr} — no matching series in setup. Add this matchup in Series Pricer first.`);
+      return;
+    }
+    const detectedGame = detectGameNum(detectedSeries);
 
-    // Dedup: exact paste already processed for this series/game?
-    const dup=imports.find(x=>x.seriesIdx===seriesIdx&&x.game===gameNum&&x.hash===hash);
-    if(dup){setErr(`Duplicate paste — already imported ${dup.seriesLabel} G${dup.game} (${dup.teamAbbr}) at ${dup.ts}.`);return;}
+    // Build matched/unmatched lists for both teams against players roster
+    const checkSide = (sidePlayers, teamAbbr) => {
+      const matched = []; const unmatched = [];
+      sidePlayers.forEach(u => {
+        // Skip the goalie row that often sneaks into HR skater table (TOI ~60min, no shots/G/A)
+        // We detect that by also checking goalies list
+        const m = players.find(p => p.team===teamAbbr && (norm(u.name)===norm(p.name)
+          || (norm(u.name).length>=4 && norm(p.name).endsWith(norm(u.name.split(" ").pop()||"")))));
+        if (m) matched.push({u, p:m});
+        else unmatched.push(u);
+      });
+      return {matched, unmatched};
+    };
+    const away = checkSide(r.awayPlayers, r.awayAbbr);
+    const home = checkSide(r.homePlayers, r.homeAbbr);
 
-    // Infer team from matched roster entries
-    const teamAbbr=inferTeamFromParse(r.players);
-    if(!teamAbbr){setErr("Could not match any player to a roster team. Check that skaters.csv is loaded and the paste includes that team's players.");return;}
-    if(teamAbbr!==s.homeAbbr&&teamAbbr!==s.awayAbbr){
-      setErr(`Paste appears to be for ${teamAbbr}, but selected series is ${s.homeAbbr} vs ${s.awayAbbr}. Pick the right series or verify the paste.`);return;
+    // Filter out goalies from "unmatched" (they're in goalies.csv, not skaters.csv)
+    const goalieNames = new Set([
+      ...r.awayGoalies.map(g=>norm(g.name)),
+      ...r.homeGoalies.map(g=>norm(g.name)),
+    ]);
+    away.unmatched = away.unmatched.filter(u => !goalieNames.has(norm(u.name)));
+    home.unmatched = home.unmatched.filter(u => !goalieNames.has(norm(u.name)));
+
+    // Goalie matching
+    const checkGoalies = (sideGoalies, teamAbbr) => {
+      const matched = []; const unmatched = [];
+      sideGoalies.forEach(u => {
+        const m = (goalies||[]).find(g => g.team===teamAbbr && (norm(u.name)===norm(g.name)
+          || (norm(u.name).length>=4 && norm(g.name).endsWith(norm(u.name.split(" ").pop()||"")))));
+        if (m) matched.push({u, g:m});
+        else unmatched.push(u);
+      });
+      return {matched, unmatched};
+    };
+    const awayG = checkGoalies(r.awayGoalies, r.awayAbbr);
+    const homeG = checkGoalies(r.homeGoalies, r.homeAbbr);
+
+    setPreview({
+      ...r,
+      detectedSeries, detectedGame,
+      awayMatched: away.matched, awayUnmatched: away.unmatched,
+      homeMatched: home.matched, homeUnmatched: home.unmatched,
+      awayGoaliesMatched: awayG.matched, awayGoaliesUnmatched: awayG.unmatched,
+      homeGoaliesMatched: homeG.matched, homeGoaliesUnmatched: homeG.unmatched,
+    });
+    setOverrideGame(null);
+    setOverrideSeries(null);
+  }
+
+  // Step 2: commit the import after user reviews
+  function handleCommit(){
+    if (!preview) return;
+    setErr(""); setResult(null);
+
+    const seriesIdx = overrideSeries != null ? overrideSeries : preview.detectedSeries;
+    const gameNum = overrideGame != null ? overrideGame : preview.detectedGame;
+    const sr = allSeries?.[seriesIdx];
+    if (!sr) { setErr("Series not found."); return; }
+
+    const hash = hashStr(paste.trim());
+    const dup = imports.find(x => x.seriesIdx===seriesIdx && x.game===gameNum);
+    if (dup) {
+      setErr(`G${gameNum} already imported for ${sr.homeAbbr} vs ${sr.awayAbbr} at ${dup.ts}. Undo it first to re-import.`);
+      return;
     }
 
-    // Same-team re-upload for same game? block
-    const sameTeamSameGame=imports.find(x=>x.seriesIdx===seriesIdx&&x.game===gameNum&&x.teamAbbr===teamAbbr);
-    if(sameTeamSameGame){setErr(`${teamAbbr} has already been uploaded for G${gameNum}. Click 'Undo' on that entry first if you need to redo it.`);return;}
+    // Build skater pGames updates
+    const deltaPlayers = []; // {name, team, round, game}
+    const playersById = new Map((players||[]).map(p=>[p.name+"|"+p.team, p]));
 
-    const norm=s=>s.toLowerCase().replace(/[^a-z]/g,"");
-    let matched=0;const unmatched=[];
-    const delta=[]; // record which players got a new game entry so we can undo
-
-    const updated=players.map(p=>{
-      const m=r.players.find(u=>
-        norm(u.name)===norm(p.name)||
-        (norm(u.name).length>=4&&norm(p.name).endsWith(norm(u.name.split(" ").pop()||"")))
-      );
-      if(m && p.team===teamAbbr){
-        matched++;
-        // Migrate if needed, then append this game as a new entry (HR only fills G/A/SOG/PIM)
+    const applySide = (sideMatched, teamAbbr) => {
+      sideMatched.forEach(({u, p}) => {
         const base = migratePlayer(p);
         const existingGames = base.pGames || [];
-        // Don't duplicate: check for existing entry for this round+game
-        const alreadyHasEntry = existingGames.some(e=>e.round===roundNum && e.game===gameNum);
-        if (alreadyHasEntry) {
-          // Shouldn't happen because of upstream dup check, but guard anyway
-          return p;
-        }
+        const already = existingGames.some(e => e.round===1 && e.game===gameNum);
+        if (already) return;
         const newEntry = {
-          round: roundNum, game: gameNum,
-          g:m.g||0, a:m.a||0, sog:m.sog||0,
-          hit:0, blk:0, tk:0, pim:m.pim||0, give:0,
-          _source: "hr_import",
+          round: 1, game: gameNum,
+          g: u.g||0, a: u.a||0, sog: u.sog||0,
+          hit: u.hit||0, blk: u.blk||0, tk: 0, pim: u.pim||0, give: 0,
+          toi: u.toi||0,
+          _source: "hr_full_v28",
         };
-        delta.push({name:p.name,team:p.team,round:roundNum,game:gameNum});
-        const newGames = [...existingGames, newEntry];
-        return withRollups({...base, pGames:newGames});
-      }
-      return p;
-    });
-
-    r.players.forEach(u=>{
-      const m=players.find(p=>norm(u.name)===norm(p.name)&&p.team===teamAbbr);
-      if(!m) unmatched.push(u.name);
-    });
-
-    setPlayers(updated);
-
-    const seriesLabel=`${s.homeAbbr} vs ${s.awayAbbr}`;
-    const entry={
-      id:Date.now()+"-"+Math.random().toString(36).slice(2,7),
-      ts:new Date().toLocaleString(),
-      seriesIdx, seriesLabel, round:roundNum, game:gameNum, teamAbbr, hash,
-      matched, unmatched:unmatched.slice(0,10), delta,
-      goalsFor:r.totalGoals,
+        const updated = withRollups({...base, pGames:[...existingGames, newEntry]});
+        playersById.set(p.name+"|"+p.team, updated);
+        deltaPlayers.push({name:p.name, team:p.team, round:1, game:gameNum});
+      });
     };
-    setImports(prev=>[entry,...prev].slice(0,200));
+    applySide(preview.awayMatched, preview.awayAbbr);
+    applySide(preview.homeMatched, preview.homeAbbr);
 
-    // If this completes both teams for this game, push score into series pricer
-    const otherTeam = teamAbbr===s.homeAbbr ? s.awayAbbr : s.homeAbbr;
-    const other = imports.find(x=>x.seriesIdx===seriesIdx&&x.game===gameNum&&x.teamAbbr===otherTeam);
-    if(other && setAllSeries){
-      const homeGoals = teamAbbr===s.homeAbbr ? r.totalGoals : other.goalsFor;
-      const awayGoals = teamAbbr===s.awayAbbr ? r.totalGoals : other.goalsFor;
-      const winResult = homeGoals>awayGoals ? "home" : awayGoals>homeGoals ? "away" : null;
-      setAllSeries(prev=>{
-        const u=[...prev];
-        const games=[...u[seriesIdx].games];
-        games[gameNum-1]={...games[gameNum-1], homeScore:homeGoals, awayScore:awayGoals, result:winResult||games[gameNum-1].result};
-        u[seriesIdx]={...u[seriesIdx], games};
+    // Handle unmatched: add as new players if user chose "add"
+    const unmatchedAdded = [];
+    const handleUnmatchedSide = (sideUnmatched, teamAbbr) => {
+      sideUnmatched.forEach(u => {
+        const decision = unmatchedDecisions[u.name+"|"+teamAbbr];
+        if (decision === "add") {
+          // Synthesize a player record with default rates (zero baseline)
+          const newP = {
+            name: u.name, team: teamAbbr, position: "F",
+            gp: 1, g_pg: 0, a_pg: 0, sog_pg: 0, hit_pg: 0, blk_pg: 0,
+            take_pg: 0, pim_pg: 0, give_pg: 0,
+            pG: 0, pA: 0, pSOG: 0, pHIT: 0, pBLK: 0, pTK: 0, pPIM: 0, pGIVE: 0, pGP: 0,
+            lineRole: "MID6",
+            _addedViaImport: true,
+            pGames: [{
+              round: 1, game: gameNum,
+              g: u.g||0, a: u.a||0, sog: u.sog||0,
+              hit: u.hit||0, blk: u.blk||0, tk: 0, pim: u.pim||0, give: 0,
+              toi: u.toi||0, _source: "hr_full_v28",
+            }],
+          };
+          const rolled = withRollups(newP);
+          playersById.set(rolled.name+"|"+rolled.team, rolled);
+          deltaPlayers.push({name:rolled.name, team:rolled.team, round:1, game:gameNum, _added:true});
+          unmatchedAdded.push(rolled.name);
+        }
+      });
+    };
+    handleUnmatchedSide(preview.awayUnmatched, preview.awayAbbr);
+    handleUnmatchedSide(preview.homeUnmatched, preview.homeAbbr);
+
+    // Goalie updates
+    const deltaGoalies = [];
+    const goaliesById = new Map((goalies||[]).map(g=>[g.name+"|"+g.team, g]));
+    const applyGoalies = (sideMatched) => {
+      sideMatched.forEach(({u, g}) => {
+        const existing = g.pGames || [];
+        const already = existing.some(e => e.round===1 && e.game===gameNum);
+        if (already) return;
+        const newEntry = {
+          round:1, game:gameNum, ga:u.ga||0, sa:u.sa||0, sv:u.sv||0,
+          so:u.so||0, toi:u.toi||0, dec:u.dec||"",
+        };
+        const rolled = withGoalieRollups({...g, pGames:[...existing, newEntry]});
+        goaliesById.set(g.name+"|"+g.team, rolled);
+        deltaGoalies.push({name:g.name, team:g.team, round:1, game:gameNum});
+      });
+    };
+    applyGoalies(preview.awayGoaliesMatched);
+    applyGoalies(preview.homeGoaliesMatched);
+
+    // Push state
+    const newPlayers = [...playersById.values()];
+    setPlayers(newPlayers);
+    if (setGoalies && goalies) setGoalies([...goaliesById.values()]);
+
+    // Push score + OT into Series Pricer game row.
+    // games[gameNum-1] convention: home/away are determined by the series record's homeAbbr/awayAbbr,
+    // NOT by HR's away/home. So map preview's away/home → series's home/away.
+    if (setAllSeries) {
+      setAllSeries(prev => {
+        const u = [...prev];
+        const s2 = u[seriesIdx];
+        const games = [...s2.games];
+        const idx = gameNum - 1;
+        // Resolve which score corresponds to series.homeAbbr
+        const homeIsAway = preview.awayAbbr === s2.homeAbbr;
+        const homeScore = homeIsAway ? preview.awayScore : preview.homeScore;
+        const awayScore = homeIsAway ? preview.homeScore : preview.awayScore;
+        const winResult = homeScore > awayScore ? "home" : awayScore > homeScore ? "away" : null;
+        games[idx] = {
+          ...games[idx],
+          homeScore, awayScore,
+          result: winResult || games[idx].result,
+          ot: !!preview.ot,
+        };
+        u[seriesIdx] = {...s2, games};
         return u;
       });
     }
 
-    setResult({matched,unmatched:unmatched.slice(0,10),gameNum,seriesLabel,teamAbbr,goalsFor:r.totalGoals,completesGame:!!other});
-    setPaste("");
+    // Log it
+    const matchedCount = preview.awayMatched.length + preview.homeMatched.length;
+    const unmatchedAll = [...preview.awayUnmatched, ...preview.homeUnmatched].map(u=>u.name);
+    const seriesLabel = `${sr.homeAbbr} vs ${sr.awayAbbr}`;
+    const entry = {
+      id: Date.now()+"-"+Math.random().toString(36).slice(2,7),
+      ts: new Date().toLocaleString(),
+      seriesIdx, seriesLabel, round:1, game:gameNum, hash,
+      awayAbbr: preview.awayAbbr, homeAbbr: preview.homeAbbr,
+      awayScore: preview.awayScore, homeScore: preview.homeScore,
+      ot: !!preview.ot,
+      matched: matchedCount, unmatched: unmatchedAll.slice(0,20),
+      addedPlayers: unmatchedAdded,
+      deltaPlayers, deltaGoalies,
+    };
+    setImports(prev => [entry, ...prev].slice(0,200));
+    setResult({
+      seriesLabel, gameNum, awayAbbr:preview.awayAbbr, homeAbbr:preview.homeAbbr,
+      awayScore:preview.awayScore, homeScore:preview.homeScore, ot:!!preview.ot,
+      matched: matchedCount, unmatched: unmatchedAll.length,
+      addedPlayers: unmatchedAdded, goalies: deltaGoalies.length,
+    });
+    setPaste(""); setPreview(null);
   }
 
   function handleUndo(entryId){
-    const entry=imports.find(x=>x.id===entryId);
-    if(!entry||!entry.delta){return;}
-    // For each player in delta, remove the specific pGames entry matching this round+game
-    const keySet = new Set(entry.delta.map(d=>d.name+"|"+d.team));
-    const round = entry.round||1;
-    const game = entry.game;
-    setPlayers(prev=>prev.map(p=>{
-      if(!keySet.has(p.name+"|"+p.team)) return p;
-      if(!p.pGames) return p;
-      const filtered = p.pGames.filter(e=>!(e.round===round && e.game===game));
-      if (filtered.length === p.pGames.length) return p; // nothing to remove
-      return withRollups({...p, pGames:filtered});
-    }));
-    setImports(prev=>prev.filter(x=>x.id!==entryId));
-    // Also clear the series pricer score/result if we just undid a completing upload
-    if(setAllSeries){
-      setAllSeries(prev=>{
-        const u=[...prev];
-        if(!u[entry.seriesIdx])return prev;
-        const games=[...u[entry.seriesIdx].games];
-        games[entry.game-1]={...games[entry.game-1], homeScore:null, awayScore:null, result:null};
-        u[entry.seriesIdx]={...u[entry.seriesIdx], games};
+    const entry = imports.find(x => x.id===entryId);
+    if (!entry) return;
+    const round = entry.round||1, game = entry.game;
+
+    // Roll back skater pGames
+    const playerKeys = new Set((entry.deltaPlayers||[]).map(d => d.name+"|"+d.team));
+    const addedKeys = new Set((entry.deltaPlayers||[]).filter(d=>d._added).map(d=>d.name+"|"+d.team));
+    setPlayers(prev => prev
+      .map(p => {
+        if (!playerKeys.has(p.name+"|"+p.team)) return p;
+        if (!p.pGames) return p;
+        const filtered = p.pGames.filter(e => !(e.round===round && e.game===game));
+        if (filtered.length === p.pGames.length) return p;
+        return withRollups({...p, pGames:filtered});
+      })
+      .filter(p => !(addedKeys.has(p.name+"|"+p.team) && (!p.pGames || p.pGames.length===0)))
+    );
+
+    // Roll back goalie pGames
+    const goalieKeys = new Set((entry.deltaGoalies||[]).map(d => d.name+"|"+d.team));
+    if (setGoalies && goalies) {
+      setGoalies(prev => prev.map(g => {
+        if (!goalieKeys.has(g.name+"|"+g.team)) return g;
+        if (!g.pGames) return g;
+        const filtered = g.pGames.filter(e => !(e.round===round && e.game===game));
+        if (filtered.length === g.pGames.length) return g;
+        return withGoalieRollups({...g, pGames:filtered});
+      }));
+    }
+
+    // Clear game result
+    if (setAllSeries) {
+      setAllSeries(prev => {
+        const u = [...prev];
+        if (!u[entry.seriesIdx]) return prev;
+        const games = [...u[entry.seriesIdx].games];
+        games[entry.game-1] = {...games[entry.game-1], homeScore:null, awayScore:null, result:null, ot:false};
+        u[entry.seriesIdx] = {...u[entry.seriesIdx], games};
         return u;
       });
     }
+    setImports(prev => prev.filter(x => x.id !== entryId));
   }
 
-  // v15 nuclear option: wipe all playoff stats for players on the two teams in this series,
-  // clear this series' imports log, clear all game scores/results for this series.
-  // Recovers from the "v13 legacy duplicate" scenario where undo isn't available.
-  function handleResetSeries(){
-    if(!s||!s.homeAbbr||!s.awayAbbr){return;}
-    const seriesTeams = new Set([s.homeAbbr, s.awayAbbr]);
-    const impactedPlayerCount = (players||[]).filter(p=>seriesTeams.has(p.team)&&(p.pGP||0)>0).length;
-    const confirmMsg = `Nuclear reset for ${s.homeAbbr} vs ${s.awayAbbr}:\n\n` +
-      `• Wipe pGP/pG/pA/pSOG/pPIM for all ${s.homeAbbr}+${s.awayAbbr} players (${impactedPlayerCount} affected)\n` +
-      `• Clear ${seriesImports.length} import log entries\n` +
-      `• Clear all game scores/results for this series\n\n` +
-      `Proceed?`;
-    if(!window.confirm(confirmMsg)){return;}
-
-    setPlayers(prev=>prev.map(p=>{
-      if(!seriesTeams.has(p.team)) return p;
-      // Remove any pGames entries for this round (if we track round in entry)
-      // Simple approach: clear all pGames for these teams (series-scoped reset)
-      const cleared = {...p, pGames:[]};
-      return withRollups(cleared);
-    }));
-    setImports(prev=>prev.filter(x=>x.seriesIdx!==seriesIdx));
-    if(setAllSeries){
-      setAllSeries(prev=>{
-        const u=[...prev];
-        if(!u[seriesIdx])return prev;
-        const games=u[seriesIdx].games.map(g=>({...g, homeScore:null, awayScore:null, result:null}));
-        u[seriesIdx]={...u[seriesIdx], games};
-        return u;
-      });
-    }
-    setResult(null); setErr("");
-  }
-
-  // Per-series game matrix: [g1..g7] -> list of uploads for current seriesIdx
-  const gameMatrix = useMemo(()=>{
-    const m={};
-    for(let g=1;g<=7;g++){m[g]={home:null,away:null};}
-    if(!s)return m;
-    for(const e of imports){
-      if(e.seriesIdx!==seriesIdx)continue;
-      const slot = e.teamAbbr===s.homeAbbr?"home":e.teamAbbr===s.awayAbbr?"away":null;
-      if(slot&&m[e.game])m[e.game][slot]=e;
-    }
-    return m;
-  },[imports,seriesIdx,s]);
-
-  const seriesImports = imports.filter(x=>x.seriesIdx===seriesIdx);
+  // Status grid: show all 7 games for currently-detected (or first) series
+  const focusSeriesIdx = preview ? (overrideSeries != null ? overrideSeries : preview.detectedSeries) : 0;
+  const focusSeries = allSeries?.[focusSeriesIdx];
+  const seriesImports = imports.filter(x => x.seriesIdx === focusSeriesIdx);
 
   return <div>
-    <div style={{display:"grid",gridTemplateColumns:"1fr 80px 1fr",gap:8,marginBottom:10}}>
-      <div>
-        <div style={{fontSize:10,color:"var(--color-text-secondary)",marginBottom:4}}>Series</div>
-        <select value={seriesIdx} onChange={e=>setSeriesIdx(+e.target.value)}
-          style={{width:"100%",padding:"5px 8px",fontSize:12,background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",color:"var(--color-text-primary)"}}>
-          {(allSeries||[]).map((sr,i)=><option key={i} value={i}>{sr.homeAbbr&&sr.awayAbbr?`${sr.homeAbbr} vs ${sr.awayAbbr}`:`Series ${i+1}`}</option>)}
-        </select>
-      </div>
-      <div>
-        <div style={{fontSize:10,color:"var(--color-text-secondary)",marginBottom:4}}>Round</div>
-        <select value={roundNum} onChange={e=>setRoundNum(+e.target.value)}
-          style={{width:"100%",padding:"5px 8px",fontSize:12,background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",color:"var(--color-text-primary)"}}>
-          {[1,2,3,4].map(n=><option key={n} value={n}>R{n}</option>)}
-        </select>
-      </div>
-      <div>
-        <div style={{fontSize:10,color:"var(--color-text-secondary)",marginBottom:4}}>Game</div>
-        <select value={gameNum} onChange={e=>setGameNum(+e.target.value)}
-          style={{width:"100%",padding:"5px 8px",fontSize:12,background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",color:"var(--color-text-primary)"}}>
-          {[1,2,3,4,5,6,7].map(n=>{
-            const gm=gameMatrix[n];
-            const count=(gm?.home?1:0)+(gm?.away?1:0);
-            const tag=count===2?" ✓✓":count===1?" ✓·":"";
-            return <option key={n} value={n}>Game {n}{tag}</option>;
-          })}
-        </select>
-      </div>
+    <div style={{fontSize:10,color:"var(--color-text-tertiary)",marginBottom:8,lineHeight:1.5}}>
+      Paste the <strong>entire</strong> Hockey Reference game page (Ctrl+A → Ctrl+C from the page).
+      Includes scoring summary, both teams' skater + goalie tables, and advanced stats.
+      Series + game # auto-detected. One paste covers both teams.
     </div>
 
-    {/* Per-game status grid — shows score from series data + running series count */}
-    {s&&s.homeAbbr&&s.awayAbbr&&<div style={{marginBottom:10}}>
-      {(() => {
-        // Running tally of wins to display "DAL 1-0", "Tied 1-1", etc.
-        let hw=0, aw=0;
-        const cells=[];
-        for(let g=1; g<=7; g++){
-          const gm=gameMatrix[g];
-          const hasHome=!!gm.home, hasAway=!!gm.away;
-          const complete=hasHome&&hasAway;
-          const partial=hasHome||hasAway;
-          // Score comes from allSeries[seriesIdx].games[g-1]
-          const gameData = s.games?.[g-1] || {};
-          const hs = gameData.homeScore, as = gameData.awayScore;
-          const hasScore = typeof hs==="number" && typeof as==="number";
-          // Winner attribution (only if scores + complete)
-          if(hasScore){
-            if(hs>as) hw++;
-            else if(as>hs) aw++;
-          }
-          const runningLabel = hasScore
-            ? (hw===aw ? `Tied ${hw}-${aw}` : hw>aw ? `${s.homeAbbr} ${hw}-${aw}` : `${s.awayAbbr} ${aw}-${hw}`)
-            : null;
-          const scoreLabel = hasScore ? `${s.homeAbbr} ${hs}-${as} ${s.awayAbbr}` : null;
-          const bg=complete?"rgba(16,185,129,0.12)":partial?"rgba(245,158,11,0.1)":"var(--color-background-secondary)";
-          const borderCol=complete?"rgba(16,185,129,0.3)":partial?"rgba(245,158,11,0.25)":"var(--color-border-tertiary)";
-          const color=complete?"#10b981":partial?"#f59e0b":"var(--color-text-tertiary)";
-          const uploadLabel = complete ? "✓ both teams" : partial ? (hasHome?`${s.homeAbbr} only`:`${s.awayAbbr} only`) : "not uploaded";
-          cells.push(
-            <div key={g} style={{padding:"5px 4px",textAlign:"center",background:bg,borderRadius:3,fontSize:9,border:`0.5px solid ${borderCol}`,minHeight:54}}>
-              <div style={{fontSize:8,color:"var(--color-text-tertiary)",marginBottom:2}}>G{g}</div>
-              {hasScore
-                ? <>
-                    <div style={{fontSize:10,fontWeight:500,color:"var(--color-text-primary)",fontFamily:"var(--font-mono)"}}>{hs}-{as}</div>
-                    <div style={{fontSize:8,color:"var(--color-text-secondary)",marginTop:1}}>{runningLabel}</div>
-                  </>
-                : <div style={{fontSize:9,color,fontWeight:500,marginTop:6}}>{uploadLabel==="not uploaded"?"—":uploadLabel}</div>
-              }
-            </div>
-          );
-        }
-        return <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:4}}>{cells}</div>;
-      })()}
-    </div>}
-
-    <div style={{fontSize:10,color:"var(--color-text-tertiary)",marginBottom:8}}>
-      Paste the HR box score for <strong>one team</strong>. Team is inferred from roster matches. Duplicate pastes are blocked. Once both teams are uploaded for a game, scores auto-flow into Series Pricer.
-    </div>
-
-    <textarea value={paste} onChange={e=>setPaste(e.target.value)}
-      placeholder={"Paste HR box score here (tab-separated with headers)…"}
-      style={{width:"100%",height:160,fontSize:11,fontFamily:"var(--font-mono)",
+    <textarea value={paste} onChange={e=>{setPaste(e.target.value); setPreview(null); setResult(null); setErr("");}}
+      placeholder={"Paste full HR game page here (Ctrl+A then Ctrl+C from hockey-reference.com/boxscores/...)"}
+      style={{width:"100%",height:140,fontSize:10,fontFamily:"var(--font-mono)",
         background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
         borderRadius:"var(--border-radius-md)",padding:10,color:"var(--color-text-primary)",
         resize:"vertical",boxSizing:"border-box",marginBottom:8}}/>
 
-    <div style={{display:"flex",gap:8,alignItems:"center"}}>
-      <button onClick={handleImport} disabled={!paste.trim()||!players}
+    <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:8}}>
+      <button onClick={handleParse} disabled={!paste.trim()||!players}
         style={{padding:"6px 18px",fontSize:12,fontWeight:500,borderRadius:"var(--border-radius-md)",border:"none",
           cursor:paste.trim()&&players?"pointer":"default",
-          background:paste.trim()&&players?"#10b981":"var(--color-background-secondary)",
+          background:paste.trim()&&players?"#3b82f6":"var(--color-background-secondary)",
           color:paste.trim()&&players?"white":"var(--color-text-tertiary)"}}>
-        + Add to Totals
+        1. Parse Preview
       </button>
-      <button onClick={()=>{setPaste("");setResult(null);setErr("");}}
+      <button onClick={()=>{setPaste("");setPreview(null);setResult(null);setErr("");}}
         style={{padding:"5px 10px",fontSize:11,borderRadius:"var(--border-radius-md)",
           background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
           color:"var(--color-text-secondary)",cursor:"pointer"}}>Clear</button>
       {!players&&<span style={{fontSize:11,color:"#f59e0b"}}>Load skaters.csv first</span>}
+      {!goalies&&<span style={{fontSize:11,color:"#f59e0b"}}>Load goalies.csv to capture goalie stats</span>}
     </div>
 
-    {err&&<div style={{marginTop:8,padding:8,borderRadius:"var(--border-radius-md)",
+    {err&&<div style={{marginBottom:8,padding:8,borderRadius:"var(--border-radius-md)",
       background:"rgba(239,68,68,0.1)",border:"0.5px solid rgba(239,68,68,0.3)",fontSize:11,color:"#ef4444"}}>{err}</div>}
-    {result&&<div style={{marginTop:8,padding:8,borderRadius:"var(--border-radius-md)",
+
+    {/* PREVIEW PANEL */}
+    {preview && <div style={{marginBottom:10,padding:10,borderRadius:"var(--border-radius-md)",
+      background:"rgba(59,130,246,0.06)",border:"0.5px solid rgba(59,130,246,0.3)"}}>
+      <div style={{fontSize:11,fontWeight:500,color:"#3b82f6",marginBottom:8}}>
+        Parsed: {preview.awayAbbr} {preview.awayScore} @ {preview.homeAbbr} {preview.homeScore}
+        {preview.ot && <span style={{marginLeft:6,color:"#f59e0b"}}>(OT)</span>}
+        {preview.dateISO && <span style={{marginLeft:6,color:"var(--color-text-tertiary)",fontWeight:400}}>· {preview.dateISO}</span>}
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:8}}>
+        <div>
+          <div style={{fontSize:9,color:"var(--color-text-secondary)",marginBottom:3}}>SERIES (auto-detected)</div>
+          <select value={overrideSeries != null ? overrideSeries : preview.detectedSeries}
+            onChange={e=>setOverrideSeries(+e.target.value)}
+            style={{width:"100%",padding:"4px 8px",fontSize:11,background:"var(--color-background-secondary)",
+              border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",color:"var(--color-text-primary)"}}>
+            {(allSeries||[]).map((sr,i)=>(
+              <option key={i} value={i}>{sr.homeAbbr&&sr.awayAbbr?`${sr.homeAbbr} vs ${sr.awayAbbr}`:`Series ${i+1}`}{i===preview.detectedSeries?" ✓":""}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <div style={{fontSize:9,color:"var(--color-text-secondary)",marginBottom:3}}>GAME # (auto: G{preview.detectedGame})</div>
+          <select value={overrideGame != null ? overrideGame : preview.detectedGame}
+            onChange={e=>setOverrideGame(+e.target.value)}
+            style={{width:"100%",padding:"4px 8px",fontSize:11,background:"var(--color-background-secondary)",
+              border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",color:"var(--color-text-primary)"}}>
+            {[1,2,3,4,5,6,7].map(n=><option key={n} value={n}>Game {n}{n===preview.detectedGame?" ✓":""}</option>)}
+          </select>
+        </div>
+      </div>
+
+      {/* Match summary */}
+      <div style={{fontSize:10,marginBottom:6,color:"var(--color-text-secondary)"}}>
+        <span style={{color:"#10b981"}}>{preview.awayMatched.length}</span> {preview.awayAbbr} matched
+        {preview.awayUnmatched.length>0&&<span style={{color:"#f59e0b"}}> · {preview.awayUnmatched.length} unmatched</span>}
+        {" · "}
+        <span style={{color:"#10b981"}}>{preview.homeMatched.length}</span> {preview.homeAbbr} matched
+        {preview.homeUnmatched.length>0&&<span style={{color:"#f59e0b"}}> · {preview.homeUnmatched.length} unmatched</span>}
+        {" · Goalies: "}
+        <span style={{color:"#10b981"}}>{preview.awayGoaliesMatched.length+preview.homeGoaliesMatched.length}</span> matched
+        {(preview.awayGoaliesUnmatched.length+preview.homeGoaliesUnmatched.length)>0
+          &&<span style={{color:"#f59e0b"}}> · {preview.awayGoaliesUnmatched.length+preview.homeGoaliesUnmatched.length} unmatched</span>}
+      </div>
+
+      {/* Unmatched player decisions */}
+      {[...preview.awayUnmatched.map(u=>({u,team:preview.awayAbbr})),
+        ...preview.homeUnmatched.map(u=>({u,team:preview.homeAbbr}))].length>0 && (
+        <div style={{marginBottom:8,padding:8,background:"rgba(245,158,11,0.08)",borderRadius:"var(--border-radius-md)",border:"0.5px solid rgba(245,158,11,0.25)"}}>
+          <div style={{fontSize:10,fontWeight:500,color:"#f59e0b",marginBottom:4}}>Unmatched skaters (not in roster)</div>
+          {[...preview.awayUnmatched.map(u=>({u,team:preview.awayAbbr})),
+            ...preview.homeUnmatched.map(u=>({u,team:preview.homeAbbr}))].map(({u,team},i)=>{
+            const key = u.name+"|"+team;
+            const decision = unmatchedDecisions[key] || "skip";
+            return <div key={i} style={{display:"flex",gap:8,alignItems:"center",fontSize:10,padding:"2px 0"}}>
+              <span style={{minWidth:140}}>{u.name} <span style={{color:"var(--color-text-tertiary)"}}>({team})</span></span>
+              <span style={{color:"var(--color-text-secondary)",fontFamily:"var(--font-mono)",minWidth:120}}>
+                {u.g}G {u.a}A · {u.sog}S · {u.hit}H {u.blk}B
+              </span>
+              <select value={decision} onChange={e=>setUnmatchedDecisions(prev=>({...prev,[key]:e.target.value}))}
+                style={{padding:"2px 6px",fontSize:10,background:"var(--color-background-secondary)",
+                  border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-primary)"}}>
+                <option value="skip">Skip</option>
+                <option value="add">Add as new player</option>
+              </select>
+            </div>;
+          })}
+        </div>
+      )}
+
+      <div style={{display:"flex",gap:8,alignItems:"center"}}>
+        <button onClick={handleCommit}
+          style={{padding:"6px 18px",fontSize:12,fontWeight:500,borderRadius:"var(--border-radius-md)",border:"none",
+            cursor:"pointer",background:"#10b981",color:"white"}}>
+          2. Commit Import
+        </button>
+        <button onClick={()=>{setPreview(null);setUnmatchedDecisions({});}}
+          style={{padding:"5px 10px",fontSize:11,borderRadius:"var(--border-radius-md)",
+            background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
+            color:"var(--color-text-secondary)",cursor:"pointer"}}>Cancel</button>
+      </div>
+    </div>}
+
+    {result&&<div style={{marginBottom:10,padding:8,borderRadius:"var(--border-radius-md)",
       background:"rgba(16,185,129,0.1)",border:"0.5px solid rgba(16,185,129,0.3)",fontSize:11}}>
       <div style={{color:"#10b981",fontWeight:500,marginBottom:2}}>
-        ✓ {result.matched} {result.teamAbbr} players updated — {result.seriesLabel} G{result.gameNum} ({result.goalsFor}g)
+        ✓ {result.seriesLabel} G{result.gameNum}: {result.awayAbbr} {result.awayScore} @ {result.homeAbbr} {result.homeScore}
+        {result.ot && " (OT)"} — {result.matched} skaters · {result.goalies} goalies
       </div>
-      {result.completesGame&&<div style={{fontSize:10,color:"#10b981"}}>Both teams uploaded — score pushed to Series Pricer</div>}
-      {!result.completesGame&&<div style={{fontSize:10,color:"var(--color-text-secondary)"}}>Awaiting other team's paste for G{result.gameNum}</div>}
-      {result.unmatched.length>0&&<div style={{fontSize:10,color:"#f59e0b",marginTop:4}}>
-        Not in roster: {result.unmatched.join(", ")}
+      {result.unmatched>0&&<div style={{fontSize:10,color:"#f59e0b"}}>
+        {result.unmatched} unmatched player{result.unmatched===1?"":"s"} {result.addedPlayers.length>0?`(${result.addedPlayers.length} added: ${result.addedPlayers.join(", ")})`:"(skipped)"}
       </div>}
     </div>}
 
-    {s&&s.homeAbbr&&s.awayAbbr&&<div style={{marginTop:12}}>
-      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
-        <div style={{fontSize:10,fontWeight:500,color:"var(--color-text-secondary)",textTransform:"uppercase",letterSpacing:"0.06em"}}>
-          Imports for this series {seriesImports.length>0?`(${seriesImports.length})`:""}
-        </div>
-        <button onClick={handleResetSeries}
-          style={{marginLeft:"auto",padding:"3px 9px",fontSize:9,borderRadius:3,border:"0.5px solid rgba(239,68,68,0.4)",background:"rgba(239,68,68,0.12)",color:"#ef4444",cursor:"pointer",fontWeight:500}}>
-          ⚠ Reset Series
-        </button>
+    {/* Status grid for the focused series */}
+    {focusSeries&&focusSeries.homeAbbr&&focusSeries.awayAbbr&&<div style={{marginTop:12}}>
+      <div style={{fontSize:10,fontWeight:500,color:"var(--color-text-secondary)",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:6}}>
+        {focusSeries.homeAbbr} vs {focusSeries.awayAbbr} — Game Status
       </div>
-      {seriesImports.length>0 ? <div style={{maxHeight:180,overflowY:"auto",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)"}}>
-        {seriesImports.map((e)=>(
+      <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:4}}>
+        {(()=>{
+          const cells=[]; let hw=0, aw=0;
+          for(let g=1; g<=7; g++){
+            const game = focusSeries.games?.[g-1] || {};
+            const hs = game.homeScore, as = game.awayScore;
+            const hasScore = typeof hs==="number" && typeof as==="number";
+            if (hasScore) { if (hs>as) hw++; else if (as>hs) aw++; }
+            const runningLabel = hasScore
+              ? (hw===aw ? `${hw}-${aw}` : hw>aw ? `${focusSeries.homeAbbr} ${hw}-${aw}` : `${focusSeries.awayAbbr} ${aw}-${hw}`)
+              : null;
+            const bg = hasScore ? "rgba(16,185,129,0.12)" : "var(--color-background-secondary)";
+            const borderCol = hasScore ? "rgba(16,185,129,0.3)" : "var(--color-border-tertiary)";
+            cells.push(
+              <div key={g} style={{padding:"5px 4px",textAlign:"center",background:bg,borderRadius:3,fontSize:9,border:`0.5px solid ${borderCol}`,minHeight:54}}>
+                <div style={{fontSize:8,color:"var(--color-text-tertiary)",marginBottom:2}}>G{g}</div>
+                {hasScore
+                  ? <>
+                      <div style={{fontSize:10,fontWeight:500,color:"var(--color-text-primary)",fontFamily:"var(--font-mono)"}}>
+                        {hs}-{as}{game.ot?<span style={{color:"#f59e0b",marginLeft:2}}>OT</span>:""}
+                      </div>
+                      <div style={{fontSize:8,color:"var(--color-text-secondary)",marginTop:1}}>{runningLabel}</div>
+                    </>
+                  : <div style={{fontSize:9,color:"var(--color-text-tertiary)",marginTop:6}}>—</div>
+                }
+              </div>
+            );
+          }
+          return cells;
+        })()}
+      </div>
+    </div>}
+
+    {/* Imports log */}
+    {seriesImports.length>0&&<div style={{marginTop:12}}>
+      <div style={{fontSize:10,fontWeight:500,color:"var(--color-text-secondary)",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:4}}>
+        Recent Imports ({seriesImports.length})
+      </div>
+      <div style={{maxHeight:180,overflowY:"auto",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)"}}>
+        {seriesImports.map(e=>(
           <div key={e.id} style={{display:"flex",gap:8,fontSize:10,padding:"4px 8px",borderBottom:"0.5px solid var(--color-border-tertiary)",alignItems:"center"}}>
             <span style={{color:"var(--color-text-tertiary)",flexShrink:0,fontSize:9}}>{e.ts}</span>
             <span style={{color:"#10b981",flexShrink:0,fontFamily:"var(--font-mono)"}}>G{e.game}</span>
-            <span style={{flexShrink:0,fontWeight:500}}>{e.teamAbbr}</span>
-            <span style={{color:"var(--color-text-secondary)",flexShrink:0}}>{e.matched}p · {e.goalsFor}g</span>
+            <span style={{flexShrink:0,fontFamily:"var(--font-mono)",color:"var(--color-text-secondary)"}}>
+              {e.awayAbbr} {e.awayScore}-{e.homeScore} {e.homeAbbr}{e.ot?" OT":""}
+            </span>
+            <span style={{color:"var(--color-text-secondary)",flexShrink:0}}>{e.matched}p</span>
             {e.unmatched.length>0&&<span style={{color:"#f59e0b",fontSize:9}}>⚠{e.unmatched.length}</span>}
             <button onClick={()=>handleUndo(e.id)}
               style={{marginLeft:"auto",padding:"2px 8px",fontSize:9,borderRadius:3,border:"0.5px solid rgba(239,68,68,0.3)",background:"rgba(239,68,68,0.08)",color:"#ef4444",cursor:"pointer"}}>
@@ -4017,7 +4429,7 @@ function GameStatImporter({players,setPlayers,allSeries,setAllSeries}) {
             </button>
           </div>
         ))}
-      </div> : <div style={{fontSize:10,color:"var(--color-text-tertiary)",padding:"6px 8px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)"}}>No imports yet. If prior uploads left phantom data, use Reset Series to wipe this matchup.</div>}
+      </div>
     </div>}
   </div>;
 }
@@ -4204,7 +4616,7 @@ function UploadTab({players,setPlayers,goalies,setGoalies,exportState,importStat
         <Card style={{marginBottom:14}}>
           <SH title="Game Stat Import" sub="Paste a Hockey Reference box score — stats are added to each player's running playoff totals"/>
           {/* Series + Game selector */}
-          <GameStatImporter players={players} setPlayers={setPlayers} allSeries={allSeries} setAllSeries={setAllSeries}/>
+          <GameStatImporter players={players} setPlayers={setPlayers} goalies={goalies} setGoalies={setGoalies} allSeries={allSeries} setAllSeries={setAllSeries}/>
         </Card>
         <Card style={{marginBottom:14}}>
           <SH title="Live Playoff Totals" sub="Post-import verification — any player with pGP > 0 appears here"/>
