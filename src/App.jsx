@@ -2002,11 +2002,11 @@ function AppInner() {
     let expTotal,actualGP;
     if(scope==="r1"){expTotal=teamExpGR1[p.team]||5.82;actualGP=p.pGP||0;}
     else{
-      const adv=advancement[p.team]||{winR1:0.5,winConf:0.25,winCup:0.1};
-      // v38: prefer auto-derived values; fall back to manually entered advancement
-      const r1 = autoR1ByTeam[p.team] != null ? autoR1ByTeam[p.team] : adv.winR1;
-      const conf = (autoConfByTeamFinal||{})[p.team] != null ? autoConfByTeamFinal[p.team] : adv.winConf;
-      const cup = (autoCupByTeamFinal||{})[p.team] != null ? autoCupByTeamFinal[p.team] : adv.winCup;
+      const adv=advancement[p.team]||{winR1:0.5,winConf:0.25,winCup:0.1,manualR1:false,manualConf:false,manualCup:false};
+      // v40: respect per-field manual override flag — if set, use stored value; else use auto.
+      const r1 = (autoR1ByTeam[p.team] != null && !adv.manualR1) ? autoR1ByTeam[p.team] : adv.winR1;
+      const conf = ((autoConfByTeamFinal||{})[p.team] != null && !adv.manualConf) ? autoConfByTeamFinal[p.team] : adv.winConf;
+      const cup = ((autoCupByTeamFinal||{})[p.team] != null && !adv.manualCup) ? autoCupByTeamFinal[p.team] : adv.winCup;
       expTotal=5.82+5.82*r1+5.82*conf+5.82*cup;
       actualGP=p.pGP||0;
     }
@@ -2649,61 +2649,65 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
       </Card>}
 
       {showAdv&&lScope==="full"&&<Card style={{marginBottom:14}}>
-        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,marginBottom:8}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,marginBottom:8,flexWrap:"wrap"}}>
           <SH title="Team Advancement" sub="P(Win R1) auto from Series Pricer; Conf/Cup chained through bracket (sim → xG fallback)."/>
-          <div style={{display:"flex",gap:4,alignItems:"center"}}>
-            <span style={{fontSize:10,color:"var(--color-text-tertiary)",marginRight:4}}>ENTRY:</span>
-            {[["prob","Probability"],["decimal","Decimal Odds"]].map(([id,lbl])=>(
-              <button key={id} onClick={()=>setAdvEntryMode(id)}
-                style={{
-                  padding:"3px 10px",fontSize:10,fontWeight:500,borderRadius:"var(--border-radius-md)",cursor:"pointer",
-                  border:"0.5px solid",
-                  borderColor: advEntryMode===id ? "#3b82f6" : "var(--color-border-secondary)",
-                  background: advEntryMode===id ? "rgba(59,130,246,0.15)" : "var(--color-background-secondary)",
-                  color: advEntryMode===id ? "#60a5fa" : "var(--color-text-secondary)",
-                }}>{lbl}</button>
-            ))}
-          </div>
+          <label style={{display:"flex",gap:6,alignItems:"center",fontSize:11,color:"var(--color-text-secondary)"}}>
+            Entry mode:
+            <select value={advEntryMode} onChange={e=>setAdvEntryMode(e.target.value)}
+              style={{padding:"4px 10px",fontSize:11,fontWeight:500,borderRadius:"var(--border-radius-md)",cursor:"pointer",
+                background:"var(--color-background-secondary)",border:"0.5px solid #3b82f6",color:"#60a5fa"}}>
+              <option value="prob">Probability</option>
+              <option value="decimal">Decimal Odds</option>
+            </select>
+          </label>
         </div>
         <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
           <TH cols={["Team", advEntryMode==="prob"?"P(Win R1)":"R1 Decimal", advEntryMode==="prob"?"P(Win Conf)":"Conf Decimal", advEntryMode==="prob"?"P(Win Cup)":"Cup Decimal"]}/>
           <tbody>{PLAYOFF_TEAMS.map(t=>{
-            const adv=advancement[t]||{winR1:0.5,winConf:0.25,winCup:0.1};
+            const adv=advancement[t]||{winR1:0.5,winConf:0.25,winCup:0.1,manualR1:false,manualConf:false,manualCup:false};
             const autoR1 = autoR1ByTeam[t];
             const autoConf = (autoConfByTeam||{})[t];
             const autoCup = (autoCupByTeam||{})[t];
-            const r1Prob = autoR1 != null ? autoR1 : adv.winR1;
-            const confProb = autoConf != null ? autoConf : adv.winConf;
-            const cupProb = autoCup != null ? autoCup : adv.winCup;
-            // Helpers for decimal conversion
+            // Manual flags — once user types, that field locks to stored value until unlocked
+            const useManR1 = !!adv.manualR1, useManConf = !!adv.manualConf, useManCup = !!adv.manualCup;
+            const r1Prob = (autoR1 != null && !useManR1) ? autoR1 : adv.winR1;
+            const confProb = (autoConf != null && !useManConf) ? autoConf : adv.winConf;
+            const cupProb = (autoCup != null && !useManCup) ? autoCup : adv.winCup;
             const probToDec = (p) => p > 0.0001 ? +(1/p).toFixed(2) : 50000;
             const decToProb = (d) => d > 1.001 ? Math.min(0.9999, 1/d) : 0.9999;
-            const renderCell = (probVal, isAuto, fieldKey, autoTitle) => {
-              if (advEntryMode==="decimal") {
-                const decVal = probToDec(probVal);
-                return (
-                  <div style={{display:"flex",gap:4,alignItems:"center",justifyContent:"flex-end"}}>
-                    {isAuto && <span style={{fontSize:9,padding:"1px 5px",background:"rgba(59,130,246,0.15)",color:"#60a5fa",borderRadius:3,letterSpacing:0.3}} title={autoTitle}>AUTO</span>}
-                    <NI value={decVal} onChange={d=>{
-                      const newProb = decToProb(d);
-                      setAdvancement(p=>({...p,[t]:{...(p[t]||{winR1:0.5,winConf:0.25,winCup:0.1}),[fieldKey]:newProb}}));
-                    }} min={1.01} max={1000} step={0.01} style={{width:64}}/>
-                  </div>
-                );
-              }
+            const renderCell = (probVal, autoAvail, useMan, fieldKey, manualKey, autoTitle) => {
+              const isAuto = autoAvail && !useMan;
+              const setProbAndLock = (newProb) => setAdvancement(p=>({
+                ...p,
+                [t]: {...(p[t]||{winR1:0.5,winConf:0.25,winCup:0.1,manualR1:false,manualConf:false,manualCup:false}),
+                  [fieldKey]: newProb, [manualKey]: true}
+              }));
+              const unlock = () => setAdvancement(p=>({
+                ...p,
+                [t]: {...(p[t]||{winR1:0.5,winConf:0.25,winCup:0.1,manualR1:false,manualConf:false,manualCup:false}),
+                  [manualKey]: false}
+              }));
               return (
                 <div style={{display:"flex",gap:4,alignItems:"center",justifyContent:"flex-end"}}>
                   {isAuto && <span style={{fontSize:9,padding:"1px 5px",background:"rgba(59,130,246,0.15)",color:"#60a5fa",borderRadius:3,letterSpacing:0.3}} title={autoTitle}>AUTO</span>}
-                  <NI value={+probVal.toFixed(3)} onChange={v=>setAdvancement(p=>({...p,[t]:{...(p[t]||{winR1:0.5,winConf:0.25,winCup:0.1}),[fieldKey]:v}}))} min={0} max={1} step={0.01} style={{width:58}}/>
+                  {useMan && <span style={{fontSize:9,padding:"1px 5px",background:"rgba(245,158,11,0.15)",color:"#f59e0b",borderRadius:3,letterSpacing:0.3}} title="manual override">MANUAL</span>}
+                  {advEntryMode==="decimal"
+                    ? <NI value={probToDec(probVal)} onChange={d=>setProbAndLock(decToProb(d))} min={1.01} max={1000} step={0.01} style={{width:64}}/>
+                    : <NI value={+probVal.toFixed(3)} onChange={v=>setProbAndLock(v)} min={0} max={1} step={0.01} style={{width:58}}/>}
+                  {useMan && autoAvail && (
+                    <button type="button" onClick={unlock} title="Revert to AUTO"
+                      style={{padding:"2px 5px",fontSize:10,lineHeight:1,borderRadius:3,cursor:"pointer",
+                        background:"rgba(100,116,139,0.10)",border:"0.5px solid var(--color-border-secondary)",color:"var(--color-text-secondary)"}}>↻</button>
+                  )}
                 </div>
               );
             };
             return (
             <tr key={t} style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
               <td style={{padding:"4px 8px",fontWeight:500}}>{t} <span style={{color:"var(--color-text-secondary)",fontWeight:400}}>{TEAM_NAMES[t]}</span></td>
-              <td style={{padding:"3px 6px",textAlign:"right"}}>{renderCell(r1Prob, autoR1!=null, "winR1", "auto from Series Pricer")}</td>
-              <td style={{padding:"3px 6px",textAlign:"right"}}>{renderCell(confProb, autoConf!=null, "winConf", "chained R1 → R2 → R3 (sim or xG)")}</td>
-              <td style={{padding:"3px 6px",textAlign:"right"}}>{renderCell(cupProb, autoCup!=null, "winCup", "chained R1 → R2 → R3 → F (sim or xG)")}</td>
+              <td style={{padding:"3px 6px",textAlign:"right"}}>{renderCell(r1Prob, autoR1!=null, useManR1, "winR1", "manualR1", "auto from Series Pricer")}</td>
+              <td style={{padding:"3px 6px",textAlign:"right"}}>{renderCell(confProb, autoConf!=null, useManConf, "winConf", "manualConf", "chained R1 → R2 → R3 (sim or xG)")}</td>
+              <td style={{padding:"3px 6px",textAlign:"right"}}>{renderCell(cupProb, autoCup!=null, useManCup, "winCup", "manualCup", "chained R1 → R2 → R3 → F (sim or xG)")}</td>
             </tr>);})}</tbody>
         </table>
       </Card>}
