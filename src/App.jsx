@@ -1613,6 +1613,13 @@ function AppInner() {
   // SeriesTab watches it and auto-runs the unified sim so prices reflect the new state without a manual click.
   const [gameUploadCounter, setGameUploadCounter] = useState(0);
   const bumpGameUpload = useCallback(()=>setGameUploadCounter(n=>n+1), []);
+  // v34: sim results live at App level keyed by series so they SURVIVE tab/series navigation.
+  // Only cleared when user explicitly hits Run (which replaces) or when series teams change.
+  // Shape: { [seriesKey]: { result, key, ts } }
+  const [simResultsBySeries, setSimResultsBySeries] = useState({});
+  const setSimForSeries = useCallback((seriesKey, payload)=>{
+    setSimResultsBySeries(prev => ({...prev, [seriesKey]: payload}));
+  }, []);
   const [lScope,setLScope] = useState("r1");
   const [lStat,setLStat] = useState("g");
   const [lTopN,setLTopN] = useState(25);
@@ -1804,7 +1811,8 @@ function AppInner() {
         {tab==="series"&&<SeriesTab allSeries={allSeries} setAllSeries={setSeries}
           players={players} goalies={goalies} margins={margins} setMargins={setMargins}
           globals={globals} showTrue={showTrue} dark={dark} onEnterGame={setGameModal}
-          gameUploadCounter={gameUploadCounter}/>}
+          gameUploadCounter={gameUploadCounter}
+          simResultsBySeries={simResultsBySeries} setSimForSeries={setSimForSeries}/>}
         {tab==="upload"&&<UploadTab players={players} setPlayers={setP} goalies={goalies} setGoalies={setG}
           exportState={exportState} importState={importState} syncStatus={syncStatus} allSeries={allSeries} setAllSeries={setSeries} dark={dark}
           onGameUploaded={bumpGameUpload}/>}
@@ -2343,7 +2351,7 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
 // ═══════════════════════════════════════════════════════════════════════════════
 // SERIES TAB
 // ═══════════════════════════════════════════════════════════════════════════════
-function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,globals,showTrue,dark,onEnterGame,gameUploadCounter}) {
+function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,globals,showTrue,dark,onEnterGame,gameUploadCounter,simResultsBySeries,setSimForSeries}) {
   const [si,setSi]=useState(0);
   const [mkt,setMkt]=useState("winner");
   const [showMgn,setShowMgn]=useState(false);
@@ -2414,10 +2422,18 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
       if (settledOver) { pOver = 1; pUnder = 0; }
       else if (settledUnder) { pOver = 0; pUnder = 1; }
       else { pOver = pAtLeast(pmf, lineCeil); pUnder = 1 - pOver; }
-      const [ao, au] = (settledOver || settledUnder)
+      let [ao, au] = (settledOver || settledUnder)
         ? [pOver, pUnder]
         : applyMargin([pOver, pUnder], marginVal);
-      return {line, pOver, pUnder, ao, au, _settled: settledOver || settledUnder, _settledSide: settledOver ? "over" : settledUnder ? "under" : null};
+      // v34: if margin pushes either side >= 100%, the line is effectively dead — treat as settled.
+      let extraSettledOver = false, extraSettledUnder = false;
+      if (!settledOver && !settledUnder) {
+        if (ao >= 1.0) { extraSettledOver = true; ao = 1; au = 0; }
+        else if (au >= 1.0) { extraSettledUnder = true; au = 1; ao = 0; }
+      }
+      const settled = settledOver || settledUnder || extraSettledOver || extraSettledUnder;
+      const settledSide = (settledOver || extraSettledOver) ? "over" : (settledUnder || extraSettledUnder) ? "under" : null;
+      return {line, pOver, pUnder, ao, au, _settled: settled, _settledSide: settledSide};
     });
   }
   function sortSettled(rows) {
@@ -2495,37 +2511,38 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
     return total;
   };
 
-  // v25: unified series simulation is NOW ON-DEMAND (runs when user clicks button).
-  // Prior auto-run was causing Series Pricer page to re-simulate on every keystroke.
-  // Result persists until user clicks Run again. Input changes are detected via effKey; when stale, UI shows a warning.
-  const [simResult, setSimResult] = useState(null);
-  const [simKey, setSimKey] = useState(null); // the effKey at time of last sim run
+  // v34: sim state lives at App level (simResultsBySeries) keyed by `${homeAbbr}|${awayAbbr}`
+  // so it survives tab/series navigation. Local state is only the running flag.
+  const seriesKey = (s.homeAbbr||"") + "|" + (s.awayAbbr||"");
+  const cached = simResultsBySeries[seriesKey];
+  const simResult = cached ? cached.result : null;
+  const simKey = cached ? cached.key : null;
   const [simRunning, setSimRunning] = useState(false);
-  const simStale = simResult && simKey !== effKey+"|"+(s.homeAbbr||"")+"|"+(s.awayAbbr||"");
+  const simStale = simResult && simKey !== effKey+"|"+seriesKey;
   const runSim = useCallback(()=>{
     if (!players || !s.homeAbbr || !s.awayAbbr) return;
     setSimRunning(true);
-    // Defer so React paints the "running" state before the heavy loop
     setTimeout(()=>{
       try {
         const inputs = buildSimInputs(effG, s.homeAbbr, s.awayAbbr, players, globals, goalieQualityFaced, pGamePlayed);
-        if (!inputs.pool.length) { setSimResult(null); setSimRunning(false); return; }
+        if (!inputs.pool.length) { setSimForSeries(seriesKey, null); setSimRunning(false); return; }
         const t0 = (typeof performance!=="undefined"?performance.now():Date.now());
         const result = simulateSeries(inputs, globals.dispersion, 20000, 31337);
         const t1 = (typeof performance!=="undefined"?performance.now():Date.now());
-        setSimResult({ ...result, simMs: Math.round(t1-t0) });
-        setSimKey(effKey+"|"+s.homeAbbr+"|"+s.awayAbbr);
+        setSimForSeries(seriesKey, {
+          result: { ...result, simMs: Math.round(t1-t0) },
+          key: effKey+"|"+seriesKey,
+          ts: Date.now(),
+        });
       } finally {
         setSimRunning(false);
       }
     }, 30);
-  }, [effKey, s.homeAbbr, s.awayAbbr, players, goalies, globals]);
+  }, [effKey, s.homeAbbr, s.awayAbbr, players, goalies, globals, seriesKey, setSimForSeries]);
 
-  // Clear stale sim when user switches series (avoids showing wrong team's sim)
-  useEffect(()=>{
-    setSimResult(null);
-    setSimKey(null);
-  }, [s.homeAbbr, s.awayAbbr, si]);
+  // v34: NO LONGER clear sim on series switch. The per-series cache means each series
+  // keeps its own sim result. Switching back retrieves it. Only re-run on explicit click.
+  // (Previous behaviour: setSimResult(null) on s.homeAbbr/s.awayAbbr/si change — REMOVED.)
 
   // v31: auto-run sim after a game upload commit. Watches the App-level counter that
   // GameStatImporter bumps. Only fires if we have everything we need (players + both teams set).
@@ -2535,7 +2552,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
     if (gameUploadCounter == null) return;
     if (gameUploadCounter === lastUploadSeen.current) return;
     lastUploadSeen.current = gameUploadCounter;
-    if (gameUploadCounter === 0) return; // initial mount, nothing uploaded yet
+    if (gameUploadCounter === 0) return;
     if (!players || !s.homeAbbr || !s.awayAbbr) return;
     runSim();
   }, [gameUploadCounter, players, s.homeAbbr, s.awayAbbr, runSim]);
@@ -2696,29 +2713,62 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
 
   // Spread market — v31: sim's exactScoreProb when available; per-row settled detection.
   // Lines are wins-spread (e.g., "-3.5" = win series by 4 wins, i.e., 4-0).
+  // Spread market — v32: sim's exactScoreProb when available; settled detection by enumerating
+  // all reachable final (hw, aw) outcomes from current realized state, then asking: do they all
+  // cover (settled HOME) or none of them cover (settled AWAY)?
   const spreadMkt=useMemo(()=>{
     let outcomesObj;
     if (simResult && simResult.exactScoreProb) {
-      outcomesObj = simResult.exactScoreProb; // already keyed "4-0".."3-4"
+      outcomesObj = simResult.exactScoreProb;
     } else {
       outcomesObj = outcomes;
     }
     const rows = computeSpread(outcomesObj, s.homeAbbr, s.awayAbbr);
-    // Settled detection: for a row with home line `L` (negative = home favoured by |L|+0.5 wins),
-    // the row's HOME side wins iff hw-aw > L. With realized (hw, aw) and remaining games R:
-    //   maxFinalDiff = (hw + R) - aw   (home wins all remaining)
-    //   minFinalDiff = hw - (aw + R)   (away wins all remaining)
-    // BUT series ends at first team to 4 wins, so cap at 4. We'll use 4-cap.
-    const homeMaxWins = Math.min(4, realized.hw + realized.gamesRemaining);
-    const awayMaxWins = Math.min(4, realized.aw + realized.gamesRemaining);
-    const possibleMaxDiff = homeMaxWins - realized.aw;       // most home-favoured plausible end state
-    const possibleMinDiff = realized.hw - awayMaxWins;       // most away-favoured plausible end state
+    // Enumerate reachable finals from realized (rhw, raw, R remaining)
+    const rhw = realized.hw, raw = realized.aw, R = realized.gamesRemaining;
+    const reachable = [];
+    if (rhw >= 4) reachable.push([rhw, raw]); // already over (shouldn't happen if pricer still active)
+    else if (raw >= 4) reachable.push([rhw, raw]);
+    else {
+      // Home final = 4, away final ∈ [raw, min(3, raw+R-(4-rhw))]
+      const homeAddNeeded = 4 - rhw;
+      if (homeAddNeeded <= R) {
+        for (let extraAway = 0; extraAway <= R - homeAddNeeded && raw + extraAway <= 3; extraAway++) {
+          reachable.push([4, raw + extraAway]);
+        }
+      }
+      // Away final = 4, home final ∈ [rhw, min(3, rhw+R-(4-raw))]
+      const awayAddNeeded = 4 - raw;
+      if (awayAddNeeded <= R) {
+        for (let extraHome = 0; extraHome <= R - awayAddNeeded && rhw + extraHome <= 3; extraHome++) {
+          reachable.push([rhw + extraHome, 4]);
+        }
+      }
+    }
+    // For a row, the cover condition depends on which "side" of the table:
+    //   - Home-favoured rows: r.line is set (negative number like -3.5). Home covers iff hw-aw > line.
+    //     But the existing computeSpread uses the SIGNED line value as the diff threshold (so line=-3.5 gives `diff > -3.5`).
+    //     Looking at the labels: "PIT -3.5" should require diff ≥ 4 to cover, which is `diff > 3.5`.
+    //     The original code is buggy — but the displayed odds ARE consistent with "diff > line" being interpreted
+    //     literally... actually looking at outputs they map to the away side's prob being PIT wins by 4 = 4-0.
+    //     Cleanest is to derive the cover condition from the LABEL itself.
+    function homeCovers(label, hw, aw) {
+      // label like "PIT -3.5" or "PIT +1.5"
+      const m = label.match(/([+-]?\d+\.?\d*)/);
+      if (!m) return null;
+      const v = parseFloat(m[1]);
+      // Home covers iff (hw - aw) + v > 0  (standard spread interpretation)
+      return (hw - aw) + v > 0;
+    }
     return rows.map(r=>{
-      // line value = home spread (e.g., -3.5 means home favoured by 3.5+ wins)
-      const L = r.line != null ? r.line : r.awayLine;
-      // Home covers if (hw-aw) > L. Settled HOME if even worst-for-home end state covers; settled AWAY if even best can't.
-      const settledHome = possibleMinDiff > L;
-      const settledAway = possibleMaxDiff <= L;
+      // Determine settled by checking all reachable finals
+      let allCover = reachable.length > 0, noneCover = reachable.length > 0;
+      for (const [h, a] of reachable) {
+        const c = homeCovers(r.homeLabel, h, a);
+        if (c) noneCover = false; else allCover = false;
+      }
+      const settledHome = allCover;
+      const settledAway = noneCover;
       let pHome = r.pHome, pAway = r.pAway;
       if (settledHome) { pHome = 1; pAway = 0; }
       else if (settledAway) { pHome = 0; pAway = 1; }
