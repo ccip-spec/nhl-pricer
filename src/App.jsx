@@ -1339,7 +1339,7 @@ const DEFAULT_MARGINS = {
   propsGoals:1.08, propsAssists:1.05, propsPoints:1.05, propsSOG:1.05,
   propsHits:1.05, propsBlocks:1.05, propsTakeaways:1.05, propsPIM:1.05,
   propsGiveaways:1.05,
-  seriesLeader:1.15, leaderR1:1.15, leaderFull:1.15,
+  seriesLeader:1.5, leaderR1:1.5, leaderFull:1.5,
 };
 const DEFAULT_GLOBALS = { overroundR1:1.15, overroundFull:1.15, powerFactor:1.20, rateDiscount:0.85, dispersion:1.2, seriesLeaderPF:1.15 };
 
@@ -1591,8 +1591,8 @@ function AppRoot() {
 function AppInner() {
   const [dark,setDark] = useState(true);
   const [tab,setTab] = useState("leaders");
-  const [globals,setGlobals] = useState(DEFAULT_GLOBALS);
-  const [margins,setMargins] = useState(DEFAULT_MARGINS);
+  const [globals,setGlobals] = useState(()=>{try{const s=localStorage.getItem("nhl_globals");return s?{...DEFAULT_GLOBALS,...JSON.parse(s)}:DEFAULT_GLOBALS;}catch{return DEFAULT_GLOBALS;}});
+  const [margins,setMargins] = useState(()=>{try{const s=localStorage.getItem("nhl_margins");return s?{...DEFAULT_MARGINS,...JSON.parse(s)}:DEFAULT_MARGINS;}catch{return DEFAULT_MARGINS;}});
   const [showTrue,setShowTrue] = useState(false);
   const [showDec,setShowDec] = useState(true);
   const [syncStatus,setSyncStatus] = useState("idle");
@@ -1616,7 +1616,9 @@ function AppInner() {
   // v34: sim results live at App level keyed by series so they SURVIVE tab/series navigation.
   // Only cleared when user explicitly hits Run (which replaces) or when series teams change.
   // Shape: { [seriesKey]: { result, key, ts } }
-  const [simResultsBySeries, setSimResultsBySeries] = useState({});
+  const [simResultsBySeries, setSimResultsBySeries] = useState(()=>{
+    try{const s=localStorage.getItem("nhl_sim_cache");return s?JSON.parse(s):{};}catch{return {};}
+  });
   const setSimForSeries = useCallback((seriesKey, payload)=>{
     setSimResultsBySeries(prev => ({...prev, [seriesKey]: payload}));
   }, []);
@@ -1630,6 +1632,12 @@ function AppInner() {
   useEffect(()=>{localStorage.setItem("nhl_m",JSON.stringify(matchups));},[matchups]);
   useEffect(()=>{localStorage.setItem("nhl_adv",JSON.stringify(advancement));},[advancement]);
   useEffect(()=>{localStorage.setItem("nhl_s",JSON.stringify(allSeries));},[allSeries]);
+  useEffect(()=>{localStorage.setItem("nhl_globals",JSON.stringify(globals));},[globals]);
+  useEffect(()=>{localStorage.setItem("nhl_margins",JSON.stringify(margins));},[margins]);
+  useEffect(()=>{
+    try { localStorage.setItem("nhl_sim_cache", JSON.stringify(simResultsBySeries)); }
+    catch (e) { /* may exceed quota; sim cache is recomputable so ignore */ }
+  }, [simResultsBySeries]);
 
   const syncTimer = useRef(null);
   const pending = useRef({});
@@ -1644,19 +1652,39 @@ function AppInner() {
       setSyncStatus(SUPABASE_ENABLED?(ok?"ok":"err"):"idle");
     },3000);
   }
-  function setP(v){setPlayers(v);scheduleSync("players",v);}
-  function setG(v){setGoalies(v);scheduleSync("goalies",v);}
+  function setP(v){
+    setPlayers(prev => { const next = typeof v === "function" ? v(prev) : v; scheduleSync("players", next); return next; });
+  }
+  function setG(v){
+    setGoalies(prev => { const next = typeof v === "function" ? v(prev) : v; scheduleSync("goalies", next); return next; });
+  }
   function setM(v){setMatchups(v);scheduleSync("matchups",v);}
-  function setAdv(v){setAdvancement(v);scheduleSync("advancement",v);}
-  function setSeries(v){setAllSeries(v);scheduleSync("series",v);}
+  function setAdv(v){
+    setAdvancement(prev => {
+      const next = typeof v === "function" ? v(prev) : v;
+      scheduleSync("advancement", next);
+      return next;
+    });
+  }
+  function setSeries(v){
+    setAllSeries(prev => { const next = typeof v === "function" ? v(prev) : v; scheduleSync("series", next); return next; });
+  }
 
   useEffect(()=>{
     if(!SUPABASE_ENABLED)return;
     (async()=>{
       setSyncStatus("syncing");
+      // v35: cloud load only fills in MISSING locals — never overwrites local edits.
+      // Without this guard, every page reload would clobber margins/advancement/etc with stale cloud data.
       const keys=["players","goalies","matchups","advancement","series"];
+      const localKeys=["nhl_p","nhl_g","nhl_m","nhl_adv","nhl_s"];
       const setters=[setPlayers,setGoalies,setMatchups,setAdvancement,setAllSeries];
-      for(let i=0;i<keys.length;i++){const v=await sbLoad(keys[i]);if(v)setters[i](v);}
+      for(let i=0;i<keys.length;i++){
+        const haveLocal = !!localStorage.getItem(localKeys[i]);
+        if (haveLocal) continue; // local wins; don't touch
+        const v=await sbLoad(keys[i]);
+        if(v) setters[i](v);
+      }
       setSyncStatus("ok");
     })();
   },[]);
@@ -2902,7 +2930,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:8}}>
           {Object.entries(margins).map(([k,v])=><label key={k} style={{fontSize:11,display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}>
             <span style={{color:"var(--color-text-secondary)",textTransform:"capitalize"}}>{k.replace(/([A-Z])/g," $1")}</span>
-            <NI value={v} onChange={nv=>setMargins(m=>({...m,[k]:nv}))} min={1} max={1.5} step={0.01} style={{width:56}}/>
+            <NI value={v} onChange={nv=>setMargins(m=>({...m,[k]:nv}))} min={1} max={3} step={0.01} style={{width:56}}/>
           </label>)}
         </div>
       </Card>}
@@ -5628,7 +5656,7 @@ function SettingsTab({globals,setGlobals,margins,setMargins,showTrue,setShowTrue
         {Object.entries(margins).map(([k,v])=>(
           <div key={k} style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
             <label style={{fontSize:11,color:"var(--color-text-secondary)",textTransform:"capitalize"}}>{k.replace(/([A-Z])/g," $1")}</label>
-            <NI value={v} onChange={nv=>setMargins(m=>({...m,[k]:nv}))} min={1} max={1.5} step={0.01} style={{width:58}}/>
+            <NI value={v} onChange={nv=>setMargins(m=>({...m,[k]:nv}))} min={1} max={3} step={0.01} style={{width:58}}/>
           </div>
         ))}
       </Card>
