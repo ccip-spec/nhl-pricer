@@ -1344,6 +1344,103 @@ const DEFAULT_MARGINS = {
 const DEFAULT_GLOBALS = { overroundR1:1.15, overroundFull:1.15, powerFactor:1.20, rateDiscount:0.85, dispersion:1.2, seriesLeaderPF:1.15 };
 
 // ─── PARSER ───────────────────────────────────────────────────────────────────
+
+// v29: HR season-long skaters CSV parser. Handles the Hockey Reference player stats CSV
+// (https://www.hockey-reference.com/leagues/NHL_2026_skaters.html → Get table as CSV).
+// Key edge cases:
+// - Header row may be preceded by comment lines starting with "---" or blank lines
+// - Players traded mid-season have an aggregate row (Team="2TM"/"3TM") followed by per-team rows;
+//   all share the same Rk number. We DROP the aggregate and KEEP the LAST team row per Rk
+//   (HR lists teams chronologically, so last = current team).
+// - VGK in HR maps to our internal VEG abbr.
+// - TOI is "MM:SS" or "HHHH:SS" → parsed to seconds.
+function parseHRSkaters(text) {
+  const lines = text.split(/\r?\n/).filter(l => l.trim() && !l.startsWith("---"));
+  let hi = -1, headers = [];
+  for (let i = 0; i < lines.length; i++) {
+    const c = lines[i].split(",");
+    if (c.includes("Player") && c.includes("Team") && c.includes("GP")) {
+      hi = i; headers = c; break;
+    }
+  }
+  if (hi === -1) return {error: "Could not find header row. Expected columns: Rk, Player, Team, GP, ..."};
+
+  const col = (name) => headers.indexOf(name);
+  const cm = {
+    rk: col("Rk"), name: col("Player"), pos: col("Pos"), team: col("Team"),
+    gp: col("GP"), g: col("G"), a: col("A"), pim: col("PIM"),
+    sog: col("SOG"), blk: col("BLK"), hit: col("HIT"),
+    take: col("TAKE"), give: col("GIVE"), toi: col("TOI"), atoi: col("ATOI"),
+  };
+  if (cm.name < 0 || cm.team < 0 || cm.gp < 0) {
+    return {error: "Required columns missing (Player, Team, GP)"};
+  }
+
+  const PLAYOFF_TEAMS_SET = new Set(["ANA","BOS","BUF","CAR","COL","DAL","EDM","LAK","MIN","MTL","OTT","PHI","PIT","TBL","UTA","VEG","VGK"]);
+
+  // Group rows by Rk; for trades (multiple rows per Rk), keep the LAST non-aggregate row.
+  const byRk = new Map();
+  for (let i = hi+1; i < lines.length; i++) {
+    const cells = lines[i].split(",");
+    if (cells.length < 5) continue;
+    const rk = cells[cm.rk]; const team = (cells[cm.team]||"").trim(); const name = (cells[cm.name]||"").trim();
+    if (!rk || !name) continue;
+    if (!byRk.has(rk)) byRk.set(rk, []);
+    byRk.get(rk).push({cells, team, name});
+  }
+
+  const parseToi = s => {
+    if (!s) return 0;
+    const m = String(s).match(/(\d+):(\d+)/);
+    return m ? parseInt(m[1])*60 + parseInt(m[2]) : 0;
+  };
+
+  const players = [];
+  for (const [, rows] of byRk) {
+    const teamRows = rows.length > 1 ? rows.filter(r => !/^\d+TM$/.test(r.team)) : rows;
+    if (!teamRows.length) continue;
+    const chosen = teamRows[teamRows.length - 1]; // last team = current
+    const c = chosen.cells;
+    let team = (c[cm.team]||"").trim();
+    if (team === "VGK") team = "VEG";
+    if (!PLAYOFF_TEAMS_SET.has(team)) continue; // skip non-playoff teams (CGY, NYR, etc.)
+    const gp = parseInt(c[cm.gp]) || 1;
+    const pos = ((cm.pos>=0 ? c[cm.pos] : "F")||"F").trim();
+    // HR uses F/D/G/C/RW/LW; we collapse forwards to F for our position model
+    const posSimple = pos === "G" ? "G" : pos === "D" ? "D" : "F";
+    const g   = parseInt(c[cm.g]) || 0;
+    const a   = parseInt(c[cm.a]) || 0;
+    const sog = parseInt(c[cm.sog]) || 0;
+    const blk = cm.blk>=0 ? (parseInt(c[cm.blk])||0) : 0;
+    const hit = cm.hit>=0 ? (parseInt(c[cm.hit])||0) : 0;
+    const tk  = cm.take>=0 ? (parseInt(c[cm.take])||0) : 0;
+    const give= cm.give>=0 ? (parseInt(c[cm.give])||0) : 0;
+    const pim = cm.pim>=0 ? (parseInt(c[cm.pim])||0) : 0;
+    const toi = cm.toi>=0 ? parseToi(c[cm.toi]) : 0;
+    const defRole = posSimple === "D" ? "D2" : posSimple === "G" ? "BACKUP" : "MID6";
+    players.push({
+      name: chosen.name, team, pos: posSimple,
+      gp, g, a, pts: g+a, sog, hit, blk, tk, pim, give,
+      tsa: 0, // not in HR CSV; left at 0
+      onIceF: 0, onIceA: 0, // not in HR CSV; xG-based features won't work for HR-only players
+      toi,
+      g_pg:   gp>0 ? +(g/gp).toFixed(4)   : 0,
+      a_pg:   gp>0 ? +(a/gp).toFixed(4)   : 0,
+      pts_pg: gp>0 ? +((g+a)/gp).toFixed(4): 0,
+      sog_pg: gp>0 ? +(sog/gp).toFixed(4) : 0,
+      hit_pg: gp>0 ? +(hit/gp).toFixed(4) : 0,
+      blk_pg: gp>0 ? +(blk/gp).toFixed(4) : 0,
+      take_pg:gp>0 ? +(tk/gp).toFixed(4)  : 0,
+      pim_pg: gp>0 ? +(pim/gp).toFixed(4) : 0,
+      tsa_pg: 0, give_pg: gp>0 ? +(give/gp).toFixed(4) : 0,
+      lineRole: defRole,
+      pGP:0, pG:0, pA:0, pSOG:0, pHIT:0, pBLK:0, pTK:0, pPIM:0, pTSA:0, pGIVE:0,
+      _hrSource: true,
+    });
+  }
+  return {players};
+}
+
 function parseHR(text) {
   const lines = text.trim().split("\n");
   let hi = -1, headers = [];
@@ -3959,7 +4056,9 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
   useEffect(()=>{try{localStorage.setItem("nhl_imports_v28",JSON.stringify(imports));}catch{}},[imports]);
 
   function hashStr(str){let h=0;for(let i=0;i<str.length;i++){h=((h<<5)-h)+str.charCodeAt(i);h|=0;}return (h>>>0).toString(36);}
-  const norm=s=>(s||"").toLowerCase().replace(/[^a-z]/g,"");
+  // v28.1: NFD-normalize then strip combining diacritics (ö → o, č → c, ü → u, etc.)
+  // Critical for matching HR-style names with accents against ASCII-stripped CSV names (or vice versa).
+  const norm=s=>(s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().replace(/[^a-z0-9]/g,"");
 
   // Auto-detect series from team abbrs in parsed result
   function detectSeriesIdx(awayAbbr, homeAbbr){
@@ -4518,6 +4617,102 @@ function UploadTab({players,setPlayers,goalies,setGoalies,exportState,importStat
 
   const playerFileRef = useRef(null);
   const goalieFileRef = useRef(null);
+  const hrRosterFileRef = useRef(null);
+
+  // v29: Merge HR season-skater roster into existing players.
+  // Strategy: for each HR player, try to match on (normalized name + team). If matched,
+  // update the player's NAME to the HR spelling (so diacritics line up with box score pastes)
+  // and overlay any HR-source fields that the existing record is missing/zero. Preserve
+  // MoneyPuck's xG fields (onIceF/onIceA) and any playoff data (pGames/pG/pA/...).
+  // If no match, add as a new player.
+  function mergeHRRoster(hrPlayers) {
+    if (!hrPlayers || !hrPlayers.length) return;
+    const norm = s => (s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().replace(/[^a-z0-9]/g,"");
+    const existing = players || [];
+    // Index existing by (normName + team) for fast lookup
+    const byKey = new Map(existing.map(p => [norm(p.name)+"|"+p.team, p]));
+    const updated = [];
+    const seenKeys = new Set();
+    let nameFixed = 0, added = 0, teamMoved = 0;
+
+    // First pass: walk HR players, attempt to match
+    for (const hp of hrPlayers) {
+      const k = norm(hp.name) + "|" + hp.team;
+      // Direct match (same team)
+      let match = byKey.get(k);
+      // Cross-team match (player traded; HR has new team, existing has old team)
+      if (!match) {
+        for (const ep of existing) {
+          if (norm(ep.name) === norm(hp.name)) { match = ep; break; }
+        }
+      }
+      if (match) {
+        seenKeys.add(norm(match.name)+"|"+match.team);
+        const teamChanged = match.team !== hp.team;
+        if (teamChanged) teamMoved++;
+        const nameChanged = match.name !== hp.name;
+        if (nameChanged) nameFixed++;
+        updated.push({
+          ...match,
+          name: hp.name,    // adopt HR spelling (diacritics)
+          team: hp.team,    // adopt HR team (post-trade)
+          // Overlay HR rates ONLY where existing record has zero/missing — preserve MoneyPuck advanced data otherwise.
+          gp: match.gp || hp.gp,
+          g_pg:    match.g_pg    || hp.g_pg,
+          a_pg:    match.a_pg    || hp.a_pg,
+          sog_pg:  match.sog_pg  || hp.sog_pg,
+          hit_pg:  match.hit_pg  || hp.hit_pg,
+          blk_pg:  match.blk_pg  || hp.blk_pg,
+          take_pg: match.take_pg || hp.take_pg,
+          pim_pg:  match.pim_pg  || hp.pim_pg,
+          give_pg: match.give_pg || hp.give_pg,
+        });
+      } else {
+        updated.push(hp);
+        added++;
+      }
+    }
+    // Second pass: keep existing players who weren't in HR (e.g., on non-playoff teams or scratched all year).
+    // We add them only if their team is in the playoff set; HR is authoritative for current rosters.
+    for (const ep of existing) {
+      const k = norm(ep.name)+"|"+ep.team;
+      if (seenKeys.has(k)) continue;
+      // Find by name only — if HR has them on a different team, they're already in `updated`
+      const hrHasName = hrPlayers.some(hp => norm(hp.name) === norm(ep.name));
+      if (hrHasName) continue; // matched cross-team, already in updated
+      updated.push(ep);
+    }
+
+    updated.sort((a,b)=> (a.team||"").localeCompare(b.team||"") || (b.pts||0) - (a.pts||0));
+    setPlayers(updated);
+    setFileErr(`✓ HR roster merged: ${hrPlayers.length} HR players · ${added} added · ${nameFixed} names corrected · ${teamMoved} teams updated`);
+  }
+
+  function handleHRRosterFile(e) {
+    const file = e.target.files[0]; if (!file) return;
+    e.target.value = "";
+    const reader = new FileReader();
+    reader.onload = ev => {
+      try {
+        const r = parseHRSkaters(ev.target.result);
+        if (r.error) { setFileErr("HR parse error: " + r.error); return; }
+        mergeHRRoster(r.players);
+      } catch (e) { setFileErr("HR parse error: " + e.message); }
+    };
+    reader.readAsText(file);
+  }
+
+  // Paste-based HR roster import (no file upload — paste CSV directly into a textarea)
+  const [hrPasteText, setHrPasteText] = useState("");
+  function handleHRRosterPaste() {
+    if (!hrPasteText.trim()) return;
+    try {
+      const r = parseHRSkaters(hrPasteText);
+      if (r.error) { setFileErr("HR parse error: " + r.error); return; }
+      mergeHRRoster(r.players);
+      setHrPasteText("");
+    } catch (e) { setFileErr("HR parse error: " + e.message); }
+  }
 
   function handlePlayerFile(e){
     const file=e.target.files[0];if(!file)return;
@@ -4612,6 +4807,7 @@ function UploadTab({players,setPlayers,goalies,setGoalies,exportState,importStat
       {/* Hidden real file inputs — triggered by visible buttons */}
       <input ref={playerFileRef} type="file" accept=".csv,.json" onChange={handlePlayerFile} style={{display:"none"}}/>
       <input ref={goalieFileRef} type="file" accept=".csv,.json" onChange={handleGoalieFile} style={{display:"none"}}/>
+      <input ref={hrRosterFileRef} type="file" accept=".csv" onChange={handleHRRosterFile} style={{display:"none"}}/>
       <div>
         <Card style={{marginBottom:14}}>
           <SH title="Game Stat Import" sub="Paste a Hockey Reference box score — stats are added to each player's running playoff totals"/>
@@ -4628,7 +4824,16 @@ function UploadTab({players,setPlayers,goalies,setGoalies,exportState,importStat
         <Card style={{marginBottom:14}}>
           <SH title="Skater Base Data"/>
           <div style={{marginBottom:8,fontSize:12,color:"var(--color-text-secondary)"}}>{players?`${players.length} skaters loaded`:"No skater data"}</div>
-          <button onClick={()=>playerFileRef.current?.click()} style={{padding:"6px 16px",fontSize:12,borderRadius:"var(--border-radius-md)",background:"#3b82f6",color:"white",border:"none",cursor:"pointer"}}>{players?"Re-load skaters.csv":"Load skaters.csv"}</button>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+            <button onClick={()=>playerFileRef.current?.click()} style={{padding:"6px 16px",fontSize:12,borderRadius:"var(--border-radius-md)",background:"#3b82f6",color:"white",border:"none",cursor:"pointer"}}>{players?"Re-load skaters.csv":"Load skaters.csv"}</button>
+            <button onClick={()=>hrRosterFileRef.current?.click()} disabled={!players}
+              title={players?"Merge a Hockey Reference season-skater CSV (fixes diacritics, adds late-season callups, updates traded players)":"Load skaters.csv first"}
+              style={{padding:"6px 14px",fontSize:12,borderRadius:"var(--border-radius-md)",
+                background:players?"#0d9488":"var(--color-background-secondary)",
+                color:players?"white":"var(--color-text-tertiary)",border:"none",cursor:players?"pointer":"default"}}>
+              + Merge HR Roster
+            </button>
+          </div>
           {players&&<div style={{marginTop:10,display:"flex",gap:4,flexWrap:"wrap"}}>
             {["TOP6","MID6","BOT6","ACTIVE","D1","D2","D3","STARTER","BACKUP","SCRATCHED"].map(r=>{
               const cnt=players.filter(p=>p.lineRole===r).length;
@@ -4637,7 +4842,32 @@ function UploadTab({players,setPlayers,goalies,setGoalies,exportState,importStat
               return <div key={r} style={{fontSize:9,padding:"2px 7px",borderRadius:3,background:`${c}20`,color:c,fontWeight:500}}>{r}: {cnt}</div>;
             })}
           </div>}
-          {fileErr&&<div style={{marginTop:8,fontSize:11,color:"#ef4444"}}>{fileErr}</div>}
+          {/* Or paste HR CSV directly (avoids needing to save a file) */}
+          {players && <details style={{marginTop:10}}>
+            <summary style={{fontSize:10,color:"var(--color-text-tertiary)",cursor:"pointer",userSelect:"none"}}>
+              Or paste HR roster CSV directly (no file save needed)
+            </summary>
+            <div style={{marginTop:6}}>
+              <div style={{fontSize:9,color:"var(--color-text-tertiary)",marginBottom:4,lineHeight:1.5}}>
+                From hockey-reference.com/leagues/NHL_2026_skaters.html → "Get table as CSV (for Excel)" → paste full text here.
+                Multi-team rows (2TM/3TM) auto-resolve to most recent team.
+              </div>
+              <textarea value={hrPasteText} onChange={e=>setHrPasteText(e.target.value)}
+                placeholder="Paste HR season-skater CSV (Rk,Player,Age,Team,...) here…"
+                style={{width:"100%",height:80,fontSize:9,fontFamily:"var(--font-mono)",
+                  background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
+                  borderRadius:"var(--border-radius-md)",padding:8,color:"var(--color-text-primary)",
+                  resize:"vertical",boxSizing:"border-box",marginBottom:6}}/>
+              <button onClick={handleHRRosterPaste} disabled={!hrPasteText.trim()}
+                style={{padding:"4px 12px",fontSize:11,borderRadius:"var(--border-radius-md)",border:"none",
+                  cursor:hrPasteText.trim()?"pointer":"default",
+                  background:hrPasteText.trim()?"#0d9488":"var(--color-background-secondary)",
+                  color:hrPasteText.trim()?"white":"var(--color-text-tertiary)"}}>
+                Merge from Paste
+              </button>
+            </div>
+          </details>}
+          {fileErr&&<div style={{marginTop:8,fontSize:11,color:fileErr.startsWith("✓")?"#10b981":"#ef4444"}}>{fileErr}</div>}
         </Card>
 
         <Card style={{marginBottom:14}}>
