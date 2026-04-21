@@ -1780,14 +1780,36 @@ function AppInner() {
 
   // v38: helper to compute one series' (hwp, awp) from sim cache or closed-form.
   // Round-aware: sim cache key now includes round prefix.
+  // v39: clinch detection — if a team has 4 wins in realized results, return 1.0/0.0 immediately.
+  //      Also use closed-form (which always reflects current realized state) when sim cache is stale.
   function seriesWinProbs(sr, roundId) {
     if (!sr || !sr.homeAbbr || !sr.awayAbbr) return null;
-    const seriesKey = roundId + "|" + sr.homeAbbr + "|" + sr.awayAbbr;
-    // Backward-compat fallback to old non-round keys (R1 only)
-    const cached = (simResultsBySeries||{})[seriesKey] || (roundId === "r1" ? (simResultsBySeries||{})[sr.homeAbbr + "|" + sr.awayAbbr] : null);
-    if (cached && cached.result && cached.result.winnerProb) {
-      return { hwp: cached.result.winnerProb.H, awp: cached.result.winnerProb.A };
+    // Clinch check first — overrides everything
+    if (sr.games && sr.games.length) {
+      let hw=0, aw=0;
+      for (const g of sr.games) {
+        if (g.result === "home") hw++;
+        else if (g.result === "away") aw++;
+      }
+      if (hw >= 4) return { hwp: 1, awp: 0 };
+      if (aw >= 4) return { hwp: 0, awp: 1 };
     }
+    // Try sim cache. Check freshness against current effG: if cache key doesn't match the
+    // current games array, the sim is stale and closed-form is more trustworthy.
+    const seriesKey = roundId + "|" + sr.homeAbbr + "|" + sr.awayAbbr;
+    const cached = (simResultsBySeries||{})[seriesKey] || (roundId === "r1" ? (simResultsBySeries||{})[sr.homeAbbr + "|" + sr.awayAbbr] : null);
+    if (cached && cached.result && cached.result.winnerProb && cached.key) {
+      // Freshness: cached.key looks like "${effKeyAtSimTime}|${roundId}|${homeAbbr}|${awayAbbr}".
+      // We can build a current effKey-equivalent for comparison:
+      const currentEffKey = JSON.stringify(sr.games || []) + "|" + seriesKey;
+      // If cached key matches what we'd compute now, sim is current; use it.
+      // (Loose check — the effKey in SeriesTab includes more state, but for routing winner probs
+      // close enough since clinch already handled above.)
+      if (cached.key.includes(JSON.stringify(sr.games || []))) {
+        return { hwp: cached.result.winnerProb.H, awp: cached.result.winnerProb.A };
+      }
+    }
+    // Closed-form fallback (always reflects realized state)
     if (sr.games && sr.games.length) {
       const games = sr.games.map(g => ({...g, winPct: g.winPct ?? 0.5}));
       try {
@@ -2528,6 +2550,8 @@ function GameEntryModal({dark,allSeries,players,goalies,initialSeriesIdx,initial
 function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdvancement,globals,setGlobals,leaderMarket,STATS,lStat,setLStat,lScope,setLScope,lTopN,setLTopN,showTrue,setShowTrue,showDec,dark,allSeries,simResultsBySeries,autoR1ByTeam,autoConfByTeam,autoCupByTeam,currentRound,setCurrentRound}) {
   const [showR1,setShowR1]=useState(false);
   const [showAdv,setShowAdv]=useState(false);
+  // v39: advancement table entry mode — "prob" (0..1) or "decimal" (decimal odds, 1.01..)
+  const [advEntryMode,setAdvEntryMode]=useState("prob");
   const [filterTeam,setFilterTeam]=useState("ALL");
   const teams=[...new Set(leaderMarket.map(p=>p.team))].sort();
   const displayed=filterTeam==="ALL"?leaderMarket:leaderMarket.filter(p=>p.team===filterTeam);
@@ -2625,38 +2649,61 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
       </Card>}
 
       {showAdv&&lScope==="full"&&<Card style={{marginBottom:14}}>
-        <SH title="Team Advancement" sub="P(Win R1) auto from Series Pricer; Conf/Cup chained through bracket (sim → xG fallback). Override with input if needed."/>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,marginBottom:8}}>
+          <SH title="Team Advancement" sub="P(Win R1) auto from Series Pricer; Conf/Cup chained through bracket (sim → xG fallback)."/>
+          <div style={{display:"flex",gap:4,alignItems:"center"}}>
+            <span style={{fontSize:10,color:"var(--color-text-tertiary)",marginRight:4}}>ENTRY:</span>
+            {[["prob","Probability"],["decimal","Decimal Odds"]].map(([id,lbl])=>(
+              <button key={id} onClick={()=>setAdvEntryMode(id)}
+                style={{
+                  padding:"3px 10px",fontSize:10,fontWeight:500,borderRadius:"var(--border-radius-md)",cursor:"pointer",
+                  border:"0.5px solid",
+                  borderColor: advEntryMode===id ? "#3b82f6" : "var(--color-border-secondary)",
+                  background: advEntryMode===id ? "rgba(59,130,246,0.15)" : "var(--color-background-secondary)",
+                  color: advEntryMode===id ? "#60a5fa" : "var(--color-text-secondary)",
+                }}>{lbl}</button>
+            ))}
+          </div>
+        </div>
         <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-          <TH cols={["Team","P(Win R1)","P(Win Conf)","P(Win Cup)"]}/>
+          <TH cols={["Team", advEntryMode==="prob"?"P(Win R1)":"R1 Decimal", advEntryMode==="prob"?"P(Win Conf)":"Conf Decimal", advEntryMode==="prob"?"P(Win Cup)":"Cup Decimal"]}/>
           <tbody>{PLAYOFF_TEAMS.map(t=>{
             const adv=advancement[t]||{winR1:0.5,winConf:0.25,winCup:0.1};
             const autoR1 = autoR1ByTeam[t];
             const autoConf = (autoConfByTeam||{})[t];
             const autoCup = (autoCupByTeam||{})[t];
-            const r1Display = autoR1 != null ? autoR1 : adv.winR1;
-            const confDisplay = autoConf != null ? autoConf : adv.winConf;
-            const cupDisplay = autoCup != null ? autoCup : adv.winCup;
+            const r1Prob = autoR1 != null ? autoR1 : adv.winR1;
+            const confProb = autoConf != null ? autoConf : adv.winConf;
+            const cupProb = autoCup != null ? autoCup : adv.winCup;
+            // Helpers for decimal conversion
+            const probToDec = (p) => p > 0.0001 ? +(1/p).toFixed(2) : 50000;
+            const decToProb = (d) => d > 1.001 ? Math.min(0.9999, 1/d) : 0.9999;
+            const renderCell = (probVal, isAuto, fieldKey, autoTitle) => {
+              if (advEntryMode==="decimal") {
+                const decVal = probToDec(probVal);
+                return (
+                  <div style={{display:"flex",gap:4,alignItems:"center",justifyContent:"flex-end"}}>
+                    {isAuto && <span style={{fontSize:9,padding:"1px 5px",background:"rgba(59,130,246,0.15)",color:"#60a5fa",borderRadius:3,letterSpacing:0.3}} title={autoTitle}>AUTO</span>}
+                    <NI value={decVal} onChange={d=>{
+                      const newProb = decToProb(d);
+                      setAdvancement(p=>({...p,[t]:{...(p[t]||{winR1:0.5,winConf:0.25,winCup:0.1}),[fieldKey]:newProb}}));
+                    }} min={1.01} max={1000} step={0.01} style={{width:64}}/>
+                  </div>
+                );
+              }
+              return (
+                <div style={{display:"flex",gap:4,alignItems:"center",justifyContent:"flex-end"}}>
+                  {isAuto && <span style={{fontSize:9,padding:"1px 5px",background:"rgba(59,130,246,0.15)",color:"#60a5fa",borderRadius:3,letterSpacing:0.3}} title={autoTitle}>AUTO</span>}
+                  <NI value={+probVal.toFixed(3)} onChange={v=>setAdvancement(p=>({...p,[t]:{...(p[t]||{winR1:0.5,winConf:0.25,winCup:0.1}),[fieldKey]:v}}))} min={0} max={1} step={0.01} style={{width:58}}/>
+                </div>
+              );
+            };
             return (
             <tr key={t} style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
               <td style={{padding:"4px 8px",fontWeight:500}}>{t} <span style={{color:"var(--color-text-secondary)",fontWeight:400}}>{TEAM_NAMES[t]}</span></td>
-              <td style={{padding:"3px 6px",textAlign:"right"}}>
-                <div style={{display:"flex",gap:4,alignItems:"center",justifyContent:"flex-end"}}>
-                  {autoR1 != null && <span style={{fontSize:9,padding:"1px 5px",background:"rgba(59,130,246,0.15)",color:"#60a5fa",borderRadius:3,letterSpacing:0.3}} title="auto from Series Pricer">AUTO</span>}
-                  <NI value={+r1Display.toFixed(3)} onChange={v=>setAdvancement(p=>({...p,[t]:{...(p[t]||{winR1:0.5,winConf:0.25,winCup:0.1}),winR1:v}}))} min={0} max={1} step={0.01} style={{width:58}}/>
-                </div>
-              </td>
-              <td style={{padding:"3px 6px",textAlign:"right"}}>
-                <div style={{display:"flex",gap:4,alignItems:"center",justifyContent:"flex-end"}}>
-                  {autoConf != null && <span style={{fontSize:9,padding:"1px 5px",background:"rgba(59,130,246,0.15)",color:"#60a5fa",borderRadius:3,letterSpacing:0.3}} title="chained R1 → R2 → R3 (sim or xG)">AUTO</span>}
-                  <NI value={+confDisplay.toFixed(3)} onChange={v=>setAdvancement(p=>({...p,[t]:{...(p[t]||{winR1:0.5,winConf:0.25,winCup:0.1}),winConf:v}}))} min={0} max={1} step={0.01} style={{width:58}}/>
-                </div>
-              </td>
-              <td style={{padding:"3px 6px",textAlign:"right"}}>
-                <div style={{display:"flex",gap:4,alignItems:"center",justifyContent:"flex-end"}}>
-                  {autoCup != null && <span style={{fontSize:9,padding:"1px 5px",background:"rgba(59,130,246,0.15)",color:"#60a5fa",borderRadius:3,letterSpacing:0.3}} title="chained R1 → R2 → R3 → F (sim or xG)">AUTO</span>}
-                  <NI value={+cupDisplay.toFixed(3)} onChange={v=>setAdvancement(p=>({...p,[t]:{...(p[t]||{winR1:0.5,winConf:0.25,winCup:0.1}),winCup:v}}))} min={0} max={1} step={0.01} style={{width:58}}/>
-                </div>
-              </td>
+              <td style={{padding:"3px 6px",textAlign:"right"}}>{renderCell(r1Prob, autoR1!=null, "winR1", "auto from Series Pricer")}</td>
+              <td style={{padding:"3px 6px",textAlign:"right"}}>{renderCell(confProb, autoConf!=null, "winConf", "chained R1 → R2 → R3 (sim or xG)")}</td>
+              <td style={{padding:"3px 6px",textAlign:"right"}}>{renderCell(cupProb, autoCup!=null, "winCup", "chained R1 → R2 → R3 → F (sim or xG)")}</td>
             </tr>);})}</tbody>
         </table>
       </Card>}
