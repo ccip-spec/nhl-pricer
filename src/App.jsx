@@ -1609,6 +1609,10 @@ function AppInner() {
   const [matchups,setMatchups] = useState(()=>{try{const s=localStorage.getItem("nhl_m");return s?JSON.parse(s):Array.from({length:8},(_,i)=>defaultMatchup(i));}catch{return Array.from({length:8},(_,i)=>defaultMatchup(i));}});
   const [advancement,setAdvancement] = useState(()=>{try{const s=localStorage.getItem("nhl_adv");return s?JSON.parse(s):PLAYOFF_TEAMS.reduce((a,t)=>({...a,[t]:{winR1:0.5,winConf:0.25,winCup:0.1}}),{});}catch{return PLAYOFF_TEAMS.reduce((a,t)=>({...a,[t]:{winR1:0.5,winConf:0.25,winCup:0.1}}),{});}});
   const [allSeries,setAllSeries] = useState(()=>{try{const s=localStorage.getItem("nhl_s");return s?JSON.parse(s):Array.from({length:8},(_,i)=>defaultSeries(i));}catch{return Array.from({length:8},(_,i)=>defaultSeries(i));}});
+  // v31: cross-component signal — every time GameStatImporter commits a game upload, this bumps.
+  // SeriesTab watches it and auto-runs the unified sim so prices reflect the new state without a manual click.
+  const [gameUploadCounter, setGameUploadCounter] = useState(0);
+  const bumpGameUpload = useCallback(()=>setGameUploadCounter(n=>n+1), []);
   const [lScope,setLScope] = useState("r1");
   const [lStat,setLStat] = useState("g");
   const [lTopN,setLTopN] = useState(25);
@@ -1799,9 +1803,11 @@ function AppInner() {
           showTrue={showTrue} setShowTrue={setShowTrue} showDec={showDec} dark={dark}/>}
         {tab==="series"&&<SeriesTab allSeries={allSeries} setAllSeries={setSeries}
           players={players} goalies={goalies} margins={margins} setMargins={setMargins}
-          globals={globals} showTrue={showTrue} dark={dark} onEnterGame={setGameModal}/>}
+          globals={globals} showTrue={showTrue} dark={dark} onEnterGame={setGameModal}
+          gameUploadCounter={gameUploadCounter}/>}
         {tab==="upload"&&<UploadTab players={players} setPlayers={setP} goalies={goalies} setGoalies={setG}
-          exportState={exportState} importState={importState} syncStatus={syncStatus} allSeries={allSeries} setAllSeries={setSeries} dark={dark}/>}
+          exportState={exportState} importState={importState} syncStatus={syncStatus} allSeries={allSeries} setAllSeries={setSeries} dark={dark}
+          onGameUploaded={bumpGameUpload}/>}
         {tab==="compare"&&<CompareTab leaderMarket={leaderMarket} STATS={STATS} lStat={lStat} setLStat={setLStat} lScope={lScope} setLScope={setLScope} dark={dark}/>}
         {tab==="stats"&&<PlayerStatsTab players={players} setPlayers={setP} dark={dark}/>}
         {tab==="roles"&&<RolesTab players={players} setPlayers={setP} dark={dark}/>}
@@ -2337,7 +2343,7 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
 // ═══════════════════════════════════════════════════════════════════════════════
 // SERIES TAB
 // ═══════════════════════════════════════════════════════════════════════════════
-function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,globals,showTrue,dark,onEnterGame}) {
+function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,globals,showTrue,dark,onEnterGame,gameUploadCounter}) {
   const [si,setSi]=useState(0);
   const [mkt,setMkt]=useState("winner");
   const [showMgn,setShowMgn]=useState(false);
@@ -2482,6 +2488,19 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
     setSimKey(null);
   }, [s.homeAbbr, s.awayAbbr, si]);
 
+  // v31: auto-run sim after a game upload commit. Watches the App-level counter that
+  // GameStatImporter bumps. Only fires if we have everything we need (players + both teams set).
+  // Skipped on initial mount (counter starts at 0 and we use a ref to detect changes).
+  const lastUploadSeen = useRef(0);
+  useEffect(()=>{
+    if (gameUploadCounter == null) return;
+    if (gameUploadCounter === lastUploadSeen.current) return;
+    lastUploadSeen.current = gameUploadCounter;
+    if (gameUploadCounter === 0) return; // initial mount, nothing uploaded yet
+    if (!players || !s.homeAbbr || !s.awayAbbr) return;
+    runSim();
+  }, [gameUploadCounter, players, s.homeAbbr, s.awayAbbr, runSim]);
+
   // Legacy single-number scale kept for rollbackability, but real weight is gameEquivalents
   const seriesGameGoalMean = (() => {
     const unplayed = effG.filter(g=>!g.result);
@@ -2489,15 +2508,58 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
   })();
   const gameGoalScale = seriesGameGoalMean / BASELINE_GAME_GOALS;
 
-  const lenAdj=applyMargin([len4,len5,len6,len7],margins.length);
+  // Series Length — v31: sim probs when available; settled-impossibility per length.
+  // A length L is impossible if: realized.gamesPlayed > L, OR if both teams' wins make L unreachable
+  // (e.g., 5g requires 4-1 or 1-4 final; if hw=2 and aw=2 already, only 6g/7g possible).
+  const lengthMkt = useMemo(()=>{
+    const cf = [len4, len5, len6, len7];
+    const sim = simResult && simResult.seriesLengthProb;
+    const probs = [4,5,6,7].map((L,i) => sim ? (sim[L]||0) : cf[i]);
+    // settled detection: a length L is impossible if realized.gamesPlayed > L OR
+    // if winner needs more wins than possible at length L given current (hw, aw)
+    const settled = [4,5,6,7].map(L => {
+      if (realized.gamesPlayed > L) return "no";
+      // To finish in L games: winner has 4 wins after exactly L games.
+      // The winner needs (4 - currentWins) more wins; loser at end has L-4 wins.
+      // Both teams must satisfy: (4 - theirCurrentWins) games needed, and loser ends with (L-4).
+      const homeNeedW = 4 - realized.hw, awayNeedW = 4 - realized.aw;
+      const loserEndW = L - 4;
+      // Home wins in L games: home wins (4-hw) of remaining, away ends with loserEndW (already at aw, can win loserEndW-aw more)
+      const homeOK = homeNeedW >= 0 && homeNeedW <= realized.gamesRemaining && (loserEndW - realized.aw) >= 0 && (loserEndW - realized.aw) <= realized.gamesRemaining && (homeNeedW + (loserEndW - realized.aw)) === realized.gamesRemaining - (7 - L);
+      const awayOK = awayNeedW >= 0 && awayNeedW <= realized.gamesRemaining && (loserEndW - realized.hw) >= 0 && (loserEndW - realized.hw) <= realized.gamesRemaining && (awayNeedW + (loserEndW - realized.hw)) === realized.gamesRemaining - (7 - L);
+      // Simpler: just check if hw <= 4 && aw <= 4 && hw+aw <= L && (L-hw <= R OR L-aw <= R)
+      // Even simpler heuristic: probs[i] from sim is 0 if impossible — trust it.
+      return null;
+    });
+    // Use sim probs as authoritative impossibility signal: if sim prob == 0 AND we have realized games, it's settled NO.
+    const lenAdj = probs.map((p, i) => {
+      if (sim && p === 0 && realized.gamesPlayed > 0) return 0;
+      return p;
+    });
+    const adjusted = applyMargin(lenAdj, margins.length);
+    return {probs, lenAdj: adjusted, settled: lenAdj.map(p => p === 0 && realized.gamesPlayed > 0)};
+  }, [effKey, margins.length, simResult, realized, len4, len5, len6, len7]);
+  // Keep old lenAdj symbol for backward compat with the Length panel
+  const lenAdjEffective = lengthMkt.lenAdj;
 
   const e8=useMemo(()=>{
-    const rows=[{l:`${s.homeTeam||"Home"} 4-0`,k:"4-0"},{l:`${s.homeTeam||"Home"} 4-1`,k:"4-1"},{l:`${s.homeTeam||"Home"} 4-2`,k:"4-2"},{l:`${s.homeTeam||"Home"} 4-3`,k:"4-3"},{l:`${s.awayTeam||"Away"} 4-0`,k:"0-4"},{l:`${s.awayTeam||"Away"} 4-1`,k:"1-4"},{l:`${s.awayTeam||"Away"} 4-2`,k:"2-4"},{l:`${s.awayTeam||"Away"} 4-3`,k:"3-4"}].map(o=>({...o,tp:outcomes[o.k]||0}));
+    const src = (simResult && simResult.exactScoreProb) ? simResult.exactScoreProb : outcomes;
+    const rows=[{l:`${s.homeTeam||"Home"} 4-0`,k:"4-0"},{l:`${s.homeTeam||"Home"} 4-1`,k:"4-1"},{l:`${s.homeTeam||"Home"} 4-2`,k:"4-2"},{l:`${s.homeTeam||"Home"} 4-3`,k:"4-3"},{l:`${s.awayTeam||"Away"} 4-0`,k:"0-4"},{l:`${s.awayTeam||"Away"} 4-1`,k:"1-4"},{l:`${s.awayTeam||"Away"} 4-2`,k:"2-4"},{l:`${s.awayTeam||"Away"} 4-3`,k:"3-4"}].map(o=>({...o,tp:src[o.k]||0}));
     const sum=rows.reduce((acc,o)=>acc+o.tp,0);
     const norm=rows.map(o=>({...o,tp:sum>0?o.tp/sum:0}));
-    const adj=applyMargin(norm.map(o=>o.tp),margins.eightWay);
-    return norm.map((o,i)=>({...o,ap:adj[i]}));
-  },[effKey,outcomes,margins.eightWay,s.homeTeam,s.awayTeam]);
+    // Settled: this exact (HW,AW) ending is impossible if hw/aw already exceeds, OR another team already clinched
+    const annotated = norm.map(o => {
+      const [hw, aw] = o.k.split("-").map(Number);
+      // hw/aw represent FINAL wins. Impossible if realized.hw > hw OR realized.aw > aw.
+      const impossible = realized.hw > hw || realized.aw > aw;
+      return {...o, _settled: impossible, tp: impossible ? 0 : o.tp};
+    });
+    const adj=applyMargin(annotated.map(o=>o.tp),margins.eightWay);
+    return annotated.map((o,i)=>({...o, ap: o._settled ? 0 : adj[i]})).sort((a,b)=>{
+      if (!!a._settled !== !!b._settled) return a._settled ? 1 : -1;
+      return b.tp - a.tp;
+    });
+  },[effKey,outcomes,margins.eightWay,s.homeTeam,s.awayTeam,simResult,realized]);
 
   const winOrders=useMemo(()=>{
     const seqs=computeWinOrders(effG);
@@ -2506,81 +2568,197 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
     return entries.map((e,i)=>({...e,ap:adj[i]})).sort((a,b)=>b.ap-a.ap);
   },[effKey,margins.winOrder]);
 
+  // Score @ G3 — v31: relabel ("0-3" → "PHI 3-0"); detect settled when ≥3 games played.
   const cs3=useMemo(()=>{
     const st={};
-    function rec(gi,hw,aw,prob){if(gi===3||hw===4||aw===4){const k=`${hw}-${aw}`;st[k]=(st[k]||0)+prob;return;}
-      const g=effG[gi];if(g.result==="home")rec(gi+1,hw+1,aw,prob);else if(g.result==="away")rec(gi+1,hw,aw+1,prob);else{rec(gi+1,hw+1,aw,prob*g.winPct);rec(gi+1,hw,aw+1,prob*(1-g.winPct));}}
+    function rec(gi,hw,aw,prob){
+      if(gi===3||hw===4||aw===4){const k=`${hw}-${aw}`;st[k]=(st[k]||0)+prob;return;}
+      const g=effG[gi];
+      if(g.result==="home")rec(gi+1,hw+1,aw,prob);
+      else if(g.result==="away")rec(gi+1,hw,aw+1,prob);
+      else{rec(gi+1,hw+1,aw,prob*g.winPct);rec(gi+1,hw,aw+1,prob*(1-g.winPct));}
+    }
     rec(0,0,0,1);
-    const entries=Object.entries(st).map(([k,tp])=>({k,tp}));
+    const homeAbbr = s.homeAbbr || "H";
+    const awayAbbr = s.awayAbbr || "A";
+    const labelFor = (k) => {
+      const [hw, aw] = k.split("-").map(Number);
+      if (hw > aw) return `${homeAbbr} ${hw}-${aw}`;
+      if (aw > hw) return `${awayAbbr} ${aw}-${hw}`;
+      return `Tied ${hw}-${aw}`;
+    };
+    const entries=Object.entries(st).map(([k,tp])=>{
+      // settled YES: 3+ games already played AND this k matches realized state at G3
+      const settled3Played = realized.gamesPlayed >= 3;
+      const [hw, aw] = k.split("-").map(Number);
+      // The realized H/A wins after EXACTLY 3 games
+      let realizedHWat3 = 0, realizedAWat3 = 0;
+      for (let i = 0; i < 3 && i < effG.length; i++) {
+        if (effG[i].result === "home") realizedHWat3++;
+        else if (effG[i].result === "away") realizedAWat3++;
+      }
+      const isThisOutcome = (hw === realizedHWat3 && aw === realizedAWat3);
+      const settledYes = settled3Played && isThisOutcome;
+      const settledNo = settled3Played && !isThisOutcome;
+      let p = tp;
+      if (settledYes) p = 1;
+      if (settledNo) p = 0;
+      return {k, label: labelFor(k), tp: p, _settled: settledYes || settledNo};
+    });
     const adj=applyMargin(entries.map(e=>e.tp),margins.correctScore);
-    return entries.map((e,i)=>({...e,ap:adj[i]})).sort((a,b)=>b.tp-a.tp);
-  },[effKey,margins.correctScore]);
+    return entries.map((e,i)=>({...e, ap: e._settled ? e.tp : adj[i]}))
+      .sort((a,b)=>{
+        if (!!a._settled !== !!b._settled) return a._settled ? 1 : -1;
+        return b.tp - a.tp;
+      });
+  },[effKey,margins.correctScore,s.homeAbbr,s.awayAbbr,realized]);
 
-  // Per-game OT market
+  // Per-game OT market — v31: annotate settled (game already played) per game with realized OT result
   const otPerGame=useMemo(()=>effG.map((g,i)=>{
     const pOT=g.pOT??0.22;
     const [adjOT,adjNo]=applyMargin([pOT,1-pOT],margins.otGames);
-    return {game:i+1,pOT,adjOT,adjNo,expTotal:g.expTotal,winPct:g.winPct};
+    const settled = !!g.result;
+    const wentOT = !!(g.wentOT || g.ot || g.result === "ot");
+    return {game:i+1,pOT,adjOT,adjNo,expTotal:g.expTotal,winPct:g.winPct,_settled:settled,_wentOT:wentOT};
   }),[effKey,margins.otGames]);
 
-  // Series OT games distribution
+  // Series OT games distribution — v31: sim PMF when available
   const otSeriesMkts=useMemo(()=>{
-    const {lambda}=computeOTSeriesDist(effG,outcomes);
-    const exactLines=[0,1,2,3,4,5,6,7];
-    const exactProbs=exactLines.map(k=>poissonPMF(k,lambda));
-    const exactAdj=applyMargin(exactProbs,margins.otExact);
-    const ouLines=[0.5,1.5,2.5,3.5];
-    const ouRows=ouLines.map(line=>{
-      const li=Math.ceil(line-0.001);
-      const pOver=1-poissonCDF(li-1,lambda);
-      const [ao,au]=applyMargin([pOver,1-pOver],margins.otGames);
-      return {line,pOver,pUnder:1-pOver,ao,au};
-    });
-    return {lambda,exactLines,exactProbs,exactAdj,ouLines,ouRows};
-  },[effKey,margins.otExact,margins.otGames]);
-
-  // Spread market
-  const spreadMkt=useMemo(()=>{
-    const rows=computeSpread(outcomes,s.homeAbbr,s.awayAbbr);
-    return rows.map(r=>{const [ah,aa]=applyMargin([r.pHome,r.pAway],margins.spread);return {...r,ah,aa};});
-  },[effKey,margins.spread,outcomes,s.homeAbbr,s.awayAbbr]);
-
-  // Total goals O/U — v21: full PMF, not single lambda
-  // v23: alt lines = full range where both sides have P >= 0.5%
-  const totalGoalsMkt=useMemo(()=>{
-    const pmf=computeSeriesGoalsPMF(effG, 80);
+    let pmf;
+    if (simResult && simResult.seriesOTPMF) {
+      pmf = simResult.seriesOTPMF;
+    } else {
+      const {lambda:lam}=computeOTSeriesDist(effG,outcomes);
+      pmf = [];
+      for (let k=0; k<8; k++) pmf.push(poissonPMF(k, lam));
+    }
     let lambda=0; for (let k=0;k<pmf.length;k++) lambda += k*pmf[k];
-    // Build line ladder: find kMin/kMax where pAtLeast(pmf,kMin) >= 0.995 and pAtLeast(pmf,kMax) <= 0.005
+    const exactLines=[0,1,2,3,4,5,6,7];
+    // Settled exact: realized.otGames > k means "exactly k" is impossible (won't decrease).
+    // realized.otGames == k AND no games remaining means "exactly k" is settled YES.
+    const exactProbs = exactLines.map(k => pmf[k] || 0);
+    const exactSettled = exactLines.map(k => {
+      if (realized.otGames > k) return "no"; // already exceeded
+      if (realized.otGames + realized.gamesRemaining < k) return "no"; // can't reach
+      if (realized.gamesRemaining === 0 && realized.otGames === k) return "yes";
+      return null;
+    });
+    const exactAdj = exactProbs.map((p, i) => {
+      const st = exactSettled[i];
+      if (st === "yes") return 1;
+      if (st === "no") return 0;
+      // Margin-adjust: just multiply this single-event probability by margin (1+margin/2 standard)
+      return Math.min(1, p * margins.otExact);
+    });
+    const ouLines=[0.5,1.5,2.5,3.5];
+    const ouRows = ouFromSimPMF(pmf, ouLines, margins.otGames, realized.otGames, realized.gamesRemaining);
+    return {lambda, exactLines, exactProbs, exactAdj, exactSettled, ouLines, ouRows: sortSettled(ouRows)};
+  },[effKey,margins.otExact,margins.otGames,simResult,realized]);
+
+  // Spread market — v31: sim's exactScoreProb when available; per-row settled detection.
+  // Lines are wins-spread (e.g., "-3.5" = win series by 4 wins, i.e., 4-0).
+  const spreadMkt=useMemo(()=>{
+    let outcomesObj;
+    if (simResult && simResult.exactScoreProb) {
+      outcomesObj = simResult.exactScoreProb; // already keyed "4-0".."3-4"
+    } else {
+      outcomesObj = outcomes;
+    }
+    const rows = computeSpread(outcomesObj, s.homeAbbr, s.awayAbbr);
+    // Settled detection: for a row with home line `L` (negative = home favoured by |L|+0.5 wins),
+    // the row's HOME side wins iff hw-aw > L. With realized (hw, aw) and remaining games R:
+    //   maxFinalDiff = (hw + R) - aw   (home wins all remaining)
+    //   minFinalDiff = hw - (aw + R)   (away wins all remaining)
+    // BUT series ends at first team to 4 wins, so cap at 4. We'll use 4-cap.
+    const homeMaxWins = Math.min(4, realized.hw + realized.gamesRemaining);
+    const awayMaxWins = Math.min(4, realized.aw + realized.gamesRemaining);
+    const possibleMaxDiff = homeMaxWins - realized.aw;       // most home-favoured plausible end state
+    const possibleMinDiff = realized.hw - awayMaxWins;       // most away-favoured plausible end state
+    return rows.map(r=>{
+      // line value = home spread (e.g., -3.5 means home favoured by 3.5+ wins)
+      const L = r.line != null ? r.line : r.awayLine;
+      // Home covers if (hw-aw) > L. Settled HOME if even worst-for-home end state covers; settled AWAY if even best can't.
+      const settledHome = possibleMinDiff > L;
+      const settledAway = possibleMaxDiff <= L;
+      let pHome = r.pHome, pAway = r.pAway;
+      if (settledHome) { pHome = 1; pAway = 0; }
+      else if (settledAway) { pHome = 0; pAway = 1; }
+      const [ah, aa] = (settledHome || settledAway) ? [pHome, pAway] : applyMargin([pHome, pAway], margins.spread);
+      return {...r, pHome, pAway, ah, aa, _settled: settledHome || settledAway, _settledSide: settledHome ? "home" : settledAway ? "away" : null};
+    }).sort((a,b)=>{
+      if (!!a._settled !== !!b._settled) return a._settled ? 1 : -1;
+      return 0;
+    });
+  },[effKey,margins.spread,outcomes,s.homeAbbr,s.awayAbbr,simResult,realized]);
+
+  // Total goals O/U — v31: prefers sim PMF when available; settled rows handled
+  const totalGoalsMkt=useMemo(()=>{
+    let pmf;
+    if (simResult && simResult.seriesGoalsPMF) pmf = simResult.seriesGoalsPMF;
+    else pmf = computeSeriesGoalsPMF(effG, 80);
+    let lambda=0; for (let k=0;k<pmf.length;k++) lambda += k*pmf[k];
+    // Build line ladder from where pAtLeast in [0.005, 0.995]
     let kMin=0, kMax=pmf.length-1;
     while (kMin<pmf.length && pAtLeast(pmf,kMin+1) >= 0.995) kMin++;
     while (kMax>0 && pAtLeast(pmf,kMax) <= 0.005) kMax--;
     const lines=[]; for (let k=Math.max(0,kMin); k<=kMax; k++) lines.push(k+0.5);
-    return {lambda, lines: ouFromPMF(pmf,lines).map(r=>{const[ao,au]=applyMargin([r.pOver,r.pUnder],margins.totalGoals);return{...r,ao,au};})};
-  },[effKey,margins.totalGoals]);
+    // Realized total goals so far + max additional possible (assume 12 goals/game cap as soft sanity)
+    const realizedTotal = realized.goalsH + realized.goalsA;
+    const maxAdditional = realized.gamesRemaining * 12;
+    const rows = ouFromSimPMF(pmf, lines, margins.totalGoals, realizedTotal, maxAdditional);
+    return {lambda, lines: sortSettled(rows)};
+  },[effKey,margins.totalGoals,simResult,realized]);
 
-  // Shutouts O/U — v21: per-game Poisson-derived, tied to expTotal
+  // Shutouts O/U — v31: sim PMF when available; settled when realized count exceeds line
   const shutoutMkt=useMemo(()=>{
-    const rate=s.shutoutRate??0.08;
-    const multiplier = rate / 0.08; // user-calibrated multiplier above/below baseline
-    const pmf=computeShutoutPMF(effG, multiplier, 8);
+    let pmf;
+    if (simResult && simResult.seriesShutoutsPMF) pmf = simResult.seriesShutoutsPMF;
+    else { const rate=s.shutoutRate??0.08; const multiplier = rate / 0.08; pmf=computeShutoutPMF(effG, multiplier, 8); }
     let lambda=0; for (let k=0;k<pmf.length;k++) lambda += k*pmf[k];
     const lines=[0.5,1.5,2.5,3.5];
-    return {lambda, lines: ouFromPMF(pmf,lines).map(r=>{const[ao,au]=applyMargin([r.pOver,r.pUnder],margins.shutouts);return{...r,ao,au};})};
-  },[effKey,margins.shutouts,s.shutoutRate]);
+    // Realized shutouts so far. Max additional = remaining games (each game can produce at most 1 shutout).
+    const rows = ouFromSimPMF(pmf, lines, margins.shutouts, realized.shutouts, realized.gamesRemaining);
+    return {lambda, lines: sortSettled(rows)};
+  },[effKey,margins.shutouts,s.shutoutRate,simResult,realized]);
 
-  // Team most goals
+  // Team most goals — v31: sim convolution when available; settled when one team can't possibly catch up
   const mostGoalsMkt=useMemo(()=>{
-    const shift=s.winnerGoalShift??0.15;
-    const {pHomeMost,pAwayMost,pTied}=computeTeamMostGoals(hwp,awp,shift);
-    const [ah,aa]=applyMargin([pHomeMost,pAwayMost],margins.teamMostGoals);
-    return {pHomeMost,pAwayMost,pTied,ah,aa};
-  },[effKey,margins.teamMostGoals,s.winnerGoalShift,hwp,awp]);
+    let pHomeMost, pAwayMost, pTied;
+    if (simResult && simResult.homeGoalsPMF && simResult.awayGoalsPMF) {
+      // Compute P(H>A), P(A>H), P(H==A) from joint distribution (assumes near-independence)
+      const H = simResult.homeGoalsPMF, A = simResult.awayGoalsPMF;
+      let pH=0, pA=0, pT=0;
+      for (let h=0; h<H.length; h++) {
+        for (let a=0; a<A.length; a++) {
+          const p = H[h]*A[a];
+          if (h>a) pH += p; else if (a>h) pA += p; else pT += p;
+        }
+      }
+      pHomeMost = pH; pAwayMost = pA; pTied = pT;
+    } else {
+      const shift=s.winnerGoalShift??0.15;
+      ({pHomeMost,pAwayMost,pTied}=computeTeamMostGoals(hwp,awp,shift));
+    }
+    // Settled: home can't lose if (realizedH - realizedA) > maxRemaining*12
+    const maxAdd = realized.gamesRemaining * 12;
+    const homeLead = realized.goalsH - realized.goalsA;
+    const settledHome = homeLead > maxAdd;
+    const settledAway = -homeLead > maxAdd;
+    if (settledHome) { pHomeMost = 1; pAwayMost = 0; pTied = 0; }
+    else if (settledAway) { pHomeMost = 0; pAwayMost = 1; pTied = 0; }
+    const [ah,aa] = (settledHome || settledAway) ? [pHomeMost, pAwayMost] : applyMargin([pHomeMost,pAwayMost],margins.teamMostGoals);
+    return {pHomeMost,pAwayMost,pTied,ah,aa,_settled: settledHome || settledAway, _settledSide: settledHome ? "home" : settledAway ? "away" : null};
+  },[effKey,margins.teamMostGoals,s.winnerGoalShift,hwp,awp,simResult,realized]);
 
-  // Per-team goals O/U — v21: full PMF
-  // v23: alt lines = full meaningful range per team
+  // Per-team goals O/U — v31: sim PMFs when available
   const teamGoalsMkt=useMemo(()=>{
-    const pmfH=computeTeamGoalsPMF(effG,"home",50);
-    const pmfA=computeTeamGoalsPMF(effG,"away",50);
+    let pmfH, pmfA;
+    if (simResult && simResult.homeGoalsPMF && simResult.awayGoalsPMF) {
+      pmfH = simResult.homeGoalsPMF; pmfA = simResult.awayGoalsPMF;
+    } else {
+      pmfH = computeTeamGoalsPMF(effG,"home",50);
+      pmfA = computeTeamGoalsPMF(effG,"away",50);
+    }
     let lamH=0; for (let k=0;k<pmfH.length;k++) lamH += k*pmfH[k];
     let lamA=0; for (let k=0;k<pmfA.length;k++) lamA += k*pmfA[k];
     function ladder(pmf) {
@@ -2591,11 +2769,52 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
       return lines;
     }
     const linesH=ladder(pmfH), linesA=ladder(pmfA);
+    const maxAdd = realized.gamesRemaining * 12;
     return {
-      home:{lambda:lamH,rows:ouFromPMF(pmfH,linesH).map(r=>{const[ao,au]=applyMargin([r.pOver,r.pUnder],margins.teamGoals);return{...r,ao,au};})},
-      away:{lambda:lamA,rows:ouFromPMF(pmfA,linesA).map(r=>{const[ao,au]=applyMargin([r.pOver,r.pUnder],margins.teamGoals);return{...r,ao,au};})},
+      home:{lambda:lamH, rows: sortSettled(ouFromSimPMF(pmfH, linesH, margins.teamGoals, realized.goalsH, maxAdd))},
+      away:{lambda:lamA, rows: sortSettled(ouFromSimPMF(pmfA, linesA, margins.teamGoals, realized.goalsA, maxAdd))},
     };
-  },[effKey,margins.teamGoals]);
+  },[effKey,margins.teamGoals,simResult,realized]);
+
+  // v31: realized state of this series — used to mark settled outcomes across all market panels.
+  const realized = useMemo(()=>{
+    let hw=0, aw=0, gH=0, gA=0, sh=0, ot=0, played=0;
+    for (const g of effG) {
+      if (g.result === "home") { hw++; played++; }
+      else if (g.result === "away") { aw++; played++; }
+      if (typeof g.homeScore === "number" && typeof g.awayScore === "number") {
+        gH += g.homeScore; gA += g.awayScore;
+        if (g.homeScore === 0 || g.awayScore === 0) sh++;
+      }
+      if (g.wentOT || g.ot || g.result === "ot") ot++;
+    }
+    return {hw, aw, goalsH:gH, goalsA:gA, shutouts:sh, otGames:ot, gamesPlayed:played, gamesRemaining:Math.max(0, 7-played), seriesOver: hw>=4 || aw>=4};
+  }, [effKey]);
+
+  // v31: helper — derive O/U rows from a sim PMF, with settled detection.
+  // A line is SETTLED OVER if realized count > line; SETTLED UNDER if realized count + maxRemaining < line ceil.
+  function ouFromSimPMF(pmf, lines, marginVal, realizedCount=0, maxAdditional=Infinity) {
+    return lines.map(line => {
+      const lineCeil = Math.ceil(line - 0.001);
+      const settledOver = realizedCount > line;
+      const settledUnder = (realizedCount + maxAdditional) < lineCeil;
+      let pOver, pUnder;
+      if (settledOver) { pOver = 1; pUnder = 0; }
+      else if (settledUnder) { pOver = 0; pUnder = 1; }
+      else { pOver = pAtLeast(pmf, lineCeil); pUnder = 1 - pOver; }
+      const [ao, au] = (settledOver || settledUnder)
+        ? [pOver, pUnder]
+        : applyMargin([pOver, pUnder], marginVal);
+      return {line, pOver, pUnder, ao, au, _settled: settledOver || settledUnder, _settledSide: settledOver ? "over" : settledUnder ? "under" : null};
+    });
+  }
+  // Sort: live rows first (by line), settled rows at bottom
+  function sortSettled(rows) {
+    return [...rows].sort((a,b) => {
+      if (!!a._settled !== !!b._settled) return a._settled ? 1 : -1;
+      return (a.line ?? 0) - (b.line ?? 0);
+    });
+  }
 
   // Parlays
   const parlayMkt=useMemo(()=>{
@@ -2852,7 +3071,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
               ))}
             </div>
             <div style={{display:"flex",gap:4,marginBottom:8}}>
-              {[["4g",lenAdj[0]],["5g",lenAdj[1]],["6g",lenAdj[2]],["7g",lenAdj[3]]].map(([l,ap])=>(
+              {[["4g",lenAdjEffective[0]],["5g",lenAdjEffective[1]],["6g",lenAdjEffective[2]],["7g",lenAdjEffective[3]]].map(([l,ap])=>(
                 <div key={l} style={{flex:1,padding:"4px 5px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",textAlign:"center"}}>
                   <div style={{fontSize:9,color:"var(--color-text-tertiary)"}}>{l}</div>
                   <div style={{fontFamily:"var(--font-mono)",fontSize:10,fontWeight:500}}>{fmt(ap)}</div>
@@ -2889,12 +3108,33 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
 
           {mkt==="eightway"&&<Card><SH title="Series Correct Score" sub={`OR: ${margins.eightWay}x`}/>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><TH cols={["Outcome",...(showTrue?["True%"]:[]),"Adj%","American","Decimal"]}/>
-            <tbody>{e8.map((o,i)=><OR key={i} label={o.l} tp={o.tp} ap={o.ap} showTrue={showTrue}/>)}</tbody></table>
+            <tbody>{e8.map((o,i)=>(
+              <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:o._settled?0.4:1}}>
+                <td style={{padding:"5px 8px"}}>{o.l}{o._settled&&<span style={{marginLeft:6,fontSize:9,color:"#ef4444"}}>impossible</span>}</td>
+                {showTrue&&<td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{(o.tp*100).toFixed(1)}%</td>}
+                <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11}}>{(o.ap*100).toFixed(1)}%</td>
+                <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:12,fontWeight:500,color:o.ap>=0.5?"#4ade80":"var(--color-text-primary)"}}>{o._settled?"—":fmt(o.ap)}</td>
+                <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{o._settled?"—":toDec(o.ap).toFixed(2)}</td>
+              </tr>
+            ))}</tbody></table>
           </Card>}
 
-          {mkt==="length"&&<Card><SH title="Series Length" sub={`OR: ${margins.length}x`}/>
+          {mkt==="length"&&<Card><SH title="Series Length" sub={`Realized: ${realized.gamesPlayed}g played · OR: ${margins.length}x`}/>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><TH cols={["Games",...(showTrue?["True%"]:[]),"Adj%","American","Decimal"]}/>
-            <tbody>{[["4 Games",len4,lenAdj[0]],["5 Games",len5,lenAdj[1]],["6 Games",len6,lenAdj[2]],["7 Games",len7,lenAdj[3]]].map(([l,tp,ap],i)=><OR key={i} label={l} tp={tp} ap={ap} showTrue={showTrue}/>)}</tbody></table>
+            <tbody>{(()=>{
+              const data = [["4 Games",4,len4,lenAdjEffective[0]],["5 Games",5,len5,lenAdjEffective[1]],["6 Games",6,len6,lenAdjEffective[2]],["7 Games",7,len7,lenAdjEffective[3]]];
+              const annotated = data.map(([l,L,tp,ap],i) => ({l,L,tp,ap,_settled: lengthMkt.settled[i] || (realized.gamesPlayed > L)}));
+              annotated.sort((a,b)=>{ if (!!a._settled !== !!b._settled) return a._settled ? 1 : -1; return 0; });
+              return annotated.map((o,i)=>(
+                <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:o._settled?0.4:1}}>
+                  <td style={{padding:"5px 8px"}}>{o.l}{o._settled&&<span style={{marginLeft:6,fontSize:9,color:"#ef4444"}}>impossible</span>}</td>
+                  {showTrue&&<td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{(o.tp*100).toFixed(1)}%</td>}
+                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11}}>{(o.ap*100).toFixed(1)}%</td>
+                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:12,fontWeight:500,color:o.ap>=0.5?"#4ade80":"var(--color-text-primary)"}}>{o._settled?"—":fmt(o.ap)}</td>
+                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{o._settled?"—":toDec(o.ap).toFixed(2)}</td>
+                </tr>
+              ));
+            })()}</tbody></table>
             <div style={{marginTop:8,padding:"5px 8px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",fontSize:11,color:"var(--color-text-secondary)"}}>
               Exp length: <strong style={{color:"var(--color-text-primary)"}}>{expG.toFixed(2)}g</strong></div>
           </Card>}
@@ -2933,36 +3173,62 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
           })()}
 
           {mkt==="score3"&&<Card><SH title="Correct Score After 3 Games" sub={`OR: ${margins.correctScore}x`}/>
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><TH cols={["Score (H-A)",...(showTrue?["True%"]:[]),"Adj%","American","Decimal"]}/>
-            <tbody>{cs3.map((o,i)=><OR key={i} label={o.k} tp={o.tp} ap={o.ap} showTrue={showTrue}/>)}</tbody></table>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><TH cols={["Score",...(showTrue?["True%"]:[]),"Adj%","American","Decimal"]}/>
+            <tbody>{cs3.map((o,i)=>(
+              <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:o._settled?0.4:1}}>
+                <td style={{padding:"5px 8px"}}>{o.label}{o._settled&&<span style={{marginLeft:6,fontSize:9,color:o.tp>=0.5?"#10b981":"#ef4444"}}>{o.tp>=0.5?"✓":"✗"}</span>}</td>
+                {showTrue&&<td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{(o.tp*100).toFixed(1)}%</td>}
+                <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11}}>{(o.ap*100).toFixed(1)}%</td>
+                <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:12,fontWeight:500,color:o.ap>=0.5?"#4ade80":"var(--color-text-primary)"}}>{o._settled?"—":fmt(o.ap)}</td>
+                <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{o._settled?"—":toDec(o.ap).toFixed(2)}</td>
+              </tr>
+            ))}</tbody></table>
           </Card>}
 
           {mkt==="ot"&&<Card><SH title="OT Per Game" sub={`Per-game OT probability — OR: ${margins.otGames}x`}/>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
               <TH cols={["Game","Home","Win%","Total","pOT","OT Adj%","OT Odds","No OT Odds"]}/>
               <tbody>{otPerGame.map((o,i)=>(
-                <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)")}}>
-                  <td style={{padding:"5px 8px",fontWeight:500}}>G{o.game}</td>
+                <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)"),opacity:o._settled?0.4:1}}>
+                  <td style={{padding:"5px 8px",fontWeight:500}}>G{o.game}{o._settled&&<span style={{marginLeft:6,fontSize:9,color:o._wentOT?"#10b981":"#ef4444"}}>{o._wentOT?"OT ✓":"REG ✓"}</span>}</td>
                   <td style={{padding:"5px 8px",fontSize:10,color:"var(--color-text-secondary)"}}>{HOME_PATTERN[o.game]?(s.homeAbbr||"H"):(s.awayAbbr||"A")}</td>
                   <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11}}>{(o.winPct*100).toFixed(0)}%</td>
                   <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11}}>{o.expTotal.toFixed(1)}</td>
                   <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{(o.pOT*100).toFixed(1)}%</td>
                   <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11}}>{(o.adjOT*100).toFixed(1)}%</td>
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:12,fontWeight:500}}>{fmt(o.adjOT)}</td>
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{fmt(o.adjNo)}</td>
+                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:12,fontWeight:500}}>{o._settled?"—":fmt(o.adjOT)}</td>
+                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{o._settled?"—":fmt(o.adjNo)}</td>
                 </tr>
               ))}</tbody>
             </table>
           </Card>}
 
           {mkt==="otseries"&&<Card>
-            <SH title="OT Games in Series" sub={`λ=${otSeriesMkts.lambda.toFixed(2)} · Exact OR: ${margins.otExact}x · O/U OR: ${margins.otGames}x`}/>
+            <SH title="OT Games in Series" sub={`λ=${otSeriesMkts.lambda.toFixed(2)} · Realized: ${realized.otGames}/${realized.gamesPlayed} games · Exact OR: ${margins.otExact}x · O/U OR: ${margins.otGames}x`}/>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
               <div>
                 <div style={{fontSize:10,fontWeight:500,color:"var(--color-text-secondary)",marginBottom:6,textTransform:"uppercase"}}>Exact # OT Games</div>
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
                   <TH cols={["#OT",...(showTrue?["True%"]:[]),"Adj%","Odds"]}/>
-                  <tbody>{otSeriesMkts.exactLines.map((k,i)=><OR key={i} label={`Exactly ${k}`} tp={otSeriesMkts.exactProbs[i]} ap={otSeriesMkts.exactAdj[i]} showTrue={showTrue}/>)}</tbody>
+                  <tbody>{(()=>{
+                    const rows = otSeriesMkts.exactLines.map((k,i)=>({
+                      k, tp: otSeriesMkts.exactProbs[i], ap: otSeriesMkts.exactAdj[i],
+                      settled: otSeriesMkts.exactSettled[i],
+                    }));
+                    rows.sort((a,b)=>{
+                      const aS = !!a.settled, bS = !!b.settled;
+                      if (aS !== bS) return aS ? 1 : -1;
+                      return a.k - b.k;
+                    });
+                    return rows.map((o,i)=>(
+                      <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:o.settled?0.4:1}}>
+                        <td style={{padding:"4px 8px"}}>Exactly {o.k}{o.settled&&<span style={{marginLeft:6,fontSize:9,color:o.settled==="yes"?"#10b981":"#ef4444"}}>{o.settled==="yes"?"✓":"✗"}</span>}</td>
+                        {showTrue&&<td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(o.tp*100).toFixed(2)}%</td>}
+                        <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{(o.ap*100).toFixed(2)}%</td>
+                        <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{o.settled?"—":fmt(o.ap)}</td>
+                      </tr>
+                    ));
+                  })()}</tbody>
                 </table>
               </div>
               <div>
@@ -2970,12 +3236,12 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
                   <TH cols={["Line",...(showTrue?["Over%"]:[]),"Ov Adj%","Over","Under"]}/>
                   <tbody>{otSeriesMkts.ouRows.map((r,i)=>(
-                    <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
-                      <td style={{padding:"4px 8px",fontFamily:"var(--font-mono)"}}>{r.line}</td>
+                    <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:r._settled?0.4:1}}>
+                      <td style={{padding:"4px 8px",fontFamily:"var(--font-mono)"}}>{r.line}{r._settled&&<span style={{marginLeft:6,fontSize:9,color:r._settledSide==="over"?"#10b981":"#ef4444"}}>{r._settledSide==="over"?"OVER ✓":"UNDER ✓"}</span>}</td>
                       {showTrue&&<td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(r.pOver*100).toFixed(1)}%</td>}
                       <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{(r.ao*100).toFixed(1)}%</td>
-                      <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{fmt(r.ao)}</td>
-                      <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{fmt(r.au)}</td>
+                      <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{r._settled?"—":fmt(r.ao)}</td>
+                      <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{r._settled?"—":fmt(r.au)}</td>
                     </tr>
                   ))}</tbody>
                 </table>
@@ -2983,18 +3249,18 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             </div>
           </Card>}
 
-          {mkt==="spread"&&<Card><SH title="Series Spread" sub={`Goal differential — OR: ${margins.spread}x`}/>
+          {mkt==="spread"&&<Card><SH title="Series Spread" sub={`Wins differential — OR: ${margins.spread}x`}/>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
               <TH cols={["Home Line","Away Line",...(showTrue?["True%"]:[]),"H Adj%","H Odds","A Adj%","A Odds"]}/>
               <tbody>{spreadMkt.map((r,i)=>(
-                <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)")}}>
-                  <td style={{padding:"5px 8px",fontFamily:"var(--font-mono)",fontWeight:500}}>{r.homeLabel}</td>
-                  <td style={{padding:"5px 8px",fontFamily:"var(--font-mono)",color:"var(--color-text-secondary)"}}>{r.awayLabel}</td>
+                <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)"),opacity:r._settled?0.4:1}}>
+                  <td style={{padding:"5px 8px",fontFamily:"var(--font-mono)",fontWeight:500}}>{r.homeLabel}{r._settled&&r._settledSide==="home"&&<span style={{marginLeft:6,fontSize:9,color:"#10b981"}}>✓</span>}{r._settled&&r._settledSide==="away"&&<span style={{marginLeft:6,fontSize:9,color:"#ef4444"}}>✗</span>}</td>
+                  <td style={{padding:"5px 8px",fontFamily:"var(--font-mono)",color:"var(--color-text-secondary)"}}>{r.awayLabel}{r._settled&&r._settledSide==="away"&&<span style={{marginLeft:6,fontSize:9,color:"#10b981"}}>✓</span>}{r._settled&&r._settledSide==="home"&&<span style={{marginLeft:6,fontSize:9,color:"#ef4444"}}>✗</span>}</td>
                   {showTrue&&<td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(r.pHome*100).toFixed(1)}%</td>}
                   <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{(r.ah*100).toFixed(1)}%</td>
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500,color:r.ah>=0.5?"#4ade80":"var(--color-text-primary)"}}>{fmt(r.ah)}</td>
+                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500,color:r.ah>=0.5?"#4ade80":"var(--color-text-primary)"}}>{r._settled?"—":fmt(r.ah)}</td>
                   <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{(r.aa*100).toFixed(1)}%</td>
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500,color:r.aa>=0.5?"#4ade80":"var(--color-text-primary)"}}>{fmt(r.aa)}</td>
+                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500,color:r.aa>=0.5?"#4ade80":"var(--color-text-primary)"}}>{r._settled?"—":fmt(r.aa)}</td>
                 </tr>
               ))}</tbody>
             </table>
@@ -3004,12 +3270,12 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
               <TH cols={["Line",...(showTrue?["P(Over)"]:[]),"Ov Adj%","Over","Under"]}/>
               <tbody>{totalGoalsMkt.lines.map((r,i)=>(
-                <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)")}}>
-                  <td style={{padding:"5px 8px",fontFamily:"var(--font-mono)",fontWeight:500}}>{r.line}</td>
+                <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)"),opacity:r._settled?0.4:1}}>
+                  <td style={{padding:"5px 8px",fontFamily:"var(--font-mono)",fontWeight:500}}>{r.line}{r._settled&&<span style={{marginLeft:6,fontSize:9,color:r._settledSide==="over"?"#10b981":"#ef4444"}}>{r._settledSide==="over"?"OVER ✓":"UNDER ✓"}</span>}</td>
                   {showTrue&&<td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(r.pOver*100).toFixed(1)}%</td>}
                   <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{(r.ao*100).toFixed(1)}%</td>
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{fmt(r.ao)}</td>
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{fmt(r.au)}</td>
+                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{r._settled?"—":fmt(r.ao)}</td>
+                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{r._settled?"—":fmt(r.au)}</td>
                 </tr>
               ))}</tbody>
             </table>
@@ -3019,24 +3285,36 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
               <TH cols={["Line",...(showTrue?["P(Over)"]:[]),"Ov Adj%","Over","Under"]}/>
               <tbody>{shutoutMkt.lines.map((r,i)=>(
-                <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
-                  <td style={{padding:"5px 8px",fontFamily:"var(--font-mono)",fontWeight:500}}>{r.line}</td>
+                <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:r._settled?0.4:1}}>
+                  <td style={{padding:"5px 8px",fontFamily:"var(--font-mono)",fontWeight:500}}>{r.line}{r._settled&&<span style={{marginLeft:6,fontSize:9,color:r._settledSide==="over"?"#10b981":"#ef4444"}}>{r._settledSide==="over"?"OVER ✓":"UNDER ✓"}</span>}</td>
                   {showTrue&&<td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(r.pOver*100).toFixed(1)}%</td>}
                   <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{(r.ao*100).toFixed(1)}%</td>
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{fmt(r.ao)}</td>
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{fmt(r.au)}</td>
+                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{r._settled?"—":fmt(r.ao)}</td>
+                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{r._settled?"—":fmt(r.au)}</td>
                 </tr>
               ))}</tbody>
             </table>
           </Card>}
 
-          {mkt==="mostgoals"&&<Card><SH title="Team With Most Goals" sub={`Winner goal shift: ${s.winnerGoalShift??0.15} · OR: ${margins.teamMostGoals}x`}/>
-            <div style={{marginBottom:10,fontSize:11,color:"var(--color-text-tertiary)"}}>Winner outscore loser by ~{((s.winnerGoalShift??0.15)*100/2).toFixed(0)}% goal share shift. Push (tie) pays full.</div>
+          {mkt==="mostgoals"&&<Card><SH title="Team With Most Goals" sub={`Realized: ${s.homeAbbr||"H"} ${realized.goalsH}g · ${s.awayAbbr||"A"} ${realized.goalsA}g · OR: ${margins.teamMostGoals}x`}/>
+            <div style={{marginBottom:10,fontSize:11,color:"var(--color-text-tertiary)"}}>Push (tie) pays full.</div>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
               <TH cols={["Outcome",...(showTrue?["True%"]:[]),"Adj%","American","Decimal"]}/>
               <tbody>
-                <OR label={s.homeTeam||"Home"} tp={mostGoalsMkt.pHomeMost} ap={mostGoalsMkt.ah} showTrue={showTrue}/>
-                <OR label={s.awayTeam||"Away"} tp={mostGoalsMkt.pAwayMost} ap={mostGoalsMkt.aa} showTrue={showTrue}/>
+                <tr style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:mostGoalsMkt._settled&&mostGoalsMkt._settledSide!=="home"?0.4:1}}>
+                  <td style={{padding:"5px 8px"}}>{s.homeTeam||"Home"}{mostGoalsMkt._settled&&<span style={{marginLeft:6,fontSize:9,color:mostGoalsMkt._settledSide==="home"?"#10b981":"#ef4444"}}>{mostGoalsMkt._settledSide==="home"?"✓":"✗"}</span>}</td>
+                  {showTrue&&<td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{(mostGoalsMkt.pHomeMost*100).toFixed(1)}%</td>}
+                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11}}>{(mostGoalsMkt.ah*100).toFixed(1)}%</td>
+                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:12,fontWeight:500,color:mostGoalsMkt.ah>=0.5?"#4ade80":"var(--color-text-primary)"}}>{mostGoalsMkt._settled?"—":fmt(mostGoalsMkt.ah)}</td>
+                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{mostGoalsMkt._settled?"—":toDec(mostGoalsMkt.ah).toFixed(2)}</td>
+                </tr>
+                <tr style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:mostGoalsMkt._settled&&mostGoalsMkt._settledSide!=="away"?0.4:1}}>
+                  <td style={{padding:"5px 8px"}}>{s.awayTeam||"Away"}{mostGoalsMkt._settled&&<span style={{marginLeft:6,fontSize:9,color:mostGoalsMkt._settledSide==="away"?"#10b981":"#ef4444"}}>{mostGoalsMkt._settledSide==="away"?"✓":"✗"}</span>}</td>
+                  {showTrue&&<td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{(mostGoalsMkt.pAwayMost*100).toFixed(1)}%</td>}
+                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11}}>{(mostGoalsMkt.aa*100).toFixed(1)}%</td>
+                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:12,fontWeight:500,color:mostGoalsMkt.aa>=0.5?"#4ade80":"var(--color-text-primary)"}}>{mostGoalsMkt._settled?"—":fmt(mostGoalsMkt.aa)}</td>
+                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{mostGoalsMkt._settled?"—":toDec(mostGoalsMkt.aa).toFixed(2)}</td>
+                </tr>
                 <tr style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
                   <td style={{padding:"5px 8px",color:"var(--color-text-secondary)"}}>Tied (Push)</td>
                   {showTrue&&<td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(mostGoalsMkt.pTied*100).toFixed(1)}%</td>}
@@ -3046,7 +3324,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             </table>
           </Card>}
 
-          {mkt==="teamgoals"&&<Card><SH title="Per-Team Total Goals O/U" sub={`OR: ${margins.teamGoals}x`}/>
+          {mkt==="teamgoals"&&<Card><SH title="Per-Team Total Goals O/U" sub={`Realized: ${s.homeAbbr||"H"} ${realized.goalsH}g · ${s.awayAbbr||"A"} ${realized.goalsA}g · OR: ${margins.teamGoals}x`}/>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:0}}>
               {[["home",s.homeTeam||s.homeAbbr||"Home",teamGoalsMkt.home],["away",s.awayTeam||s.awayAbbr||"Away",teamGoalsMkt.away]].map(([side,name,data],si)=>(
                 <div key={side} style={{
@@ -3060,12 +3338,12 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
                   <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
                     <TH cols={["Line",...(showTrue?["P(O)"]:[]),"Ov%","Over","Under"]}/>
                     <tbody>{data.rows.map((r,i)=>(
-                      <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)")}}>
-                        <td style={{padding:"4px 6px",fontFamily:"var(--font-mono)"}}>{r.line}</td>
+                      <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)"),opacity:r._settled?0.4:1}}>
+                        <td style={{padding:"4px 6px",fontFamily:"var(--font-mono)"}}>{r.line}{r._settled&&<span style={{marginLeft:4,fontSize:9,color:r._settledSide==="over"?"#10b981":"#ef4444"}}>{r._settledSide==="over"?"O✓":"U✓"}</span>}</td>
                         {showTrue&&<td style={{padding:"4px 6px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(r.pOver*100).toFixed(1)}%</td>}
                         <td style={{padding:"4px 6px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{(r.ao*100).toFixed(1)}%</td>
-                        <td style={{padding:"4px 6px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{fmt(r.ao)}</td>
-                        <td style={{padding:"4px 6px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{fmt(r.au)}</td>
+                        <td style={{padding:"4px 6px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{r._settled?"—":fmt(r.ao)}</td>
+                        <td style={{padding:"4px 6px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{r._settled?"—":fmt(r.au)}</td>
                       </tr>
                     ))}</tbody>
                   </table>
@@ -4040,7 +4318,7 @@ function ExportImportPanel({exportState,importState}) {
 // - Shows warnings for unmatched players (late callups not in skaters.csv)
 // - Per-game dedup via paste hash + (seriesIdx, gameNum) key
 // - Undo restores both teams' player + goalie state and clears the game result
-function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAllSeries}) {
+function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAllSeries,onGameUploaded}) {
   const [paste,setPaste]=useState("");
   const [preview,setPreview]=useState(null); // parsed preview before commit
   const [overrideGame,setOverrideGame]=useState(null); // null = use auto-detected
@@ -4290,6 +4568,8 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
       addedPlayers: unmatchedAdded, goalies: deltaGoalies.length,
     });
     setPaste(""); setPreview(null);
+    // v31: signal SeriesTab to auto-run the unified sim with the new state
+    if (onGameUploaded) onGameUploaded();
   }
 
   function handleUndo(entryId){
@@ -4442,6 +4722,25 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
               </select>
             </div>;
           })}
+        </div>
+      )}
+
+      {/* v29.1: Unmatched goalies display — read-only (goalies always skip on commit since
+          we don't synthesize goalie records from box scores; user should load goalies.csv
+          or manually add a goalie entry if missing). */}
+      {[...preview.awayGoaliesUnmatched.map(u=>({u,team:preview.awayAbbr})),
+        ...preview.homeGoaliesUnmatched.map(u=>({u,team:preview.homeAbbr}))].length>0 && (
+        <div style={{marginBottom:8,padding:8,background:"rgba(245,158,11,0.08)",borderRadius:"var(--border-radius-md)",border:"0.5px solid rgba(245,158,11,0.25)"}}>
+          <div style={{fontSize:10,fontWeight:500,color:"#f59e0b",marginBottom:4}}>Unmatched goalies (not in goalies.csv) — will be skipped on commit</div>
+          {[...preview.awayGoaliesUnmatched.map(u=>({u,team:preview.awayAbbr})),
+            ...preview.homeGoaliesUnmatched.map(u=>({u,team:preview.homeAbbr}))].map(({u,team},i)=>(
+            <div key={i} style={{display:"flex",gap:8,alignItems:"center",fontSize:10,padding:"2px 0"}}>
+              <span style={{minWidth:140}}>{u.name} <span style={{color:"var(--color-text-tertiary)"}}>({team})</span></span>
+              <span style={{color:"var(--color-text-secondary)",fontFamily:"var(--font-mono)",minWidth:160}}>
+                {u.dec||"—"} · {u.ga}GA / {u.sa}SA · {u.sv}SV{u.so>0?` · ${u.so}SO`:""}
+              </span>
+            </div>
+          ))}
         </div>
       )}
 
@@ -4611,7 +4910,7 @@ function PlayoffTotalsTable({players,dark}) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // UPLOAD TAB
 // ═══════════════════════════════════════════════════════════════════════════════
-function UploadTab({players,setPlayers,goalies,setGoalies,exportState,importState,syncStatus,allSeries,setAllSeries,dark}) {
+function UploadTab({players,setPlayers,goalies,setGoalies,exportState,importState,syncStatus,allSeries,setAllSeries,dark,onGameUploaded}) {
   const [fileErr,setFileErr]=useState("");
   const setErr=setFileErr; // alias used in file handlers
 
@@ -4812,7 +5111,7 @@ function UploadTab({players,setPlayers,goalies,setGoalies,exportState,importStat
         <Card style={{marginBottom:14}}>
           <SH title="Game Stat Import" sub="Paste a Hockey Reference box score — stats are added to each player's running playoff totals"/>
           {/* Series + Game selector */}
-          <GameStatImporter players={players} setPlayers={setPlayers} goalies={goalies} setGoalies={setGoalies} allSeries={allSeries} setAllSeries={setAllSeries}/>
+          <GameStatImporter players={players} setPlayers={setPlayers} goalies={goalies} setGoalies={setGoalies} allSeries={allSeries} setAllSeries={setAllSeries} onGameUploaded={onGameUploaded}/>
         </Card>
         <Card style={{marginBottom:14}}>
           <SH title="Live Playoff Totals" sub="Post-import verification — any player with pGP > 0 appears here"/>
