@@ -43,12 +43,20 @@ const HOME_PATTERN = [null,1,1,0,0,1,0,1];
 // nickname variants so "Josh Norris" and "Joshua Norris" hash to the same key.
 const NICKNAME_MAP = {
   // Player canonical-form aliases. LEFT side is what we'll FOLD INTO right side.
+  // Scoring/popular aliases
   "joshua": "josh",
   "alexander": "alex",
-  "mathew": "matthew",   // either spelling → matthew
-  "mathieu": "matthew",  // anglicize French Mathieu
+  "alexandre": "alex",
+  "alexandr": "alex",
+  "aleksander": "alex",
+  "aleksandr": "alex",
+  "mathew": "matt",
+  "matthew": "matt",
+  "mathieu": "matt",
+  "matthias": "matt",
   "michael": "mike",
   "nicholas": "nick",
+  "nicolas": "nick",
   "nikolai": "nik",
   "anthony": "tony",
   "william": "will",
@@ -64,31 +72,38 @@ const NICKNAME_MAP = {
   "david": "dave",
   "jonathan": "jon",
   "christopher": "chris",
-  "matthias": "matt",
-  "matthew": "matt",
-  "alexandre": "alex",
-  // v44: Scandinavian / European spelling variants
+  "kristoffer": "chris",
+  // v47: short↔long variants for NHL rosters
+  "cameron": "cam",
+  "zachary": "zach",
+  "zack": "zach",
+  "nathaniel": "nate",
+  "nathan": "nate",
+  "timothy": "tim",
+  "gregory": "greg",
+  // European/Scandinavian
   "oskar": "oscar",
   "eric": "erik",
   "fredrik": "frederik",
   "frederick": "frederik",
   "niklas": "nicklas",
-  "mikko": "michael",    // Finnish → Mike family
-  "mikael": "michael",
-  "mikkel": "mikael",
-  "kristoffer": "christopher",
+  "mikko": "mike",
+  "mikael": "mike",
+  "mikkel": "mike",
   "johan": "johannes",
   "henri": "henry",
   "henrik": "henry",
   "vladimir": "vlad",
-  "aleksander": "alex",
-  "aleksandr": "alex",
-  "aleksei": "alexei",
+  "aleksei": "alex",
   "alexei": "alex",
+  "aliaksei": "alex",
   "andreas": "andrew",
   "andrei": "andrew",
   "dmitry": "dmitri",
   "sergei": "sergey",
+  "max": "maxime",
+  "maxim": "maxime",
+  "maksim": "maxime",
 };
 function normPlayerName(s) {
   let n = (s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().replace(/[^a-z0-9 ]/g,"").trim();
@@ -2084,11 +2099,17 @@ function AppInner() {
     for (const dist of r3WinnerByR3Series) {
       for (const [t, p] of Object.entries(dist)) confDist[t] = (confDist[t] || 0) + p;
     }
-    return { conf: confDist, cup: cupDist };
+    // v46: P(team wins R2) = P(makes R3) — needed for correct expected-games calc.
+    const r2Dist = {};
+    for (const dist of r2WinnerByR2Series) {
+      for (const [t, p] of Object.entries(dist)) r2Dist[t] = (r2Dist[t] || 0) + p;
+    }
+    return { conf: confDist, cup: cupDist, r2: r2Dist };
   }, [allSeries, simResultsBySeries, bracket, players]);
 
   const autoConfByTeamFinal = autoCupByTeam.conf;
   const autoCupByTeamFinal = autoCupByTeam.cup;
+  const autoR2ByTeam = autoCupByTeam.r2;
 
   const computeLambda = useCallback((p,stat,scope)=>{
     const rm=roleMultiplier(p.lineRole);
@@ -2108,14 +2129,20 @@ function AppInner() {
       const r1 = (autoR1ByTeam[p.team] != null && !adv.manualR1) ? autoR1ByTeam[p.team] : adv.winR1;
       const conf = ((autoConfByTeamFinal||{})[p.team] != null && !adv.manualConf) ? autoConfByTeamFinal[p.team] : adv.winConf;
       const cup = ((autoCupByTeamFinal||{})[p.team] != null && !adv.manualCup) ? autoCupByTeamFinal[p.team] : adv.winCup;
-      expTotal=5.82+5.82*r1+5.82*conf+5.82*cup;
+      // v46: E[games] = GPR × (P(plays R1) + P(plays R2) + P(plays R3) + P(plays F))
+      //              = GPR × (1 + P(wins R1) + P(wins R2) + P(wins R3))
+      // P(wins R1) = r1; P(wins R3) = conf (= P(makes F)); P(wins Cup) = cup.
+      // P(wins R2) = P(makes R3): use autoR2ByTeam if available, else interpolate between r1 and conf.
+      const autoR2 = (autoR2ByTeam||{})[p.team];
+      const r2 = (autoR2 != null && !adv.manualConf) ? autoR2 : Math.sqrt(Math.max(0, r1 * conf));
+      expTotal=5.82*(1 + r1 + r2 + conf);
       actualGP=p.pGP||0;
     }
     const actual = p[actKey]||0;
     const futureLam = Math.max(0.0001, rr * Math.max(0, expTotal - actualGP));
     const lam = Math.max(0.0001, actual + futureLam);
     return {actual, futureLam, lam};
-  },[globals.rateDiscount,teamExpGR1,advancement,autoR1ByTeam,autoConfByTeamFinal,autoCupByTeamFinal]);
+  },[globals.rateDiscount,teamExpGR1,advancement,autoR1ByTeam,autoConfByTeamFinal,autoCupByTeamFinal,autoR2ByTeam]);
 
   // v24 Phase E Pt3: Per-matchup series sims. Cached by matchups + globals + players.
   // Stat-independent — running all 9 stats per sim gives us PMFs for every leader market.
@@ -6275,7 +6302,7 @@ function SettingsTab({globals,setGlobals,margins,setMargins,showTrue,setShowTrue
         {[{k:"overroundR1",l:"R1 Leader Overround",min:1,max:1.5,step:0.01},{k:"overroundFull",l:"Full Playoff Overround",min:1,max:1.5,step:0.01},{k:"powerFactor",l:"Power Factor",min:0.5,max:2,step:0.05},{k:"rateDiscount",l:"Rate Discount",min:0.5,max:1,step:0.01},{k:"dispersion",l:"NB Dispersion (r)",min:1,max:5,step:0.1}].map(({k,l,min,max,step})=>(
           <div key={k} style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
             <label style={{fontSize:11,color:"var(--color-text-secondary)"}}>{l}</label>
-            <NI value={globals[k]} onChange={v=>setGlobals(g=>({...g,[k]:v}))} min={min} max={max} step={step}/>
+            <LazyNI value={globals[k]} onCommit={v=>setGlobals(g=>({...g,[k]:v}))} min={min} max={max} step={step}/>
           </div>
         ))}
         <div style={{marginTop:14,paddingTop:12,borderTop:"0.5px solid var(--color-border-tertiary)"}}>
