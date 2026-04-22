@@ -67,6 +67,28 @@ const NICKNAME_MAP = {
   "matthias": "matt",
   "matthew": "matt",
   "alexandre": "alex",
+  // v44: Scandinavian / European spelling variants
+  "oskar": "oscar",
+  "eric": "erik",
+  "fredrik": "frederik",
+  "frederick": "frederik",
+  "niklas": "nicklas",
+  "mikko": "michael",    // Finnish → Mike family
+  "mikael": "michael",
+  "mikkel": "mikael",
+  "kristoffer": "christopher",
+  "johan": "johannes",
+  "henri": "henry",
+  "henrik": "henry",
+  "vladimir": "vlad",
+  "aleksander": "alex",
+  "aleksandr": "alex",
+  "aleksei": "alexei",
+  "alexei": "alex",
+  "andreas": "andrew",
+  "andrei": "andrew",
+  "dmitry": "dmitri",
+  "sergei": "sergey",
 };
 function normPlayerName(s) {
   let n = (s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().replace(/[^a-z0-9 ]/g,"").trim();
@@ -112,7 +134,10 @@ function poissonCDF(k, lam) {
   let s = 0; for (let i = 0; i <= k; i++) s += poissonPMF(i, lam); return Math.min(1, s);
 }
 function nbPMF(k, mu, r) {
-  if (r <= 1 || mu <= 0) return poissonPMF(k, mu);
+  // v46: r → ∞ is Poisson limit. Guard against bad inputs and use Poisson when dispersion is large.
+  if (mu <= 0) return k === 0 ? 1 : 0;
+  if (!isFinite(r) || r >= 100) return poissonPMF(k, mu);
+  if (r <= 0) return poissonPMF(k, mu); // safety
   const p = r / (r + mu); let lp = 0;
   for (let i = 0; i < k; i++) lp += Math.log(r + i) - Math.log(i + 1);
   lp += r * Math.log(p) + k * Math.log(1 - p); return Math.exp(lp);
@@ -634,6 +659,19 @@ function statRateMultiplier(stat) {
   if (SCORING_STATS.has(stat)) return 1.0;   // user's rateDiscount applies as-is (typically 0.85)
   if (PHYSICAL_STATS.has(stat)) return 1.25; // physical stats ~25% higher relative to the user's scoring discount (so 0.85 * 1.25 ≈ 1.06 of regular-season rate)
   return 1.10; // takeaways/giveaways slightly up
+}
+
+// v46: stat-specific NB dispersion. Goals/assists/points over a 5-7 game window are very close to Poisson;
+// heavy overdispersion (low r) wrongly inflates P(0) and crushes 1+/3+/5+ markets.
+// Physical/discretionary stats (hits, blocks, PIM, give, take) have legitimate game-to-game variance and benefit from NB.
+// Returns r (dispersion shape). User's globals.dispersion is treated as the PHYSICAL baseline.
+function dispersionFor(stat, globalDispersion) {
+  // Scoring stats: very mild overdispersion only. Cap at 8 (essentially Poisson) regardless of global setting.
+  if (stat === "g" || stat === "a" || stat === "pts") return 12;
+  // SOG: nearly Poisson; small overdispersion
+  if (stat === "sog") return 10;
+  // Physical / discretionary: use global setting (default 1.2 → heavy overdispersion is realistic here)
+  return globalDispersion;
 }
 
 function applyMargin(trueProbs, or) {
@@ -1451,7 +1489,7 @@ const DEFAULT_MARGINS = {
   propsGiveaways:1.05,
   seriesLeader:1.5, leaderR1:1.5, leaderFull:1.5,
 };
-const DEFAULT_GLOBALS = { overroundR1:1.15, overroundFull:1.15, powerFactor:1.20, rateDiscount:0.85, dispersion:1.2, seriesLeaderPF:1.15 };
+const DEFAULT_GLOBALS = { overroundR1:1.15, overroundFull:1.15, powerFactor:1.20, rateDiscount:0.95, dispersion:1.2, seriesLeaderPF:1.15 };
 
 // ─── PARSER ───────────────────────────────────────────────────────────────────
 
@@ -4028,6 +4066,8 @@ function PropsPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,p
 
   const results=useMemo(()=>{
     const {rateDiscount,dispersion}=globals;
+    // v46: stat-specific dispersion (scoring stats use ~Poisson, physical stats use overdispersed NB)
+    const r = dispersionFor(stat, dispersion);
     // v24 Phase E: precompute sim index + points-PMF if sim is available and stat is simulated
     const simStats = new Set(["g","a","sog","hit","blk","tk","pim","give"]);
     const simIdx = simResult ? new Map(simResult.pool.map((sp,i)=>[sp.name+"|"+sp.team, i])) : null;
@@ -4068,7 +4108,7 @@ function PropsPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,p
         effectiveLine = mode==="binary" ? Math.max(line, actual+1) : line;
         const lineInt=Math.ceil(effectiveLine-0.001);
         needMore = Math.max(0, lineInt - actual);
-        pOver = needMore===0 ? 1 : 1-nbCDF(needMore-1, futureLam, dispersion);
+        pOver = needMore===0 ? 1 : 1-nbCDF(needMore-1, futureLam, r);
       }
       // v24 Phase E: Unified-sim Over% for comparison. Uses the correlated sim's PMF.
       // For pts, sums G and A PMFs via convolution (since sim doesn't store pts PMF directly).
@@ -4147,6 +4187,8 @@ function PropsPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,p
           let ladder = null;
           if (canExpand && isExp) {
             const {dispersion} = globals;
+            // v46: stat-specific dispersion
+            const r = dispersionFor(stat, dispersion);
             const lam = p.lam;
             const futureLam = p.futureLam;
             const actual = p.actual;
@@ -4165,7 +4207,7 @@ function PropsPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,p
               let pO;
               if (settledO) pO = 1;
               else if (settledU) pO = 0;
-              else pO = need === 0 ? 1 : 1 - nbCDF(need-1, futureLam, dispersion);
+              else pO = need === 0 ? 1 : 1 - nbCDF(need-1, futureLam, r);
               const pU = 1 - pO;
               // No margin on settled lines
               const [ao,au] = (settledO || settledU || pO>=0.9999) ? [pO,pU]
@@ -4326,6 +4368,8 @@ function PlayerDetailPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalen
   const lines = useMemo(()=>{
     if(!player) return [];
     const {rateDiscount,dispersion} = globals;
+    // v46: stat-specific dispersion
+    const r = dispersionFor(stat, dispersion);
     const rm = roleMultiplier(player.lineRole);
     const pgKey = stat==="tk"?"take_pg":stat==="pim"?"pim_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
     const actKey = stat==="tk"?"pTK":stat==="pim"?"pPIM":stat==="give"?"pGIVE":stat==="tsa"?"pTSA":"p"+stat.toUpperCase();
@@ -4349,7 +4393,7 @@ function PlayerDetailPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalen
       let pOver;
       if (settledO) pOver = 1;
       else if (settledU) pOver = 0;
-      else pOver = need===0 ? 1 : 1-nbCDF(need-1, futureLam, dispersion);
+      else pOver = need===0 ? 1 : 1-nbCDF(need-1, futureLam, r);
       const pUnder = 1-pOver;
       const [ao,au] = (settledO||settledU||pOver>=0.9999) ? [pOver,pUnder]
                     : pOver<=0.0001 ? [0,1]
@@ -4478,7 +4522,9 @@ function SeriesLeaderPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalen
       });
     } else {
       const seed = 54321 + stat.charCodeAt(0);
-      raw = simulateLeader(entries.map(e=>({futureLam:e.futureLam,actual:e.actual})), dispersion, 10000, seed);
+      // v46: stat-specific dispersion (scoring stats use ~Poisson)
+      const r = dispersionFor(stat, dispersion);
+      raw = simulateLeader(entries.map(e=>({futureLam:e.futureLam,actual:e.actual})), r, 10000, seed);
     }
 
     // Apply per-stat temperature (power factor) then normalize with overround
