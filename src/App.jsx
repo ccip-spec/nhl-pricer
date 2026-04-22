@@ -424,10 +424,11 @@ function buildSimInputs(effG, homeAbbr, awayAbbr, players, globals, goalieQualit
   const pgKey = (stat) => stat==="tk"?"take_pg":stat==="give"?"give_pg":stat==="pim"?"pim_pg":stat+"_pg";
   const actKey = (stat) => stat==="tk"?"pTK":stat==="give"?"pGIVE":stat==="pim"?"pPIM":"p"+stat.toUpperCase();
   const playerData = pool.map(p => {
-    const rm = roleMultiplier(p.lineRole);
     const isHome = p.team === homeAbbr;
     const perStat = {};
     for (const stat of STATS) {
+      // v53: role multiplier is stat-aware now (TOP6 +bump for scoring, -penalty for hits)
+      const rm = roleMultiplier(p.lineRole, stat);
       const shrunk = shrinkRate(p[pgKey(stat)], p.gp, stat);
       const rr = shrunk * rm * globals.rateDiscount * statRateMultiplier(stat);
       const actual = p[actKey(stat)] || 0;
@@ -1856,8 +1857,32 @@ function roleColor(r) {
 // SCRATCHED still forces 0 (player is removed from pool everywhere anyway).
 // STARTER/BACKUP stay 0 because goalies are excluded from skater markets by design.
 // Re-attach differential weights (TOP6 1.2, BOT6 0.75, etc.) after validating upload pipeline.
-function roleMultiplier(r) {
-  return {TOP6:1.0, MID6:1.0, BOT6:1.0, ACTIVE:1.0, SCRATCHED:0, D1:1.0, D2:1.0, D3:1.0, STARTER:0, BACKUP:0}[r]??1.0;
+// v53: Stat-aware role multiplier. Captures playoff-specific TOI compression:
+//      - Coaches shorten the bench → TOP6/D1 get MORE TOI in playoffs, BOT6/D3 get LESS.
+//      - Scoring stats (G/A/Pts/SOG) scale with TOI, so TOP6 forwards see a small bump.
+//      - Hits/Blocks ALSO scale with TOI but with opposite role bias — BOT6 grinders
+//        get proportionally more hits per game when they do play (physical role).
+//      - TK/GV are more skill-driven; roughly stable across roles.
+// Multipliers are modest (~5-15%) to avoid double-counting with per-player regular-season rates.
+function roleMultiplier(r, stat) {
+  if (!r) return 1.0;
+  const scoringStats = stat === "g" || stat === "a" || stat === "pts" || stat === "sog";
+  const physicalStats = stat === "hit" || stat === "blk";
+  // Base presence multipliers (0 = out of the lineup)
+  const BASE = {TOP6:1, MID6:1, BOT6:1, ACTIVE:1, SCRATCHED:0, D1:1, D2:1, D3:1, STARTER:0, BACKUP:0};
+  if (BASE[r] === 0) return 0;
+  // No stat context → return base 1.0 (backward compatible for callers that don't pass stat)
+  if (stat == null) return 1.0;
+  // Playoff TOI compression multipliers
+  if (scoringStats) {
+    return {TOP6:1.08, MID6:1.00, BOT6:0.90, ACTIVE:0.92, D1:1.03, D2:1.00, D3:0.85}[r] ?? 1.0;
+  }
+  if (physicalStats) {
+    // TOP6 sees fewer hits per game in playoffs; BOT6 role guys get more
+    return {TOP6:0.95, MID6:1.00, BOT6:1.10, ACTIVE:1.00, D1:1.00, D2:1.05, D3:1.08}[r] ?? 1.0;
+  }
+  // TK/GV and other stats — near-neutral
+  return 1.0;
 }
 function RoleBadge({role}) { const c=roleColor(role||"MID6"); return <span style={{fontSize:9,padding:"1px 5px",borderRadius:3,background:`${c}20`,color:c,fontWeight:500}}>{role||"—"}</span>; }
 function rolesForPos(pos) {
@@ -2030,13 +2055,34 @@ function AppInner() {
   },[]);
 
   // v52: Push — snapshot all state to cloud under several keys + a _meta summary
+  // v54: Added safety checks to avoid pushing empty/suspicious data + per-key size logging.
   async function doPush(){
     if (!isSbEnabled()) return { ok:false, error: "Cloud Sync not configured" };
+    // v54: safety checks
+    const warnings = [];
+    if (!Array.isArray(players) || players.length < 50) warnings.push(`players array has only ${players?.length||0} entries — looks empty/incomplete`);
+    if (!Array.isArray(goalies) || goalies.length < 10) warnings.push(`goalies array has only ${goalies?.length||0} entries`);
+    const advKeys = Object.keys(advancement||{});
+    if (advKeys.length < 8) warnings.push(`advancement has only ${advKeys.length} teams — expected 16`);
+    if (warnings.length > 0) {
+      const proceed = window.confirm(`⚠ About to push state that looks incomplete:\n\n${warnings.join("\n")}\n\nContinue pushing anyway? (This will overwrite the cloud copy.)`);
+      if (!proceed) return { ok:false, error: "Cancelled by user" };
+    }
     setSyncStatus("syncing");
     const cfg = getSbConfig();
     const device = cfg.device || "unknown";
     const now = new Date().toISOString();
     try {
+      // v54: log sizes so user can see what's being pushed
+      const payload = {
+        players, goalies, matchups, advancement,
+        series: allSeries, globals, margins, bracket,
+      };
+      const sizes = {};
+      for (const [k,v] of Object.entries(payload)) {
+        try { sizes[k] = JSON.stringify(v).length; } catch { sizes[k] = -1; }
+      }
+      console.log("[CloudPush] sizes (bytes):", sizes);
       const results = await Promise.all([
         sbSave("players", players, device),
         sbSave("goalies", goalies, device),
@@ -2046,19 +2092,50 @@ function AppInner() {
         sbSave("globals", globals, device),
         sbSave("margins", margins, device),
         sbSave("bracket", bracket, device),
-        sbSave("_meta", {updated_at: now, device}, device),
+        sbSave("_meta", {updated_at: now, device, sizes}, device),
       ]);
-      const allOk = results.every(Boolean);
+      const keyNames = ["players","goalies","matchups","advancement","series","globals","margins","bracket","_meta"];
+      const failedKeys = results.map((ok,i)=>ok?null:keyNames[i]).filter(Boolean);
+      const allOk = failedKeys.length === 0;
       if (allOk) {
         setLastPushedAt(now);
         setCloudInfo({updated_at: now, device});
         try { localStorage.setItem("nhl_last_pushed_at", now); } catch {}
         setSyncStatus("ok");
-        return { ok:true, at: now };
+        return { ok:true, at: now, sizes };
       } else {
         setSyncStatus("err");
-        return { ok:false, error:"One or more writes failed" };
+        return { ok:false, error:`Failed keys: ${failedKeys.join(", ")}` };
       }
+    } catch (e) {
+      setSyncStatus("err");
+      return { ok:false, error: e.message };
+    }
+  }
+
+  // v54: Verify — fetch all cloud keys and report sizes + sample content (no state overwrite).
+  // Lets user see exactly what's in cloud without risking local overwrite.
+  async function doVerify(){
+    if (!isSbEnabled()) return { ok:false, error: "Cloud Sync not configured" };
+    setSyncStatus("syncing");
+    try {
+      const keys = ["players","goalies","matchups","advancement","series","globals","margins","bracket","_meta"];
+      const recs = await Promise.all(keys.map(k => sbLoad(k)));
+      const report = {};
+      for (let i = 0; i < keys.length; i++) {
+        const k = keys[i];
+        const r = recs[i];
+        if (!r) { report[k] = "MISSING"; continue; }
+        const v = r.value;
+        let desc;
+        if (Array.isArray(v)) desc = `array len=${v.length}`;
+        else if (v && typeof v === "object") desc = `object keys=${Object.keys(v).length} [${Object.keys(v).slice(0,5).join(",")}${Object.keys(v).length>5?"...":""}]`;
+        else desc = `${typeof v}`;
+        const size = (()=>{try { return JSON.stringify(v).length; } catch { return -1; }})();
+        report[k] = `${desc}, ${size} bytes, pushed ${r.updated_at} from ${r.device||"?"}`;
+      }
+      setSyncStatus("ok");
+      return { ok:true, report };
     } catch (e) {
       setSyncStatus("err");
       return { ok:false, error: e.message };
@@ -2076,6 +2153,24 @@ function AppInner() {
         sbLoad("globals"), sbLoad("margins"), sbLoad("bracket"),
         sbLoad("_meta"),
       ]);
+      // v54: diagnostic report — which keys populated, sizes
+      const diag = {};
+      const tag = (k, rec, v) => {
+        if (!rec) { diag[k] = "cloud row missing"; return; }
+        if (v == null) { diag[k] = "value null"; return; }
+        if (Array.isArray(v)) diag[k] = `array len=${v.length}`;
+        else if (typeof v === "object") diag[k] = `obj keys=${Object.keys(v).length}`;
+        else diag[k] = typeof v;
+      };
+      tag("players", pRec, pRec?.value);
+      tag("goalies", gRec, gRec?.value);
+      tag("matchups", mRec, mRec?.value);
+      tag("advancement", aRec, aRec?.value);
+      tag("series", sRec, sRec?.value);
+      tag("globals", glRec, glRec?.value);
+      tag("margins", mgRec, mgRec?.value);
+      tag("bracket", brRec, brRec?.value);
+      console.log("[CloudPull] payload:", diag);
       if (pRec?.value) setPlayers(pRec.value);
       if (gRec?.value) setGoalies(gRec.value);
       if (mRec?.value) setMatchups(migrateMatchups(mRec.value));
@@ -2089,7 +2184,7 @@ function AppInner() {
       try { localStorage.setItem("nhl_last_pulled_at", now); } catch {}
       if (mtRec?.value) setCloudInfo({updated_at: mtRec.value.updated_at, device: mtRec.value.device});
       setSyncStatus("ok");
-      return { ok:true, at: now, cloudAt: mtRec?.value?.updated_at, device: mtRec?.value?.device };
+      return { ok:true, at: now, cloudAt: mtRec?.value?.updated_at, device: mtRec?.value?.device, diag };
     } catch (e) {
       setSyncStatus("err");
       return { ok:false, error: e.message };
@@ -2320,7 +2415,7 @@ function AppInner() {
   const autoR2ByTeam = autoCupByTeam.r2;
 
   const computeLambda = useCallback((p,stat,scope)=>{
-    const rm=roleMultiplier(p.lineRole);
+    const rm=roleMultiplier(p.lineRole, stat);
     if(rm===0)return {actual:0,futureLam:0.0001,lam:0.0001};
     // stat key mapping: tsa->tsa_pg, give->give_pg, tk->take_pg, else stat_pg
     const pgKey=stat==="tk"?"take_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
@@ -2506,7 +2601,7 @@ function AppInner() {
         {tab==="settings"&&<SettingsTab globals={globals} setGlobals={setGlobals}
           margins={margins} setMargins={setMargins}
           showTrue={showTrue} setShowTrue={setShowTrue} showDec={showDec} setShowDec={setShowDec}
-          doPush={doPush} doPull={doPull}
+          doPush={doPush} doPull={doPull} doVerify={doVerify}
           lastPushedAt={lastPushedAt} lastPulledAt={lastPulledAt}
           cloudInfo={cloudInfo} syncStatus={syncStatus}
           dark={dark}/>}
@@ -4462,7 +4557,7 @@ function PropsPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,p
     const simStats = new Set(["g","a","sog","hit","blk","tk","pim","give"]);
     const simIdx = simResult ? new Map(simResult.pool.map((sp,i)=>[sp.name+"|"+sp.team, i])) : null;
     return pool.map(p=>{
-      const rm=roleMultiplier(p.lineRole);
+      const rm=roleMultiplier(p.lineRole, stat);
       // stat key mapping
       const pgKey=stat==="tk"?"take_pg":stat==="pim"?"pim_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
       // v13: shrink rate for <20 GP; scratched already filtered out above
@@ -4763,7 +4858,7 @@ function PlayerDetailPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalen
     const {rateDiscount,dispersion} = globals;
     // v46: stat-specific dispersion
     const r = dispersionFor(stat, dispersion);
-    const rm = roleMultiplier(player.lineRole);
+    const rm = roleMultiplier(player.lineRole, stat);
     const pgKey = stat==="tk"?"take_pg":stat==="pim"?"pim_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
     const rr_base = shrinkRate(player[pgKey],player.gp,stat)*rm*rateDiscount*statRateMultiplier(stat);
     const remainingGames = Math.max(0, expG - (player.pGP||0));
@@ -4889,7 +4984,7 @@ function SeriesLeaderPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalen
 
     // Build per-player lambda (for display), actual (for Now column), futureLam (for fallback)
     const entries=pool.map(p=>{
-      const rm=roleMultiplier(p.lineRole);
+      const rm=roleMultiplier(p.lineRole, stat);
       const pgKey=stat==="tk"?"take_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat==="pim"?"pim_pg":stat+"_pg";
       const rr_base=shrinkRate(p[pgKey],p.gp,stat)*rm*rateDiscount*statRateMultiplier(stat);
       const remainingGames = Math.max(0, expG - (p.pGP||0));
@@ -6650,21 +6745,46 @@ function RolesTab({players,setPlayers,dark}) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // SETTINGS TAB
 // ═══════════════════════════════════════════════════════════════════════════════
-function SettingsTab({globals,setGlobals,margins,setMargins,showTrue,setShowTrue,showDec,setShowDec,doPush,doPull,lastPushedAt,lastPulledAt,cloudInfo,syncStatus,dark}) {
+function SettingsTab({globals,setGlobals,margins,setMargins,showTrue,setShowTrue,showDec,setShowDec,doPush,doPull,doVerify,lastPushedAt,lastPulledAt,cloudInfo,syncStatus,dark}) {
   // v52: Cloud sync config (URL, key, device label) lives in localStorage via getSbConfig/setSbConfig.
   const [cfg, setCfg] = useState(() => getSbConfig());
   const [status, setStatus] = useState(null);
+  const [verifyReport, setVerifyReport] = useState(null);
   const saveCfg = (patch) => { const next = {...cfg, ...patch}; setCfg(next); setSbConfig(next); };
   const pushNow = async () => {
     setStatus({kind:"info",msg:"Pushing…"});
     const r = await doPush();
-    setStatus(r.ok ? {kind:"ok",msg:`Pushed at ${new Date(r.at).toLocaleTimeString()}`} : {kind:"err",msg:r.error});
+    if (r.ok && r.sizes) {
+      const total = Object.values(r.sizes).reduce((a,b)=>a+(b||0),0);
+      setStatus({kind:"ok",msg:`Pushed at ${new Date(r.at).toLocaleTimeString()} · ${(total/1024).toFixed(1)} KB total`});
+    } else {
+      setStatus(r.ok ? {kind:"ok",msg:`Pushed at ${new Date(r.at).toLocaleTimeString()}`} : {kind:"err",msg:r.error});
+    }
   };
   const pullNow = async () => {
     if (!window.confirm("Pull from cloud will OVERWRITE your current local state with the latest cloud copy. Continue?")) return;
     setStatus({kind:"info",msg:"Pulling…"});
     const r = await doPull();
-    setStatus(r.ok ? {kind:"ok",msg:`Pulled cloud state from ${r.device||"?"} (${r.cloudAt?new Date(r.cloudAt).toLocaleString():"unknown time"})`} : {kind:"err",msg:r.error});
+    if (r.ok && r.diag) {
+      // Show a compact report of what was pulled
+      const missing = Object.entries(r.diag).filter(([_,v])=>v.includes("missing")||v.includes("null")).map(([k])=>k);
+      let msg = `Pulled from ${r.device||"?"} (${r.cloudAt?new Date(r.cloudAt).toLocaleString():"unknown time"})`;
+      if (missing.length>0) msg += ` · ⚠ MISSING: ${missing.join(", ")}`;
+      setStatus({kind: missing.length>0 ? "err" : "ok", msg});
+      setVerifyReport(r.diag);
+    } else {
+      setStatus(r.ok ? {kind:"ok",msg:`Pulled cloud state`} : {kind:"err",msg:r.error});
+    }
+  };
+  const verifyNow = async () => {
+    setStatus({kind:"info",msg:"Verifying cloud contents…"});
+    const r = await doVerify();
+    if (r.ok) {
+      setVerifyReport(r.report);
+      setStatus({kind:"ok",msg:"Cloud inspection complete — see report below"});
+    } else {
+      setStatus({kind:"err",msg:r.error});
+    }
   };
   const fmtTime = (iso) => {
     if (!iso) return "never";
@@ -6742,6 +6862,28 @@ function SettingsTab({globals,setGlobals,margins,setMargins,showTrue,setShowTrue
             ⬇ Pull from Cloud
           </button>
         </div>
+        <div style={{marginBottom:10}}>
+          <button onClick={verifyNow} disabled={!enabled||syncStatus==="syncing"}
+            style={{width:"100%",padding:"6px 12px",fontSize:11,fontWeight:500,borderRadius:"var(--border-radius-md)",
+              background:"transparent",border:`0.5px solid ${enabled?"#6b7280":"rgba(100,116,139,0.2)"}`,
+              color:enabled?"var(--color-text-secondary)":"var(--color-text-tertiary)",
+              cursor:enabled&&syncStatus!=="syncing"?"pointer":"not-allowed"}}>
+            🔍 Verify (check what's in cloud without overwriting)
+          </button>
+        </div>
+
+        {/* Verify/Pull report */}
+        {verifyReport && <div style={{padding:"8px 10px",fontSize:10,borderRadius:"var(--border-radius-md)",marginBottom:8,
+          background:"var(--color-background-secondary)",fontFamily:"var(--font-mono)"}}>
+          <div style={{fontSize:10,color:"var(--color-text-secondary)",marginBottom:4,fontFamily:"var(--font-sans)",fontWeight:500}}>Cloud contents report:</div>
+          {Object.entries(verifyReport).map(([k,v])=>(
+            <div key={k} style={{display:"flex",gap:6,marginBottom:2,
+              color:v.includes("MISSING")||v.includes("null")||v.includes("len=0")||v.includes("keys=0")?"#f87171":"var(--color-text-tertiary)"}}>
+              <span style={{minWidth:80,color:"var(--color-text-secondary)"}}>{k}:</span>
+              <span>{v}</span>
+            </div>
+          ))}
+        </div>}
 
         {/* Status lines */}
         {status && <div style={{padding:"6px 10px",fontSize:11,borderRadius:"var(--border-radius-md)",marginBottom:8,
