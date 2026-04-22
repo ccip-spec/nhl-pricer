@@ -2777,7 +2777,7 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
         background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-tertiary)"}}>
         {[{k:"overroundR1",l:"Overround",min:1,max:1.5,step:0.01},{k:"powerFactor",l:"Power Factor",min:0.5,max:2,step:0.05},{k:"rateDiscount",l:"Rate Discount",min:0.5,max:1,step:0.01}].map(({k,l,min,max,step})=>(
           <label key={k} style={{fontSize:11,color:"var(--color-text-secondary)",display:"flex",gap:5,alignItems:"center"}}>
-            {l}: <NI value={globals[k]} onChange={v=>setGlobals(g=>({...g,[k]:v}))} min={min} max={max} step={step} style={{width:56}}/>
+            {l}: <LazyNI value={globals[k]} onCommit={v=>setGlobals(g=>({...g,[k]:v}))} min={min} max={max} step={step} style={{width:56}}/>
           </label>
         ))}
         {[["⚙ R1 Matchups",showR1,setShowR1],[lScope==="full"?"⚙ Advancement":null,showAdv,setShowAdv]].filter(x=>x[0]).map(([l,s,set])=>(
@@ -2801,7 +2801,7 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
               </div>
               <div style={{display:"flex",gap:6,fontSize:11,alignItems:"center"}}>
                 <span style={{color:"var(--color-text-secondary)"}}>Win%</span>
-                <NI value={m.homeWinPct} onChange={v=>updM(idx,"homeWinPct",v)} min={0} max={1} step={0.01} style={{width:52}}/>
+                <LazyNI value={m.homeWinPct} onCommit={v=>updM(idx,"homeWinPct",v)} min={0} max={1} step={0.01} style={{width:52}}/>
                 {(()=>{
                   const hs=m.homeAbbr?computeTeamStrength(players,m.homeAbbr):null;
                   const as=m.awayAbbr?computeTeamStrength(players,m.awayAbbr):null;
@@ -2814,14 +2814,14 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
                   </button>;
                 })()}
                 <span style={{color:"var(--color-text-secondary)"}}>Total</span>
-                <NI value={m.expTotal} onChange={v=>updM(idx,"expTotal",v)} min={3} max={12} step={0.1} style={{width:48}}/>
+                <LazyNI value={m.expTotal} onCommit={v=>updM(idx,"expTotal",v)} min={3} max={12} step={0.1} style={{width:48}}/>
                 <span style={{fontSize:10,color:"var(--color-text-tertiary)",marginLeft:"auto"}}>Exp {m.expGames}g</span>
               </div>
               <div style={{display:"flex",gap:6,fontSize:11,alignItems:"center",marginTop:4}}>
                 <span style={{color:"var(--color-text-secondary)"}}>Live H/A:</span>
-                <NI value={m.homeWins||0} onChange={v=>updM(idx,"homeWins",Math.round(v))} min={0} max={4} step={1} style={{width:36}}/>
+                <LazyNI value={m.homeWins||0} onCommit={v=>updM(idx,"homeWins",Math.round(v))} min={0} max={4} step={1} style={{width:36}}/>
                 <span>–</span>
-                <NI value={m.awayWins||0} onChange={v=>updM(idx,"awayWins",Math.round(v))} min={0} max={4} step={1} style={{width:36}}/>
+                <LazyNI value={m.awayWins||0} onCommit={v=>updM(idx,"awayWins",Math.round(v))} min={0} max={4} step={1} style={{width:36}}/>
               </div>
             </div>
           ))}
@@ -3534,7 +3534,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:8}}>
           {Object.entries(margins).map(([k,v])=><label key={k} style={{fontSize:11,display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}>
             <span style={{color:"var(--color-text-secondary)",textTransform:"capitalize"}}>{k.replace(/([A-Z])/g," $1")}</span>
-            <NI value={v} onChange={nv=>setMargins(m=>({...m,[k]:nv}))} min={1} max={3} step={0.01} style={{width:56}}/>
+            <LazyNI value={v} onCommit={nv=>setMargins(m=>({...m,[k]:nv}))} min={1} max={3} step={0.01} style={{width:56}}/>
           </label>)}
         </div>
       </Card>}
@@ -3636,10 +3636,10 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
                 <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:g.result?0.5:1}}>
                   <td style={{padding:"2px 3px",color:"var(--color-text-tertiary)",fontSize:9}}>G{i+1}</td>
                   <td style={{padding:"2px 3px",fontSize:9,color:"var(--color-text-secondary)"}}>{homeLabel}</td>
-                  <td style={{padding:"1px 2px"}}><NI value={+g.winPct.toFixed(3)} onChange={v=>updG(i,"winPct",v)} min={0} max={1} step={0.01} style={{width:46}}/></td>
-                  <td style={{padding:"1px 2px"}}><NI value={+g.expTotal.toFixed(1)} onChange={v=>updG(i,"expTotal",v)} min={0.5} max={12} step={0.1} style={{width:40}}/></td>
+                  <td style={{padding:"1px 2px"}}><LazyNI value={+g.winPct.toFixed(3)} onCommit={v=>updG(i,"winPct",v)} min={0} max={1} step={0.01} style={{width:46}}/></td>
+                  <td style={{padding:"1px 2px"}}><LazyNI value={+g.expTotal.toFixed(1)} onCommit={v=>updG(i,"expTotal",v)} min={0.5} max={12} step={0.1} style={{width:40}}/></td>
                   <td style={{padding:"1px 2px",position:"relative"}}>
-                    <NI value={+(g.pOT??0.22).toFixed(2)} onChange={v=>updG(i,"pOT",v)} min={0} max={0.5} step={0.01} style={{width:38}}/>
+                    <LazyNI value={+(g.pOT??0.22).toFixed(2)} onCommit={v=>updG(i,"pOT",v)} min={0} max={0.5} step={0.01} style={{width:38}}/>
                     {s.games[i]?.pOT_manual && <span title="Manually overridden — click Auto OT% to reset" style={{position:"absolute",top:0,right:-2,fontSize:8,color:"#f59e0b"}}>*</span>}
                   </td>
                   <td style={{padding:"1px 2px"}}>
@@ -3668,10 +3668,10 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             <div style={{marginTop:8,paddingTop:8,borderTop:"0.5px solid var(--color-border-tertiary)"}}>
               <div style={{display:"flex",gap:10,fontSize:10,alignItems:"center",flexWrap:"wrap"}}>
                 <label style={{color:"var(--color-text-secondary)",display:"flex",gap:4,alignItems:"center"}}>
-                  Shutout/G: <NI value={s.shutoutRate??0.08} onChange={v=>updS("shutoutRate",v)} min={0} max={0.5} step={0.01} style={{width:44}}/>
+                  Shutout/G: <LazyNI value={s.shutoutRate??0.08} onCommit={v=>updS("shutoutRate",v)} min={0} max={0.5} step={0.01} style={{width:44}}/>
                 </label>
                 <label style={{color:"var(--color-text-secondary)",display:"flex",gap:4,alignItems:"center"}}>
-                  Goal shift: <NI value={s.winnerGoalShift??0.15} onChange={v=>updS("winnerGoalShift",v)} min={0} max={0.4} step={0.01} style={{width:44}}/>
+                  Goal shift: <LazyNI value={s.winnerGoalShift??0.15} onCommit={v=>updS("winnerGoalShift",v)} min={0} max={0.4} step={0.01} style={{width:44}}/>
                 </label>
                 <button onClick={()=>setAllSeries(p=>{const u=[...p];u[safeSi]={...u[safeSi],games:u[safeSi].games.map(g=>({...g,pOT_manual:false,pOT:null}))};return u;})}
                   style={{fontSize:9,padding:"3px 8px",background:"transparent",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-secondary)",cursor:"pointer"}}
@@ -4184,7 +4184,7 @@ function PropsPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,p
       <SH title={title} sub={`OR: ${statMargin}x · λ from reg season × ${globals.rateDiscount} discount`}/>
       <Seg options={STATS.map(s=>({id:s.id,label:s.label}))} value={stat} onChange={v=>{setStat(v);setLine(mode==="binary"?1:v==="sog"?2.5:v==="hit"?2.5:0.5);}} accent="#1d4ed8"/>
       <label style={{fontSize:11,color:"var(--color-text-secondary)",display:"flex",gap:5,alignItems:"center"}}>
-        {mode==="binary"?"Min:":"Line:"} <NI value={line} onChange={setLine} min={mode==="binary"?1:0.5} max={50} step={mode==="binary"?1:0.5} style={{width:48}}/>
+        {mode==="binary"?"Min:":"Line:"} <LazyNI value={line} onCommit={setLine} min={mode==="binary"?1:0.5} max={50} step={mode==="binary"?1:0.5} style={{width:48}}/>
       </label>
       {mode==="ou" && <>
         <button onClick={()=>{
@@ -4571,7 +4571,7 @@ function SeriesLeaderPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalen
       <SH title="Series Stat Leader" sub={`${engineLabel} · OR: ${or}x · Temp: ${temp}`}/>
       <Seg options={SERIES_LEADER_STATS.map(s=>({id:s.id,label:s.label}))} value={stat} onChange={setStat} accent="#7c3aed"/>
       <label style={{fontSize:11,color:"var(--color-text-secondary)",display:"flex",gap:4,alignItems:"center"}}>
-        Temp: <NI value={temp} onChange={v=>setCustomTemps(t=>({...t,[stat]:v}))} min={0.5} max={5} step={0.1} style={{width:46}}/>
+        Temp: <LazyNI value={temp} onCommit={v=>setCustomTemps(t=>({...t,[stat]:v}))} min={0.5} max={5} step={0.1} style={{width:46}}/>
       </label>
       {simResult && <span style={{fontSize:9,padding:"2px 6px",borderRadius:3,background:"rgba(124,58,237,0.15)",color:"#a78bfa",letterSpacing:0.4,fontWeight:500}}>UNIFIED</span>}
     </div>
@@ -6319,7 +6319,7 @@ function SettingsTab({globals,setGlobals,margins,setMargins,showTrue,setShowTrue
         {Object.entries(margins).map(([k,v])=>(
           <div key={k} style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
             <label style={{fontSize:11,color:"var(--color-text-secondary)",textTransform:"capitalize"}}>{k.replace(/([A-Z])/g," $1")}</label>
-            <NI value={v} onChange={nv=>setMargins(m=>({...m,[k]:nv}))} min={1} max={3} step={0.01} style={{width:58}}/>
+            <LazyNI value={v} onCommit={nv=>setMargins(m=>({...m,[k]:nv}))} min={1} max={3} step={0.01} style={{width:58}}/>
           </div>
         ))}
       </Card>
