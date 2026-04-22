@@ -101,9 +101,11 @@ const NICKNAME_MAP = {
   "andrei": "andrew",
   "dmitry": "dmitri",
   "sergei": "sergey",
-  "max": "maxime",
-  "maxim": "maxime",
-  "maksim": "maxime",
+  // v49: fold Max/Maxwell/Maxim family to "max" (not "maxime" — NHL context prefers "Max")
+  "maxwell": "max",
+  "maxim": "max",
+  "maksim": "max",
+  "maxime": "max",
   // v49: more diminutives
   "tommy": "tom",
   "thomas": "tom",
@@ -122,7 +124,6 @@ const NICKNAME_MAP = {
   "donnie": "don",
   "donald": "don",
   "jimmy": "jim",
-  "jim": "james",
   "james": "jim",
   "johnny": "john",
   "jonny": "jon",
@@ -134,6 +135,9 @@ const NICKNAME_MAP = {
   "larry": "lawrence",
   "artyom": "artemi",
   "artemiy": "artemi",
+  // v50: Russian transliteration variants
+  "daniil": "danil",
+  "danila": "danil",
 };
 
 // v49: explicit last-name alias map for known typos / variants that can't be handled by general rules.
@@ -143,11 +147,16 @@ const LAST_NAME_MAP = {
 };
 function normPlayerName(s) {
   let n = (s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().replace(/[^a-z0-9 ]/g,"").trim();
-  // Fold first-name nicknames
-  const parts = n.split(/\s+/);
+  // v50: collapse multi-word names to first + last, dropping middle names/hyphens.
+  //      Handles "Emil Martinsen Lilleber" ↔ "Emil Lilleber", "J.T. Compher" ↔ "JT Compher".
+  //      Fold first-name nicknames and last-name suffix/alias rules.
+  let parts = n.split(/\s+/);
+  if (parts.length >= 3) {
+    // Keep only first + last
+    parts = [parts[0], parts[parts.length - 1]];
+  }
   if (parts.length > 0 && NICKNAME_MAP[parts[0]]) parts[0] = NICKNAME_MAP[parts[0]];
   // v49: last-name suffix normalization — handles Slafkovsky/Slafkovsk, Malkin/Malkine, etc.
-  // Strip trailing "y"/"i"/"e" after Slavic "-sk" and similar patterns.
   if (parts.length > 1) {
     const lastIdx = parts.length - 1;
     let last = parts[lastIdx];
@@ -161,6 +170,8 @@ function normPlayerName(s) {
 }
 // Deduplicate a player array by normalized name+team. Merges stat fields by summing,
 // keeps the longer name (more complete spelling), prefers HR team over MoneyPuck team.
+// v50: SCRATCHED role sticks — if ANY duplicate is SCRATCHED, the merged player is SCRATCHED.
+//      Prefer non-empty role over empty, otherwise longer-name record wins.
 function dedupePlayers(players) {
   if (!Array.isArray(players)) return players;
   const byKey = new Map();
@@ -177,8 +188,12 @@ function dedupePlayers(players) {
       for (const f of STAT_FIELDS) {
         if (p[f] != null) existing[f] = (existing[f] || 0) + (p[f] || 0);
       }
-      // Adopt non-empty role/team if existing doesn't have one
-      if (!existing.lineRole && p.lineRole) existing.lineRole = p.lineRole;
+      // v50: SCRATCHED wins — user explicitly marked this player out
+      if (p.lineRole === "SCRATCHED" || existing.lineRole === "SCRATCHED") {
+        existing.lineRole = "SCRATCHED";
+      } else if (!existing.lineRole && p.lineRole) {
+        existing.lineRole = p.lineRole;
+      }
       if (!existing.team && p.team) existing.team = p.team;
     }
   }
@@ -763,6 +778,38 @@ function dispersionFor(stat, globalDispersion) {
 function applyMargin(trueProbs, or) {
   const s = trueProbs.reduce((a, b) => a + b, 0);
   return trueProbs.map(p => s > 0 ? (p / s) * or : 0);
+}
+
+// v49: leader market overround — preserves favorite's true prob and squeezes longshots.
+// Problem with naive (p/sum * or): if favorite has raw 0.7, OR=1.5 → 1.05 (impossible).
+// Solution: cap each player at MAX_PROB, redistribute any overflow proportionally to the remaining field.
+// This mimics how books actually juice leader markets: favorite moves a little, the tail pays the margin.
+function applyLeaderOverround(rawProbs, powerFactor, overround, MAX_PROB = 0.90) {
+  const pf = powerFactor || 1.0;
+  const or = overround || 1.0;
+  const powered = rawProbs.map(p => Math.pow(Math.max(0, p), pf));
+  const psum = powered.reduce((a, b) => a + b, 0) || 1;
+  // Initial allocation: (p/sum) * OR
+  let adj = powered.map(p => (p / psum) * or);
+  // Cap-and-redistribute: any player over MAX_PROB is clamped; overflow redistributes pro-rata across non-capped.
+  // Iterate (up to 5 passes) because each redistribution may push another player over cap.
+  for (let iter = 0; iter < 5; iter++) {
+    let overflow = 0;
+    const nonCappedSum = [];
+    for (let i = 0; i < adj.length; i++) {
+      if (adj[i] > MAX_PROB) {
+        overflow += (adj[i] - MAX_PROB);
+        adj[i] = MAX_PROB;
+      } else {
+        nonCappedSum.push(i);
+      }
+    }
+    if (overflow < 1e-9) break;
+    const nonSum = nonCappedSum.reduce((s, i) => s + adj[i], 0);
+    if (nonSum <= 0) break;
+    for (const i of nonCappedSum) adj[i] += (adj[i] / nonSum) * overflow;
+  }
+  return adj;
 }
 
 // v24: Team strength from on-ice xG. Sum across active (non-scratched) skaters.
@@ -1583,10 +1630,10 @@ function migrateMatchups(loaded) {
 const DEFAULT_MARGINS = {
   eightWay:1.12, winner:1.04, length:1.08, spread:1.04,
   totalGoals:1.05, winOrder:1.15, shutouts:1.05, correctScore:1.12,
-  parlay:1.08, ouGames:1.05, otGames:1.08, otExact:1.08,
+  parlay:1.08, ouGames:1.05, otGames:1.08, otExact:1.08, otScorer:1.20,
   teamMostGoals:1.05, teamGoals:1.05,
   propsGoals:1.08, propsAssists:1.05, propsPoints:1.05, propsSOG:1.05,
-  propsHits:1.05, propsBlocks:1.05, propsTakeaways:1.05, propsPIM:1.05,
+  propsHits:1.05, propsBlocks:1.05, propsTakeaways:1.05,
   propsGiveaways:1.05,
   seriesLeader:1.5, leaderR1:1.5, leaderFull:1.5,
 };
@@ -1841,7 +1888,16 @@ function AppInner() {
   const [dark,setDark] = useState(true);
   const [tab,setTab] = useState("leaders");
   const [globals,setGlobals] = useState(()=>{try{const s=localStorage.getItem("nhl_globals");return s?{...DEFAULT_GLOBALS,...JSON.parse(s)}:DEFAULT_GLOBALS;}catch{return DEFAULT_GLOBALS;}});
-  const [margins,setMargins] = useState(()=>{try{const s=localStorage.getItem("nhl_margins");return s?{...DEFAULT_MARGINS,...JSON.parse(s)}:DEFAULT_MARGINS;}catch{return DEFAULT_MARGINS;}});
+  const [margins,setMargins] = useState(()=>{
+    try{
+      const s=localStorage.getItem("nhl_margins");
+      if(!s) return DEFAULT_MARGINS;
+      const parsed = JSON.parse(s);
+      // v49: remove deprecated keys
+      delete parsed.propsPIM;
+      return {...DEFAULT_MARGINS,...parsed};
+    }catch{return DEFAULT_MARGINS;}
+  });
   const [showTrue,setShowTrue] = useState(false);
   const [showDec,setShowDec] = useState(true);
   const [syncStatus,setSyncStatus] = useState("idle");
@@ -2286,9 +2342,7 @@ function AppInner() {
       }
     }
     const raw = flat.length ? simulateLeaderFromPMFs(flat.map(f=>f.pmf), 20000, 88001) : [];
-    const powered = raw.map(p => Math.pow(p, pf));
-    const psum = powered.reduce((a,b)=>a+b, 0);
-    const adj = powered.map(p => psum > 0 ? (p/psum) * or : 0);
+    const adj = applyLeaderOverround(raw, pf, or);
     const pMap = new Map(players.map(p => [p.name+"|"+p.team, p]));
     return flat.map((f,i) => {
       const meta = pMap.get(f.name+"|"+f.team) || {};
@@ -2327,9 +2381,7 @@ function AppInner() {
     const computed = pool.map(p=>computeLambda(p,lStat,lScope));
     const entries = computed.map(c=>({futureLam:c.futureLam, actual:c.actual}));
     const raw = entries.length ? simulateLeader(entries, r, 10000, 12345) : [];
-    const powered=raw.map(p=>Math.pow(p,pf));
-    const psum=powered.reduce((a,b)=>a+b,0);
-    const adj=powered.map(p=>psum>0?(p/psum)*or:0);
+    const adj = applyLeaderOverround(raw, pf, or);
     return pool.map((p,i)=>({...p,lambda:computed[i].lam,futureLam:computed[i].futureLam,actualStat:computed[i].actual,trueProb:raw[i],adjProb:adj[i]})).sort((a,b)=>b.adjProb-a.adjProb).slice(0,lTopN);
   },[players,lStat,lScope,globals,computeLambda,matchups,advancement,lTopN,r1LeaderMarket,allSeries]);
 
@@ -2781,7 +2833,7 @@ function GameEntryModal({dark,allSeries,players,goalies,initialSeriesIdx,initial
 // v41: number input with local string state — only commits parent on blur or Enter.
 // Fixes the laggy/cursor-jumpy behavior on the advancement table where every keystroke
 // re-rendered the whole 16-team auto-chain.
-function LazyNI({value, onCommit, min, max, step=0.01, style={}, tabIndex, showSpinner=false}) {
+function LazyNI({value, onCommit, min, max, step=0.01, style={}, tabIndex, showSpinner=true}) {
   const [draft, setDraft] = useState(String(value));
   const [editing, setEditing] = useState(false);
   // Sync from prop when not actively editing (e.g., AUTO recompute updated the prop)
@@ -2890,7 +2942,7 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
 
       <div style={{display:"flex",gap:14,marginBottom:12,flexWrap:"wrap",alignItems:"center",padding:"7px 12px",
         background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-tertiary)"}}>
-        {[{k:"overroundR1",l:"Overround",min:1,max:1.5,step:0.01},{k:"powerFactor",l:"Power Factor",min:0.5,max:2,step:0.05},{k:"rateDiscount",l:"Rate Discount",min:0.5,max:1,step:0.01}].map(({k,l,min,max,step})=>(
+        {[{k:lScope==="r1"?"overroundR1":"overroundFull",l:"Overround",min:1,max:1.5,step:0.01},{k:"powerFactor",l:"Power Factor",min:0.5,max:2,step:0.05},{k:"rateDiscount",l:"Rate Discount",min:0.5,max:1,step:0.01}].map(({k,l,min,max,step})=>(
           <label key={k} style={{fontSize:11,color:"var(--color-text-secondary)",display:"flex",gap:5,alignItems:"center"}}>
             {l}: <LazyNI value={globals[k]} onCommit={v=>setGlobals(g=>({...g,[k]:v}))} min={min} max={max} step={step} style={{width:56}}/>
           </label>
@@ -4149,72 +4201,56 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
 
           {mkt==="otscorer"&&(()=>{
             // v49: P(player scores first OT goal in series) approximation.
-            // Model: for each remaining game g, P(g played) × P(g goes to OT) × P(player scores first in OT).
-            // P(scores first in OT) ≈ player goal share × boost for high-TOI / star forwards.
-            // Approximation: assume goals in OT are drawn like regular goals for eligible skaters.
+            // Model: P(any OT in series) × team OT-win share × player goal share × role weight.
+            // v49b: use SHRUNK g_pg (via shrinkRate) to handle low-sample skaters, and exclude BOT6/D3/SCRATCHED
+            //       from the OT scorer pool since OT goals are overwhelmingly scored by TOP6/MID6 forwards and top D.
+            const eligibleRoles = new Set(["TOP6","MID6","ACTIVE","D1","D2"]);
+            const shrunkGoalRate = (p) => shrinkRate(p.g_pg || 0, p.gp || 0, "g");
             const teamGoalRate = (team) => {
-              const pool = (players||[]).filter(p => p.team === team && roleMultiplier(p.lineRole) > 0);
-              let sum = 0;
-              for (const p of pool) sum += (p.g_pg || 0);
-              return sum > 0 ? sum : 1;
+              const pool = (players||[]).filter(p => p.team === team && eligibleRoles.has(p.lineRole));
+              return pool.reduce((s,p) => s + shrunkGoalRate(p), 0) || 1;
             };
             const homeG = teamGoalRate(s.homeAbbr);
             const awayG = teamGoalRate(s.awayAbbr);
-            // Per-game P(OT): use pOT from effG
-            // P(team X scores in OT | game goes to OT) ≈ winPct for that game (roughly; OT is near 50/50 but skew toward stronger team)
-            // Better: pOT-weighted game probabilities + player share.
+            // Per-game P(OT): from effG
             let pSeriesHasOT = 0;
-            // Probability-weighted contribution per game per team
             const seriesTeamOT = {home: 0, away: 0};
             const {effG: eg, realized: re} = {effG, realized};
-            // For each unplayed game:
             for (let gi = 0; gi < eg.length; gi++) {
               const g = eg[gi];
               if (g.result) {
-                // already played — if it went OT, winner scored OT goal
-                if (g.wentOT) {
-                  seriesTeamOT[g.result === "home" ? "home" : "away"] += 1;
-                }
+                if (g.wentOT) seriesTeamOT[g.result === "home" ? "home" : "away"] += 1;
                 continue;
               }
-              // Unplayed game — weight by probability game is played (depends on series state).
-              // Using rec to get P(gi reached): simplified — use 1 for gi=realized.gamesPlayed (next game), then P(gi reached) = P(series not over at gi).
-              // Simple approximation: series reaches game gi with prob = P(at least max(0, gi+1 - 4) net wins past... complex. Fallback: use lengthMkt probs.
-              // Cleaner: expected OT games ≈ Σ pOT across unplayed games weighted by P(played). Use realized.gamesRemaining.
               const pPlayed = gi <= re.gamesPlayed ? 1 : (re.gamesRemaining - (gi - re.gamesPlayed) + 1) / Math.max(1, re.gamesRemaining);
               const pOT = g.pOT ?? 0.22;
               pSeriesHasOT += pPlayed * pOT;
-              // winner of OT ≈ winPct slightly regressed (OT favors the better team slightly less than regulation)
               const wpOT = 0.5 + 0.6 * (g.winPct - 0.5);
               seriesTeamOT.home += pPlayed * pOT * wpOT;
               seriesTeamOT.away += pPlayed * pOT * (1 - wpOT);
             }
             pSeriesHasOT = Math.min(1, pSeriesHasOT);
-            // Per-player: share of team's goal rate
             const pool = (players||[])
-              .filter(p => (p.team === s.homeAbbr || p.team === s.awayAbbr) && roleMultiplier(p.lineRole) > 0);
+              .filter(p => (p.team === s.homeAbbr || p.team === s.awayAbbr) && eligibleRoles.has(p.lineRole));
             const rows = pool.map(p => {
               const teamRate = p.team === s.homeAbbr ? homeG : awayG;
-              const share = teamRate > 0 ? (p.g_pg || 0) / teamRate : 0;
-              // Apply role multiplier (star forwards over-represented in OT) and TOP6 weighting
-              const roleMult = p.lineRole === "TOP6" ? 1.15 : p.lineRole === "MID6" ? 0.95 : p.lineRole === "BOT6" ? 0.75 : p.lineRole === "D1" ? 0.95 : p.lineRole === "D2" ? 0.80 : p.lineRole === "D3" ? 0.55 : 1.0;
+              const share = teamRate > 0 ? shrunkGoalRate(p) / teamRate : 0;
+              // Role multiplier: top-6 forwards over-represented in OT; top-D slightly boosted; mid/bottom dampened
+              const roleMult = p.lineRole === "TOP6" ? 1.20 : p.lineRole === "MID6" ? 0.90 : p.lineRole === "D1" ? 1.00 : p.lineRole === "D2" ? 0.70 : 0.60;
               const teamOT = p.team === s.homeAbbr ? seriesTeamOT.home : seriesTeamOT.away;
               const rawP = Math.min(0.9999, share * roleMult * teamOT);
               return {...p, share, teamOT, rawP};
             }).filter(r => r.rawP > 0.001)
               .sort((a,b)=> b.rawP - a.rawP);
-            // Apply margin overround to sum (these are disjoint: only one player scores the first OT goal; "no OT" is residual)
             const totalRaw = rows.reduce((s,r)=>s+r.rawP, 0);
-            const pNoOT = 1 - pSeriesHasOT;
-            // Normalize so player probs sum to pSeriesHasOT, then apply margin
             const or = margins.otScorer || 1.20;
             const scale = totalRaw > 0 ? (pSeriesHasOT / totalRaw) : 1;
             const adjusted = rows.map(r => ({...r, adjP: Math.min(0.9999, r.rawP * scale * or)}));
             return <Card>
               <SH title="Player to Score OT Goal in Series" sub={`Any OT in series: ${(pSeriesHasOT*100).toFixed(1)}% · OR: ${or}x · Top 30 shown`}/>
               <div style={{marginBottom:8,fontSize:11,color:"var(--color-text-tertiary)"}}>
-                Approximation: P(OT across series) × team OT-win share × player goal share × role weight.
-                Assumes OT scorer is drawn from active skaters proportional to regular-season G/game with role boost.
+                P(OT across series) × team OT-win share × shrunk goal share × role weight.
+                Pool: TOP6/MID6/ACTIVE/D1/D2 only (BOT6/D3/SCRATCHED excluded).
               </div>
               <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
                 <TH cols={["Player","Team","Role","Share",...(showTrue?["True%"]:[]),"Adj%","American","Decimal"]}/>
@@ -4803,10 +4839,8 @@ function SeriesLeaderPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalen
       raw = simulateLeader(entries.map(e=>({futureLam:e.futureLam,actual:e.actual})), r, 10000, seed);
     }
 
-    // Apply per-stat temperature (power factor) then normalize with overround
-    const powered=raw.map(p=>Math.pow(p,temp));
-    const psum=powered.reduce((a,b)=>a+b,0);
-    const adj=powered.map(p=>psum>0?(p/psum)*or:0);
+    // v49: principled leader overround — cap favorites, redistribute overflow to longshots
+    const adj = applyLeaderOverround(raw, temp, or);
     return pool.map((p,i)=>({...p,lambda:entries[i].lam,futureLam:entries[i].futureLam,actualStat:entries[i].actual,trueProb:raw[i],adjProb:adj[i]}))
       .sort((a,b)=>b.adjProb-a.adjProb);
   },[pool,stat,expG,globals,temp,or,gameEquivalents,gameEquivalentsFor,simResult]);
