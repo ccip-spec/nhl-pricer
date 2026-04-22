@@ -38,6 +38,69 @@ const TEAM_NAMES = {
 const PLAYOFF_TEAMS = Object.keys(TEAM_NAMES);
 const HOME_PATTERN = [null,1,1,0,0,1,0,1];
 
+// v43: name normalization for cross-source matching (HR vs MoneyPuck vs box-score parser).
+// Strips diacritics, lowercases, removes punctuation/whitespace, and folds common first-name
+// nickname variants so "Josh Norris" and "Joshua Norris" hash to the same key.
+const NICKNAME_MAP = {
+  // Player canonical-form aliases. LEFT side is what we'll FOLD INTO right side.
+  "joshua": "josh",
+  "alexander": "alex",
+  "mathew": "matthew",   // either spelling → matthew
+  "mathieu": "matthew",  // anglicize French Mathieu
+  "michael": "mike",
+  "nicholas": "nick",
+  "nikolai": "nik",
+  "anthony": "tony",
+  "william": "will",
+  "robert": "rob",
+  "richard": "rick",
+  "thomas": "tom",
+  "andrew": "andy",
+  "patrick": "pat",
+  "joseph": "joe",
+  "samuel": "sam",
+  "benjamin": "ben",
+  "daniel": "dan",
+  "david": "dave",
+  "jonathan": "jon",
+  "christopher": "chris",
+  "matthias": "matt",
+  "matthew": "matt",
+  "alexandre": "alex",
+};
+function normPlayerName(s) {
+  let n = (s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().replace(/[^a-z0-9 ]/g,"").trim();
+  // Fold first-name nicknames
+  const parts = n.split(/\s+/);
+  if (parts.length > 0 && NICKNAME_MAP[parts[0]]) parts[0] = NICKNAME_MAP[parts[0]];
+  return parts.join("").replace(/\s+/g,"");
+}
+// Deduplicate a player array by normalized name+team. Merges stat fields by summing,
+// keeps the longer name (more complete spelling), prefers HR team over MoneyPuck team.
+function dedupePlayers(players) {
+  if (!Array.isArray(players)) return players;
+  const byKey = new Map();
+  const STAT_FIELDS = ["pGP","pG","pA","pPts","pSOG","pHIT","pBLK","pTK","pGV","pPIM","pTOI"];
+  for (const p of players) {
+    const key = normPlayerName(p.name) + "|" + (p.team||"");
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, {...p});
+    } else {
+      // Merge: keep longer name spelling
+      if ((p.name||"").length > (existing.name||"").length) existing.name = p.name;
+      // Sum playoff stats
+      for (const f of STAT_FIELDS) {
+        if (p[f] != null) existing[f] = (existing[f] || 0) + (p[f] || 0);
+      }
+      // Adopt non-empty role/team if existing doesn't have one
+      if (!existing.lineRole && p.lineRole) existing.lineRole = p.lineRole;
+      if (!existing.team && p.team) existing.team = p.team;
+    }
+  }
+  return Array.from(byKey.values());
+}
+
 // ─── MATH ─────────────────────────────────────────────────────────────────────
 function poissonPMF(k, lam) {
   if (lam <= 0) return k === 0 ? 1 : 0;
@@ -2092,6 +2155,24 @@ function AppInner() {
     const r = globals.dispersion;
     let pool=players.filter(p=>roleMultiplier(p.lineRole)>0);
     if(lScope==="r1"){const r1m=matchups.r1||[];const active=new Set([...r1m.filter(m=>m.homeAbbr).map(m=>m.homeAbbr),...r1m.filter(m=>m.awayAbbr).map(m=>m.awayAbbr)]);if(active.size>0)pool=pool.filter(p=>active.has(p.team));}
+    // v43: Full Playoff scope must also filter to playoff teams. Bug: previously included all players,
+    // so non-playoff teams (MTL, etc.) got default 50/25/10 advancement → ~10 expected playoff games each →
+    // Caufield-style false favourites. Build active set from any series in any round of allSeries.
+    if(lScope==="full"){
+      const active = new Set();
+      for (const r of ROUND_IDS) {
+        for (const sr of (allSeries[r]||[])) {
+          if (sr.homeAbbr) active.add(sr.homeAbbr);
+          if (sr.awayAbbr) active.add(sr.awayAbbr);
+        }
+      }
+      // Also fold in matchups.r1 in case user populated those instead of allSeries.r1
+      for (const m of (matchups.r1||[])) {
+        if (m.homeAbbr) active.add(m.homeAbbr);
+        if (m.awayAbbr) active.add(m.awayAbbr);
+      }
+      if (active.size > 0) pool = pool.filter(p=>active.has(p.team));
+    }
     // v24: Monte Carlo leader probabilities. Handles ties correctly + uses NB dispersion consistent with props.
     const computed = pool.map(p=>computeLambda(p,lStat,lScope));
     const entries = computed.map(c=>({futureLam:c.futureLam, actual:c.actual}));
@@ -2100,7 +2181,7 @@ function AppInner() {
     const psum=powered.reduce((a,b)=>a+b,0);
     const adj=powered.map(p=>psum>0?(p/psum)*or:0);
     return pool.map((p,i)=>({...p,lambda:computed[i].lam,futureLam:computed[i].futureLam,actualStat:computed[i].actual,trueProb:raw[i],adjProb:adj[i]})).sort((a,b)=>b.adjProb-a.adjProb).slice(0,lTopN);
-  },[players,lStat,lScope,globals,computeLambda,matchups,advancement,lTopN,r1LeaderMarket]);
+  },[players,lStat,lScope,globals,computeLambda,matchups,advancement,lTopN,r1LeaderMarket,allSeries]);
 
   function exportState(){const s={players,goalies,matchups,allSeries,advancement,globals,margins,bracket};return JSON.stringify(s,null,2);}
   function importState(text){try{const s=JSON.parse(text);if(s.players){setPlayers(s.players);scheduleSync("players",s.players);}if(s.goalies){setGoalies(s.goalies);scheduleSync("goalies",s.goalies);}if(s.matchups){setMatchups(migrateMatchups(s.matchups));}if(s.allSeries){setAllSeries(migrateSeries(s.allSeries));}if(s.advancement){setAdvancement(s.advancement);}if(s.globals)setGlobals(s.globals);if(s.margins)setMargins(s.margins);if(s.bracket)setBracket(s.bracket);return{ok:true};}catch(e){return{ok:false,error:e.message};}}
@@ -2984,6 +3065,36 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
   // keeps its own sim result. Switching back retrieves it. Only re-run on explicit click.
   // (Previous behaviour: setSimResult(null) on s.homeAbbr/s.awayAbbr/si change — REMOVED.)
 
+  // v43: "Run All Sims" — sequentially sims every series in the current round. Simple
+  // implementation: switch si, wait for runSim to settle, advance. ~5s per series.
+  const [runAllProgress, setRunAllProgress] = useState(null); // {current, total} or null
+  const runAllSims = useCallback(()=>{
+    if (!players || runAllProgress) return;
+    const eligible = (allSeries||[]).map((sr,i)=>({sr,i})).filter(x=>x.sr.homeAbbr && x.sr.awayAbbr);
+    if (!eligible.length) return;
+    setRunAllProgress({current:0, total:eligible.length});
+    let stepIdx = 0;
+    const stepNext = () => {
+      if (stepIdx >= eligible.length) {
+        setRunAllProgress(null);
+        return;
+      }
+      const targetSi = eligible[stepIdx].i;
+      setSi(targetSi);
+      setRunAllProgress({current: stepIdx+1, total: eligible.length});
+      stepIdx++;
+      // Wait for the si change to propagate + runSim to fire (auto-run effect already exists for upload counter
+      // but not for si change — explicit trigger needed). Defer past the React commit + the runSim 30ms internal delay.
+      setTimeout(()=>{
+        // Trigger sim for the now-current series
+        try { runSim(); } catch(e) { /* swallow */ }
+        // Wait for sim to complete (default ~5s) before next series
+        setTimeout(stepNext, 6000);
+      }, 100);
+    };
+    stepNext();
+  }, [players, allSeries, runAllProgress, runSim]);
+
   // v31: auto-run sim after a game upload commit. Watches the App-level counter that
   // GameStatImporter bumps. Only fires if we have everything we need (players + both teams set).
   // Skipped on initial mount (counter starts at 0 and we use a ref to detect changes).
@@ -3368,8 +3479,15 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
           <SH title="Unified Sim (MC 20k)" sub={simResult?`L1 correlation · ${simResult.simMs}ms · ${simResult.pool.length} skaters${simStale?" · STALE — inputs changed, re-run to refresh":""}`:"Click Run to simulate. Independent of closed-form prices above."}/>
           {simResult && !simStale && <span style={{fontSize:9,padding:"2px 6px",borderRadius:3,background:"rgba(124,58,237,0.15)",color:"#a78bfa",letterSpacing:0.4,fontWeight:500}}>DUAL-TRACK</span>}
           {simStale && <span style={{fontSize:9,padding:"2px 6px",borderRadius:3,background:"rgba(245,158,11,0.15)",color:"#f59e0b",letterSpacing:0.4,fontWeight:500}}>STALE</span>}
-          <button onClick={runSim} disabled={simRunning||!players} style={{marginLeft:"auto",padding:"4px 12px",fontSize:11,fontWeight:500,borderRadius:4,cursor:simRunning?"wait":"pointer",background:simRunning?"var(--color-background-secondary)":simStale?"#f59e0b":"#7c3aed",color:simRunning?"var(--color-text-tertiary)":"white",border:"none"}}>
+          <button onClick={runSim} disabled={simRunning||!players||!!runAllProgress} style={{marginLeft:"auto",padding:"4px 12px",fontSize:11,fontWeight:500,borderRadius:4,cursor:simRunning?"wait":"pointer",background:simRunning?"var(--color-background-secondary)":simStale?"#f59e0b":"#7c3aed",color:simRunning?"var(--color-text-tertiary)":"white",border:"none"}}>
             {simRunning?"Running…":simResult?(simStale?"Re-run":"Re-run"):"Run Unified Sim"}
+          </button>
+          <button onClick={runAllSims} disabled={!players||simRunning||!!runAllProgress}
+            title="Run unified sim for every series in this round (sequentially, ~6s per series)"
+            style={{padding:"4px 12px",fontSize:11,fontWeight:500,borderRadius:4,cursor:runAllProgress?"wait":"pointer",
+              background: runAllProgress ? "var(--color-background-secondary)" : "#10b981",
+              color: runAllProgress ? "var(--color-text-tertiary)" : "white", border:"none"}}>
+            {runAllProgress ? `Running ${runAllProgress.current}/${runAllProgress.total}…` : "Run All Sims"}
           </button>
         </div>
         {simResult && <>
@@ -5561,7 +5679,31 @@ function UploadTab({players,setPlayers,goalies,setGoalies,exportState,importStat
             lineRole:defRole,pGP:0,pG:0,pA:0,pSOG:0,pHIT:0,pBLK:0,pTK:0,pPIM:0,pTSA:0,pGIVE:0});
         }
         parsed.sort((a,b)=>a.team.localeCompare(b.team)||b.pts-a.pts);
-        setPlayers(parsed);
+        // v43: preserve user-set lineRole + accumulated playoff stats across skaters.csv reloads.
+        // Without this, re-loading wipes every role tag the user has manually curated.
+        // Match by normalized name+team; if found, merge the new regular-season data on top of
+        // the existing record while keeping lineRole and pG/pA/pSOG/etc.
+        const existing = players || [];
+        if (existing.length) {
+          const normName = (s) => (s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().replace(/[^a-z0-9]/g,"");
+          const byKey = new Map(existing.map(p => [normName(p.name)+"|"+(p.team||""), p]));
+          const byNameOnly = new Map(existing.map(p => [normName(p.name), p]));
+          const PRESERVE_FIELDS = ["lineRole","pGP","pG","pA","pPts","pSOG","pHIT","pBLK","pTK","pGV","pPIM","pTOI","pTSA","pGIVE"];
+          const merged = parsed.map(np => {
+            const key = normName(np.name) + "|" + np.team;
+            let prior = byKey.get(key);
+            if (!prior) prior = byNameOnly.get(normName(np.name)); // cross-team (traded player)
+            if (!prior) return np;
+            const out = {...np};
+            for (const f of PRESERVE_FIELDS) {
+              if (prior[f] != null) out[f] = prior[f];
+            }
+            return out;
+          });
+          setPlayers(merged);
+        } else {
+          setPlayers(parsed);
+        }
       }catch(e){setErr("Skaters parse error: "+e.message);}
     };
     reader.readAsText(file);
@@ -5637,6 +5779,20 @@ function UploadTab({players,setPlayers,goalies,setGoalies,exportState,importStat
                 background:players?"#0d9488":"var(--color-background-secondary)",
                 color:players?"white":"var(--color-text-tertiary)",border:"none",cursor:players?"pointer":"default"}}>
               + Merge HR Roster
+            </button>
+            <button onClick={()=>{
+              if (!players) return;
+              const before = players.length;
+              const merged = dedupePlayers(players);
+              const removed = before - merged.length;
+              setPlayers(merged);
+              alert(removed > 0 ? `Merged ${removed} duplicate player record${removed===1?"":"s"} (Stutzle/Stützle, Josh/Joshua Norris, etc.). Stats summed; longer name spelling kept.` : "No duplicates found.");
+            }} disabled={!players}
+              title="Find players with same normalized name+team (handles diacritics + Josh/Joshua-style nickname variants) and merge their stats."
+              style={{padding:"6px 14px",fontSize:12,borderRadius:"var(--border-radius-md)",
+                background:players?"#a16207":"var(--color-background-secondary)",
+                color:players?"white":"var(--color-text-tertiary)",border:"none",cursor:players?"pointer":"default"}}>
+              ↻ Dedupe Names
             </button>
           </div>
           {players&&<div style={{marginTop:10,display:"flex",gap:4,flexWrap:"wrap"}}>
@@ -5721,14 +5877,20 @@ function UploadTab({players,setPlayers,goalies,setGoalies,exportState,importStat
               }));
               setPlayers(wiped);
             }
-            // Clear all series game results (keep winPct/expTotal)
-            setAllSeries(prev => prev.map(sr => ({
-              ...sr,
-              games: sr.games.map(g => ({
-                ...g,
-                result: null, homeScore: null, awayScore: null, wentOT: false,
-              })),
-            })));
+            // Clear all series game results (keep winPct/expTotal) — round-aware
+            setAllSeries(prev => {
+              const out = {};
+              for (const r of ROUND_IDS) {
+                out[r] = (prev[r]||[]).map(sr => ({
+                  ...sr,
+                  games: (sr.games||[]).map(g => ({
+                    ...g,
+                    result: null, homeScore: null, awayScore: null, wentOT: false,
+                  })),
+                }));
+              }
+              return out;
+            });
           }} style={{padding:"6px 14px",fontSize:12,borderRadius:"var(--border-radius-md)",background:"#ef4444",color:"white",border:"none",cursor:"pointer",fontWeight:500}}>
             Wipe All Playoff Stats
           </button>
