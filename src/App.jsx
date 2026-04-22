@@ -1,30 +1,49 @@
 import { useState, useEffect, useCallback, useMemo, useRef, Fragment, Component } from "react";
 
 // ─── SUPABASE CONFIG ─────────────────────────────────────────────────────────
-const SUPABASE_URL = "";
-const SUPABASE_KEY = "";
-const SUPABASE_ENABLED = !!(SUPABASE_URL && SUPABASE_KEY);
-
-async function sbLoad(key) {
-  if (!SUPABASE_ENABLED) return null;
+// v52: Cloud sync is now configurable at runtime via Settings → Cloud Sync card.
+// Users enter their own Supabase URL + anon key (saved to localStorage).
+// This enables Push/Pull across devices without requiring code edits.
+// NOTE: Explicit Push/Pull model was chosen over auto-sync to avoid silent
+// data-loss scenarios (race conditions, offline sync failures, merge conflicts).
+// TODO (future): Add real-time auto-sync with conflict resolution once the
+//                Push/Pull flow is validated in practice.
+function getSbConfig() {
   try {
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/pricer_state?key=eq.${encodeURIComponent(key)}&select=value`, {
-      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
+    const raw = localStorage.getItem("nhl_sb_config");
+    if (!raw) return { url: "", key: "", device: "" };
+    return JSON.parse(raw);
+  } catch { return { url: "", key: "", device: "" }; }
+}
+function setSbConfig(cfg) {
+  try { localStorage.setItem("nhl_sb_config", JSON.stringify(cfg)); } catch {}
+}
+function isSbEnabled() {
+  const c = getSbConfig();
+  return !!(c.url && c.key);
+}
+async function sbLoad(key) {
+  const cfg = getSbConfig();
+  if (!cfg.url || !cfg.key) return null;
+  try {
+    const r = await fetch(`${cfg.url}/rest/v1/pricer_state?key=eq.${encodeURIComponent(key)}&select=value,updated_at,device`, {
+      headers: { apikey: cfg.key, Authorization: `Bearer ${cfg.key}` }
     });
     const d = await r.json();
-    return d?.[0]?.value ?? null;
+    return d?.[0] ?? null;   // returns {value, updated_at, device} or null
   } catch { return null; }
 }
-async function sbSave(key, value) {
-  if (!SUPABASE_ENABLED) return false;
+async function sbSave(key, value, device) {
+  const cfg = getSbConfig();
+  if (!cfg.url || !cfg.key) return false;
   try {
-    await fetch(`${SUPABASE_URL}/rest/v1/pricer_state`, {
+    const r = await fetch(`${cfg.url}/rest/v1/pricer_state`, {
       method: "POST",
-      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`,
+      headers: { apikey: cfg.key, Authorization: `Bearer ${cfg.key}`,
         "Content-Type": "application/json", Prefer: "resolution=merge-duplicates" },
-      body: JSON.stringify({ key, value, updated_at: new Date().toISOString() })
+      body: JSON.stringify({ key, value, device: device || "unknown", updated_at: new Date().toISOString() })
     });
-    return true;
+    return r.ok;
   } catch { return false; }
 }
 
@@ -1956,35 +1975,29 @@ function AppInner() {
     catch (e) { /* may exceed quota; sim cache is recomputable so ignore */ }
   }, [simResultsBySeries]);
 
-  const syncTimer = useRef(null);
-  const pending = useRef({});
-  function scheduleSync(key,val) {
-    pending.current[key]=val;
-    clearTimeout(syncTimer.current);
-    syncTimer.current=setTimeout(async()=>{
-      setSyncStatus("syncing");
-      let ok=true;
-      for(const[k,v] of Object.entries(pending.current)){const r=await sbSave(k,v);if(!r&&SUPABASE_ENABLED)ok=false;}
-      pending.current={};
-      setSyncStatus(SUPABASE_ENABLED?(ok?"ok":"err"):"idle");
-    },3000);
-  }
+  // v52: Explicit Push/Pull model — auto-sync disabled.
+  // scheduleSync() is now a no-op. Call doPush() / doPull() from Settings → Cloud Sync.
+  // This avoids silent data loss from race conditions and offline sync failures.
+  const [lastPushedAt, setLastPushedAt] = useState(() => {
+    try { return localStorage.getItem("nhl_last_pushed_at") || null; } catch { return null; }
+  });
+  const [lastPulledAt, setLastPulledAt] = useState(() => {
+    try { return localStorage.getItem("nhl_last_pulled_at") || null; } catch { return null; }
+  });
+  const [cloudInfo, setCloudInfo] = useState(null);    // {updated_at, device} of the cloud-side latest push we know about
+  function scheduleSync(){ /* disabled in v52 — explicit push/pull only */ }
   function setP(v){
-    setPlayers(prev => { const next = typeof v === "function" ? v(prev) : v; scheduleSync("players", next); return next; });
+    setPlayers(prev => typeof v === "function" ? v(prev) : v);
   }
   function setG(v){
-    setGoalies(prev => { const next = typeof v === "function" ? v(prev) : v; scheduleSync("goalies", next); return next; });
+    setGoalies(prev => typeof v === "function" ? v(prev) : v);
   }
-  function setM(v){setMatchups(v);scheduleSync("matchups",v);}
+  function setM(v){setMatchups(v);}
   function setAdv(v){
-    setAdvancement(prev => {
-      const next = typeof v === "function" ? v(prev) : v;
-      scheduleSync("advancement", next);
-      return next;
-    });
+    setAdvancement(prev => typeof v === "function" ? v(prev) : v);
   }
   function setSeries(v){
-    setAllSeries(prev => { const next = typeof v === "function" ? v(prev) : v; scheduleSync("series", next); return next; });
+    setAllSeries(prev => typeof v === "function" ? v(prev) : v);
   }
   // v38: per-round adapter — components see a flat array for the active round, but writes
   // route into the round-keyed structure. Backward-compatible with all flat-array consumers.
@@ -1993,9 +2006,7 @@ function AppInner() {
     setAllSeries(prev => {
       const cur = prev[currentRound] || [];
       const next = typeof v === "function" ? v(cur) : v;
-      const updated = {...prev, [currentRound]: next};
-      scheduleSync("series", updated);
-      return updated;
+      return {...prev, [currentRound]: next};
     });
   }, [currentRound]);
   const matchupsForRound = (matchups[currentRound] || []);
@@ -2003,32 +2014,87 @@ function AppInner() {
     setMatchups(prev => {
       const cur = prev[currentRound] || [];
       const next = typeof v === "function" ? v(cur) : v;
-      const updated = {...prev, [currentRound]: next};
-      scheduleSync("matchups", updated);
-      return updated;
+      return {...prev, [currentRound]: next};
     });
   }, [currentRound]);
 
+  // v52: On app load, check cloud for a fresher copy (but don't auto-pull).
+  // Shows a "cloud is newer than your local by X min" indicator so user can decide to Pull.
   useEffect(()=>{
-    if(!SUPABASE_ENABLED)return;
+    if(!isSbEnabled())return;
     (async()=>{
-      setSyncStatus("syncing");
-      // v35: cloud load only fills in MISSING locals — never overwrites local edits.
-      // Without this guard, every page reload would clobber margins/advancement/etc with stale cloud data.
-      const keys=["players","goalies","matchups","advancement","series"];
-      const localKeys=["nhl_p","nhl_g","nhl_m","nhl_adv","nhl_s"];
-      const setters=[setPlayers,setGoalies,setMatchups,setAdvancement,setAllSeries];
-      // v38: matchups/series may be a flat array from old cloud data — migrate to round-keyed.
-      const adapters = [null, null, migrateMatchups, null, migrateSeries];
-      for(let i=0;i<keys.length;i++){
-        const haveLocal = !!localStorage.getItem(localKeys[i]);
-        if (haveLocal) continue;
-        const v=await sbLoad(keys[i]);
-        if(v) setters[i](adapters[i] ? adapters[i](v) : v);
-      }
-      setSyncStatus("ok");
+      // Ping a single representative key to get timestamp of latest cloud push
+      const rec = await sbLoad("_meta");
+      if (rec && rec.value) setCloudInfo({updated_at: rec.value.updated_at, device: rec.value.device});
     })();
   },[]);
+
+  // v52: Push — snapshot all state to cloud under several keys + a _meta summary
+  async function doPush(){
+    if (!isSbEnabled()) return { ok:false, error: "Cloud Sync not configured" };
+    setSyncStatus("syncing");
+    const cfg = getSbConfig();
+    const device = cfg.device || "unknown";
+    const now = new Date().toISOString();
+    try {
+      const results = await Promise.all([
+        sbSave("players", players, device),
+        sbSave("goalies", goalies, device),
+        sbSave("matchups", matchups, device),
+        sbSave("advancement", advancement, device),
+        sbSave("series", allSeries, device),
+        sbSave("globals", globals, device),
+        sbSave("margins", margins, device),
+        sbSave("bracket", bracket, device),
+        sbSave("_meta", {updated_at: now, device}, device),
+      ]);
+      const allOk = results.every(Boolean);
+      if (allOk) {
+        setLastPushedAt(now);
+        setCloudInfo({updated_at: now, device});
+        try { localStorage.setItem("nhl_last_pushed_at", now); } catch {}
+        setSyncStatus("ok");
+        return { ok:true, at: now };
+      } else {
+        setSyncStatus("err");
+        return { ok:false, error:"One or more writes failed" };
+      }
+    } catch (e) {
+      setSyncStatus("err");
+      return { ok:false, error: e.message };
+    }
+  }
+
+  // v52: Pull — overwrite all local state with cloud copies
+  async function doPull(){
+    if (!isSbEnabled()) return { ok:false, error: "Cloud Sync not configured" };
+    setSyncStatus("syncing");
+    try {
+      const [pRec,gRec,mRec,aRec,sRec,glRec,mgRec,brRec,mtRec] = await Promise.all([
+        sbLoad("players"), sbLoad("goalies"), sbLoad("matchups"),
+        sbLoad("advancement"), sbLoad("series"),
+        sbLoad("globals"), sbLoad("margins"), sbLoad("bracket"),
+        sbLoad("_meta"),
+      ]);
+      if (pRec?.value) setPlayers(pRec.value);
+      if (gRec?.value) setGoalies(gRec.value);
+      if (mRec?.value) setMatchups(migrateMatchups(mRec.value));
+      if (aRec?.value) setAdvancement(aRec.value);
+      if (sRec?.value) setAllSeries(migrateSeries(sRec.value));
+      if (glRec?.value) setGlobals(glRec.value);
+      if (mgRec?.value) setMargins(mgRec.value);
+      if (brRec?.value) setBracket(brRec.value);
+      const now = new Date().toISOString();
+      setLastPulledAt(now);
+      try { localStorage.setItem("nhl_last_pulled_at", now); } catch {}
+      if (mtRec?.value) setCloudInfo({updated_at: mtRec.value.updated_at, device: mtRec.value.device});
+      setSyncStatus("ok");
+      return { ok:true, at: now, cloudAt: mtRec?.value?.updated_at, device: mtRec?.value?.device };
+    } catch (e) {
+      setSyncStatus("err");
+      return { ok:false, error: e.message };
+    }
+  }
 
   const teamExpGR1 = useMemo(()=>{
     const m={};
@@ -2439,7 +2505,11 @@ function AppInner() {
         {tab==="roles"&&<RolesTab players={players} setPlayers={setP} dark={dark}/>}
         {tab==="settings"&&<SettingsTab globals={globals} setGlobals={setGlobals}
           margins={margins} setMargins={setMargins}
-          showTrue={showTrue} setShowTrue={setShowTrue} showDec={showDec} setShowDec={setShowDec} dark={dark}/>}
+          showTrue={showTrue} setShowTrue={setShowTrue} showDec={showDec} setShowDec={setShowDec}
+          doPush={doPush} doPull={doPull}
+          lastPushedAt={lastPushedAt} lastPulledAt={lastPulledAt}
+          cloudInfo={cloudInfo} syncStatus={syncStatus}
+          dark={dark}/>}
       </div>
 
       {gameModal!==null&&<GameEntryModal
@@ -3804,10 +3874,10 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
                 <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:g.result?0.5:1}}>
                   <td style={{padding:"2px 3px",color:"var(--color-text-tertiary)",fontSize:9}}>G{i+1}</td>
                   <td style={{padding:"2px 3px",fontSize:9,color:"var(--color-text-secondary)"}}>{homeLabel}</td>
-                  <td style={{padding:"1px 2px"}}><LazyNI value={+g.winPct.toFixed(3)} onCommit={v=>updG(i,"winPct",v)} min={0} max={1} step={0.01} style={{width:46}}/></td>
-                  <td style={{padding:"1px 2px"}}><LazyNI value={+g.expTotal.toFixed(1)} onCommit={v=>updG(i,"expTotal",v)} min={0.5} max={12} step={0.1} style={{width:40}}/></td>
+                  <td style={{padding:"1px 2px"}}><LazyNI value={+g.winPct.toFixed(3)} onCommit={v=>updG(i,"winPct",v)} min={0} max={1} step={0.01} style={{width:46}} showSpinner={false}/></td>
+                  <td style={{padding:"1px 2px"}}><LazyNI value={+g.expTotal.toFixed(1)} onCommit={v=>updG(i,"expTotal",v)} min={0.5} max={12} step={0.1} style={{width:40}} showSpinner={false}/></td>
                   <td style={{padding:"1px 2px",position:"relative"}}>
-                    <LazyNI value={+(g.pOT??0.22).toFixed(2)} onCommit={v=>updG(i,"pOT",v)} min={0} max={0.5} step={0.01} style={{width:38}}/>
+                    <LazyNI value={+(g.pOT??0.22).toFixed(2)} onCommit={v=>updG(i,"pOT",v)} min={0} max={0.5} step={0.01} style={{width:38}} showSpinner={false}/>
                     {s.games[i]?.pOT_manual && <span title="Manually overridden — click Auto OT% to reset" style={{position:"absolute",top:0,right:-2,fontSize:8,color:"#f59e0b"}}>*</span>}
                   </td>
                   <td style={{padding:"1px 2px"}}>
@@ -3836,10 +3906,10 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             <div style={{marginTop:8,paddingTop:8,borderTop:"0.5px solid var(--color-border-tertiary)"}}>
               <div style={{display:"flex",gap:10,fontSize:10,alignItems:"center",flexWrap:"wrap"}}>
                 <label style={{color:"var(--color-text-secondary)",display:"flex",gap:4,alignItems:"center"}}>
-                  Shutout/G: <LazyNI value={s.shutoutRate??0.08} onCommit={v=>updS("shutoutRate",v)} min={0} max={0.5} step={0.01} style={{width:44}}/>
+                  Shutout/G: <LazyNI value={s.shutoutRate??0.08} onCommit={v=>updS("shutoutRate",v)} min={0} max={0.5} step={0.01} style={{width:44}} showSpinner={false}/>
                 </label>
                 <label style={{color:"var(--color-text-secondary)",display:"flex",gap:4,alignItems:"center"}}>
-                  Goal shift: <LazyNI value={s.winnerGoalShift??0.15} onCommit={v=>updS("winnerGoalShift",v)} min={0} max={0.4} step={0.01} style={{width:44}}/>
+                  Goal shift: <LazyNI value={s.winnerGoalShift??0.15} onCommit={v=>updS("winnerGoalShift",v)} min={0} max={0.4} step={0.01} style={{width:44}} showSpinner={false}/>
                 </label>
                 <button onClick={()=>setAllSeries(p=>{const u=[...p];u[safeSi]={...u[safeSi],games:u[safeSi].games.map(g=>({...g,pOT_manual:false,pOT:null}))};return u;})}
                   style={{fontSize:9,padding:"3px 8px",background:"transparent",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-secondary)",cursor:"pointer"}}
@@ -4202,9 +4272,10 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
           {mkt==="otscorer"&&(()=>{
             // v49: P(player scores first OT goal in series) approximation.
             // Model: P(any OT in series) × team OT-win share × player goal share × role weight.
-            // v49b: use SHRUNK g_pg (via shrinkRate) to handle low-sample skaters, and exclude BOT6/D3/SCRATCHED
-            //       from the OT scorer pool since OT goals are overwhelmingly scored by TOP6/MID6 forwards and top D.
-            const eligibleRoles = new Set(["TOP6","MID6","ACTIVE","D1","D2"]);
+            // v50: Playoff OT is continuous — ALL active skaters can score.
+            //      Weight by role (TOP6 > MID6 > BOT6; D1 > D2 > D3) but never exclude.
+            //      Use shrunk goal rate so low-sample guys aren't inflated.
+            const eligibleRoles = new Set(["TOP6","MID6","BOT6","ACTIVE","D1","D2","D3"]);
             const shrunkGoalRate = (p) => shrinkRate(p.g_pg || 0, p.gp || 0, "g");
             const teamGoalRate = (team) => {
               const pool = (players||[]).filter(p => p.team === team && eligibleRoles.has(p.lineRole));
@@ -4235,26 +4306,33 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             const rows = pool.map(p => {
               const teamRate = p.team === s.homeAbbr ? homeG : awayG;
               const share = teamRate > 0 ? shrunkGoalRate(p) / teamRate : 0;
-              // Role multiplier: top-6 forwards over-represented in OT; top-D slightly boosted; mid/bottom dampened
-              const roleMult = p.lineRole === "TOP6" ? 1.20 : p.lineRole === "MID6" ? 0.90 : p.lineRole === "D1" ? 1.00 : p.lineRole === "D2" ? 0.70 : 0.60;
+              // Role multiplier — everyone has a non-zero chance (playoff OT is continuous)
+              // but top-line forwards and top-pair D are meaningfully more likely.
+              const roleMult =
+                p.lineRole === "TOP6"   ? 1.20 :
+                p.lineRole === "MID6"   ? 0.95 :
+                p.lineRole === "BOT6"   ? 0.70 :
+                p.lineRole === "ACTIVE" ? 0.85 :
+                p.lineRole === "D1"     ? 1.00 :
+                p.lineRole === "D2"     ? 0.75 :
+                p.lineRole === "D3"     ? 0.55 : 0.60;
               const teamOT = p.team === s.homeAbbr ? seriesTeamOT.home : seriesTeamOT.away;
               const rawP = Math.min(0.9999, share * roleMult * teamOT);
               return {...p, share, teamOT, rawP};
-            }).filter(r => r.rawP > 0.001)
+            }).filter(r => r.rawP > 0.0005)
               .sort((a,b)=> b.rawP - a.rawP);
             const totalRaw = rows.reduce((s,r)=>s+r.rawP, 0);
             const or = margins.otScorer || 1.20;
             const scale = totalRaw > 0 ? (pSeriesHasOT / totalRaw) : 1;
             const adjusted = rows.map(r => ({...r, adjP: Math.min(0.9999, r.rawP * scale * or)}));
             return <Card>
-              <SH title="Player to Score OT Goal in Series" sub={`Any OT in series: ${(pSeriesHasOT*100).toFixed(1)}% · OR: ${or}x · Top 30 shown`}/>
+              <SH title="Player to Score OT Goal in Series" sub={`Any OT in series: ${(pSeriesHasOT*100).toFixed(1)}% · OR: ${or}x · Top 40 shown`}/>
               <div style={{marginBottom:8,fontSize:11,color:"var(--color-text-tertiary)"}}>
-                P(OT across series) × team OT-win share × shrunk goal share × role weight.
-                Pool: TOP6/MID6/ACTIVE/D1/D2 only (BOT6/D3/SCRATCHED excluded).
+                Playoff OT is continuous — every active skater can score. Shrunk goal share × role weight × team OT-win share × P(OT in series).
               </div>
               <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
                 <TH cols={["Player","Team","Role","Share",...(showTrue?["True%"]:[]),"Adj%","American","Decimal"]}/>
-                <tbody>{adjusted.slice(0,30).map((r,i)=>(
+                <tbody>{adjusted.slice(0,40).map((r,i)=>(
                   <tr key={r.name+r.team} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)")}}>
                     <td style={{padding:"3px 8px"}}>{r.name}</td>
                     <td style={{padding:"3px 8px"}}><span style={{fontSize:9,padding:"1px 4px",borderRadius:2,background:"rgba(59,130,246,0.12)",color:"#60a5fa"}}>{r.team}</span></td>
@@ -4472,7 +4550,7 @@ function PropsPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,p
       <SH title={title} sub={`OR: ${statMargin}x · λ from reg season × ${globals.rateDiscount} discount`}/>
       <Seg options={STATS.map(s=>({id:s.id,label:s.label}))} value={stat} onChange={v=>{setStat(v);setLine(mode==="binary"?1:v==="sog"?2.5:v==="hit"?2.5:0.5);}} accent="#1d4ed8"/>
       <label style={{fontSize:11,color:"var(--color-text-secondary)",display:"flex",gap:5,alignItems:"center"}}>
-        {mode==="binary"?"Min:":"Line:"} <LazyNI value={line} onCommit={setLine} min={mode==="binary"?1:0.5} max={50} step={mode==="binary"?1:0.5} style={{width:48}}/>
+        {mode==="binary"?"Min:":"Line:"} <LazyNI value={line} onCommit={setLine} min={mode==="binary"?1:0.5} max={50} step={mode==="binary"?1:0.5} style={{width:48}} showSpinner={false}/>
       </label>
       {mode==="ou" && <>
         <button onClick={()=>{
@@ -4854,7 +4932,7 @@ function SeriesLeaderPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalen
       <SH title="Series Stat Leader" sub={`${engineLabel} · OR: ${or}x · Temp: ${temp}`}/>
       <Seg options={SERIES_LEADER_STATS.map(s=>({id:s.id,label:s.label}))} value={stat} onChange={setStat} accent="#7c3aed"/>
       <label style={{fontSize:11,color:"var(--color-text-secondary)",display:"flex",gap:4,alignItems:"center"}}>
-        Temp: <LazyNI value={temp} onCommit={v=>setCustomTemps(t=>({...t,[stat]:v}))} min={0.5} max={5} step={0.1} style={{width:46}}/>
+        Temp: <LazyNI value={temp} onCommit={v=>setCustomTemps(t=>({...t,[stat]:v}))} min={0.5} max={5} step={0.1} style={{width:46}} showSpinner={false}/>
       </label>
       {simResult && <span style={{fontSize:9,padding:"2px 6px",borderRadius:3,background:"rgba(124,58,237,0.15)",color:"#a78bfa",letterSpacing:0.4,fontWeight:500}}>UNIFIED</span>}
     </div>
@@ -6210,14 +6288,6 @@ function UploadTab({players,setPlayers,goalies,setGoalies,exportState,importStat
           </div>}
         </Card>
 
-        <Card style={{marginBottom:14}}>
-          <SH title="Supabase Sync"/>
-          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}><SyncBadge status={syncStatus}/><span style={{fontSize:10,color:"var(--color-text-tertiary)"}}>{SUPABASE_ENABLED?"Auto-syncing":"Not configured"}</span></div>
-          <div style={{fontSize:9,color:"var(--color-text-tertiary)",padding:"6px 8px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",fontFamily:"var(--font-mono)"}}>
-            CREATE TABLE pricer_state (key TEXT PRIMARY KEY, value JSONB, updated_at TIMESTAMPTZ);
-          </div>
-        </Card>
-
         <Card style={{border:"0.5px solid rgba(239,68,68,0.25)"}}>
           <SH title="Reset Playoff Data" sub="Wipe all entered game results + player playoff stats. Keeps team abbreviations, win%, and expected total inputs."/>
           <button onClick={()=>{
@@ -6543,7 +6613,12 @@ function RolesTab({players,setPlayers,dark}) {
             return (
             <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",
               background:p.lineRole==="SCRATCHED"?(dark?"rgba(239,68,68,0.06)":"rgba(239,68,68,0.04)"):i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)")}}>
-              <td style={{padding:"3px 8px",opacity:p.lineRole==="SCRATCHED"?0.45:1}}>{p.name}</td>
+              <td style={{padding:"3px 8px",opacity:p.lineRole==="SCRATCHED"?0.45:1}}>
+                {p.name}
+                {(p.pG||p.pA) ? <span style={{marginLeft:8,fontSize:9,padding:"1px 5px",borderRadius:3,background:"rgba(34,197,94,0.15)",color:"#4ade80",fontFamily:"var(--font-mono)"}} title="Current playoff G-A-Pts">
+                  {p.pG||0}G-{p.pA||0}A
+                </span> : null}
+              </td>
               <td style={{padding:"3px 8px",textAlign:"right"}}><span style={{fontSize:9,padding:"1px 4px",borderRadius:2,background:"rgba(59,130,246,0.12)",color:"#60a5fa"}}>{p.team}</span></td>
               <td style={{padding:"3px 8px",textAlign:"right",color:"var(--color-text-secondary)"}}>{p.pos}</td>
               {["gp","g","a","pts","sog","hit","blk"].map(f=><td key={f} style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{Math.round(p[f]||0)}</td>)}
@@ -6575,7 +6650,32 @@ function RolesTab({players,setPlayers,dark}) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // SETTINGS TAB
 // ═══════════════════════════════════════════════════════════════════════════════
-function SettingsTab({globals,setGlobals,margins,setMargins,showTrue,setShowTrue,showDec,setShowDec,dark}) {
+function SettingsTab({globals,setGlobals,margins,setMargins,showTrue,setShowTrue,showDec,setShowDec,doPush,doPull,lastPushedAt,lastPulledAt,cloudInfo,syncStatus,dark}) {
+  // v52: Cloud sync config (URL, key, device label) lives in localStorage via getSbConfig/setSbConfig.
+  const [cfg, setCfg] = useState(() => getSbConfig());
+  const [status, setStatus] = useState(null);
+  const saveCfg = (patch) => { const next = {...cfg, ...patch}; setCfg(next); setSbConfig(next); };
+  const pushNow = async () => {
+    setStatus({kind:"info",msg:"Pushing…"});
+    const r = await doPush();
+    setStatus(r.ok ? {kind:"ok",msg:`Pushed at ${new Date(r.at).toLocaleTimeString()}`} : {kind:"err",msg:r.error});
+  };
+  const pullNow = async () => {
+    if (!window.confirm("Pull from cloud will OVERWRITE your current local state with the latest cloud copy. Continue?")) return;
+    setStatus({kind:"info",msg:"Pulling…"});
+    const r = await doPull();
+    setStatus(r.ok ? {kind:"ok",msg:`Pulled cloud state from ${r.device||"?"} (${r.cloudAt?new Date(r.cloudAt).toLocaleString():"unknown time"})`} : {kind:"err",msg:r.error});
+  };
+  const fmtTime = (iso) => {
+    if (!iso) return "never";
+    try { const d = new Date(iso); return d.toLocaleString(); } catch { return "?"; }
+    };
+  const minutesAgo = (iso) => {
+    if (!iso) return null;
+    try { return Math.round((Date.now() - new Date(iso).getTime()) / 60000); } catch { return null; }
+  };
+  const cloudNewer = cloudInfo && lastPulledAt && new Date(cloudInfo.updated_at) > new Date(lastPulledAt);
+  const enabled = isSbEnabled();
   return (
     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:16,alignItems:"start"}}>
       <Card>
@@ -6606,37 +6706,79 @@ function SettingsTab({globals,setGlobals,margins,setMargins,showTrue,setShowTrue
       </Card>
 
       <Card>
-        <SH title="Supabase Sync"/>
-        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
-          <span style={{fontSize:11,color:"var(--color-text-secondary)"}}>Status:</span>
-          <SyncBadge status={SUPABASE_ENABLED?"ok":"idle"}/>
+        <SH title="Cloud Sync (Push / Pull)"/>
+        {/* Config */}
+        <div style={{marginBottom:10}}>
+          <label style={{fontSize:10,color:"var(--color-text-secondary)",display:"block",marginBottom:2}}>Supabase URL</label>
+          <input type="text" value={cfg.url||""} onChange={e=>saveCfg({url:e.target.value})} placeholder="https://xxxxx.supabase.co"
+            style={{width:"100%",padding:"5px 8px",fontSize:11,fontFamily:"var(--font-mono)",background:"var(--color-background-secondary)",
+              border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",color:"var(--color-text-primary)",boxSizing:"border-box"}}/>
         </div>
-        <div style={{fontSize:10,color:"var(--color-text-tertiary)",lineHeight:1.9,padding:"10px 12px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",marginBottom:10}}>
-          <strong style={{color:"var(--color-text-secondary)",display:"block",marginBottom:6}}>One-time setup:</strong>
-          <span style={{display:"block",marginBottom:4}}>1. Create free project at <strong>supabase.com</strong></span>
-          <span style={{display:"block",marginBottom:4}}>2. Go to SQL Editor and run:</span>
-          <pre style={{margin:"4px 0 8px",padding:"6px 8px",background:"var(--color-background-primary)",borderRadius:4,fontSize:9,overflowX:"auto",border:"0.5px solid var(--color-border-tertiary)"}}>
+        <div style={{marginBottom:10}}>
+          <label style={{fontSize:10,color:"var(--color-text-secondary)",display:"block",marginBottom:2}}>Anon Public Key</label>
+          <input type="password" value={cfg.key||""} onChange={e=>saveCfg({key:e.target.value})} placeholder="eyJhbGc..."
+            style={{width:"100%",padding:"5px 8px",fontSize:11,fontFamily:"var(--font-mono)",background:"var(--color-background-secondary)",
+              border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",color:"var(--color-text-primary)",boxSizing:"border-box"}}/>
+        </div>
+        <div style={{marginBottom:12}}>
+          <label style={{fontSize:10,color:"var(--color-text-secondary)",display:"block",marginBottom:2}}>Device Label (e.g. "laptop", "phone")</label>
+          <input type="text" value={cfg.device||""} onChange={e=>saveCfg({device:e.target.value})} placeholder="laptop"
+            style={{width:"100%",padding:"5px 8px",fontSize:11,background:"var(--color-background-secondary)",
+              border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",color:"var(--color-text-primary)",boxSizing:"border-box"}}/>
+        </div>
+
+        {/* Actions */}
+        <div style={{display:"flex",gap:8,marginBottom:10}}>
+          <button onClick={pushNow} disabled={!enabled||syncStatus==="syncing"}
+            style={{flex:1,padding:"8px 12px",fontSize:12,fontWeight:500,borderRadius:"var(--border-radius-md)",border:"none",
+              background:enabled?"#1d4ed8":"rgba(100,116,139,0.2)",color:enabled?"#fff":"var(--color-text-tertiary)",
+              cursor:enabled&&syncStatus!=="syncing"?"pointer":"not-allowed"}}>
+            ⬆ Push to Cloud
+          </button>
+          <button onClick={pullNow} disabled={!enabled||syncStatus==="syncing"}
+            style={{flex:1,padding:"8px 12px",fontSize:12,fontWeight:500,borderRadius:"var(--border-radius-md)",border:"none",
+              background:enabled?"#7c3aed":"rgba(100,116,139,0.2)",color:enabled?"#fff":"var(--color-text-tertiary)",
+              cursor:enabled&&syncStatus!=="syncing"?"pointer":"not-allowed"}}>
+            ⬇ Pull from Cloud
+          </button>
+        </div>
+
+        {/* Status lines */}
+        {status && <div style={{padding:"6px 10px",fontSize:11,borderRadius:"var(--border-radius-md)",marginBottom:8,
+          background:status.kind==="ok"?"rgba(34,197,94,0.12)":status.kind==="err"?"rgba(239,68,68,0.12)":"rgba(59,130,246,0.12)",
+          color:status.kind==="ok"?"#4ade80":status.kind==="err"?"#f87171":"#60a5fa"}}>{status.msg}</div>}
+
+        <div style={{fontSize:10,color:"var(--color-text-tertiary)",lineHeight:1.7,padding:"8px 10px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",marginBottom:10}}>
+          <div><strong style={{color:"var(--color-text-secondary)"}}>Last pushed:</strong> {fmtTime(lastPushedAt)}{minutesAgo(lastPushedAt)!=null?` (${minutesAgo(lastPushedAt)}m ago)`:""}</div>
+          <div><strong style={{color:"var(--color-text-secondary)"}}>Last pulled:</strong> {fmtTime(lastPulledAt)}{minutesAgo(lastPulledAt)!=null?` (${minutesAgo(lastPulledAt)}m ago)`:""}</div>
+          {cloudInfo && <div><strong style={{color:"var(--color-text-secondary)"}}>Cloud latest:</strong> {fmtTime(cloudInfo.updated_at)} from <em>{cloudInfo.device||"?"}</em></div>}
+          {cloudNewer && <div style={{marginTop:4,color:"#f59e0b",fontWeight:500}}>⚠ Cloud is newer than your last Pull — consider pulling</div>}
+        </div>
+
+        {/* Setup notes */}
+        <details style={{marginTop:8}}>
+          <summary style={{cursor:"pointer",fontSize:10,color:"var(--color-text-tertiary)"}}>One-time setup instructions</summary>
+          <div style={{fontSize:10,color:"var(--color-text-tertiary)",lineHeight:1.9,padding:"8px 10px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",marginTop:6}}>
+            <div style={{marginBottom:4}}>1. Create a free project at <strong>supabase.com</strong></div>
+            <div style={{marginBottom:4}}>2. SQL Editor → run:</div>
+            <pre style={{margin:"4px 0 8px",padding:"6px 8px",background:"var(--color-background-primary)",borderRadius:4,fontSize:9,overflowX:"auto",border:"0.5px solid var(--color-border-tertiary)"}}>
 {`CREATE TABLE pricer_state (
   key TEXT PRIMARY KEY,
   value JSONB,
+  device TEXT,
   updated_at TIMESTAMPTZ
 );
 ALTER TABLE pricer_state ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "anon_rw" ON pricer_state
   FOR ALL TO anon USING (true) WITH CHECK (true);`}
-          </pre>
-          <span style={{display:"block",marginBottom:2}}>3. Copy <strong>Project URL</strong> + <strong>anon public key</strong> from Settings → API</span>
-          <span style={{display:"block"}}>4. Set <code style={{fontSize:9}}>SUPABASE_URL</code> + <code style={{fontSize:9}}>SUPABASE_KEY</code> at top of the JSX file</span>
-        </div>
-        <div style={{padding:"8px 12px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)"}}>
-          <SH title="Model Reference"/>
-          <div style={{fontSize:10,color:"var(--color-text-tertiary)",lineHeight:1.9}}>
-            <strong style={{color:"var(--color-text-secondary)"}}>Rate discount:</strong> 1.0 pre-playoffs → 0.85 default → trends to 1.0 as actuals fill<br/>
-            <strong style={{color:"var(--color-text-secondary)"}}>Power factor &gt;1:</strong> squeezes longshots, more overround at the tail<br/>
-            <strong style={{color:"var(--color-text-secondary)"}}>Dispersion r:</strong> NB vs Poisson — higher r = fatter goal tail<br/>
-            <strong style={{color:"var(--color-text-secondary)"}}>Sync:</strong> debounced 3s after each change, all state keys stored in Supabase
+            </pre>
+            <div style={{marginBottom:4}}>3. Settings → API → copy <strong>Project URL</strong> and <strong>anon public</strong> key</div>
+            <div style={{marginBottom:4}}>4. Paste into the fields above. Device label is optional — helps identify which device last pushed.</div>
+            <div style={{marginTop:8,paddingTop:8,borderTop:"0.5px solid var(--color-border-tertiary)",color:"#60a5fa"}}>
+              <strong>Roadmap:</strong> Auto-sync (cloud-first with conflict resolution) is a future goal once the Push/Pull workflow is validated in practice.
+            </div>
           </div>
-        </div>
+        </details>
       </Card>
     </div>
   );
