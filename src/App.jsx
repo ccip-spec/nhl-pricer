@@ -1,6929 +1,1477 @@
-import { useState, useEffect, useCallback, useMemo, useRef, Fragment, Component } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { ComposedChart, Line, Scatter, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
+import { parseDraftText, resolveNames, convertToStorageFormat } from './draftParser.js';
 
-// ─── SUPABASE CONFIG ─────────────────────────────────────────────────────────
-// v52: Cloud sync is now configurable at runtime via Settings → Cloud Sync card.
-// Users enter their own Supabase URL + anon key (saved to localStorage).
-// This enables Push/Pull across devices without requiring code edits.
-// NOTE: Explicit Push/Pull model was chosen over auto-sync to avoid silent
-// data-loss scenarios (race conditions, offline sync failures, merge conflicts).
-// TODO (future): Add real-time auto-sync with conflict resolution once the
-//                Push/Pull flow is validated in practice.
-function getSbConfig() {
-  try {
-    const raw = localStorage.getItem("nhl_sb_config");
-    if (!raw) return { url: "", key: "", device: "" };
-    return JSON.parse(raw);
-  } catch { return { url: "", key: "", device: "" }; }
-}
-function setSbConfig(cfg) {
-  try { localStorage.setItem("nhl_sb_config", JSON.stringify(cfg)); } catch {}
-}
-function isSbEnabled() {
-  const c = getSbConfig();
-  return !!(c.url && c.key);
-}
-async function sbLoad(key) {
-  const cfg = getSbConfig();
-  if (!cfg.url || !cfg.key) return null;
-  try {
-    const r = await fetch(`${cfg.url}/rest/v1/pricer_state?key=eq.${encodeURIComponent(key)}&select=value,updated_at,device`, {
-      headers: { apikey: cfg.key, Authorization: `Bearer ${cfg.key}` }
-    });
-    const d = await r.json();
-    return d?.[0] ?? null;   // returns {value, updated_at, device} or null
-  } catch { return null; }
-}
-async function sbSave(key, value, device) {
-  const cfg = getSbConfig();
-  if (!cfg.url || !cfg.key) return false;
-  try {
-    const r = await fetch(`${cfg.url}/rest/v1/pricer_state`, {
-      method: "POST",
-      headers: { apikey: cfg.key, Authorization: `Bearer ${cfg.key}`,
-        "Content-Type": "application/json", Prefer: "resolution=merge-duplicates" },
-      body: JSON.stringify({ key, value, device: device || "unknown", updated_at: new Date().toISOString() })
-    });
-    return r.ok;
-  } catch { return false; }
+const LS_DATA_2025 = {"players":[{"name":"Christian McCaffrey","pos":"RB","team":"SF","fpts":428.6,"gp":17,"ppg":25.2,"weekly":[23.2,22.7,24.0,26.1,27.9,24.1,42.1,9.8,37.3,17.6,35.1,27.2,17.4,null,15.7,35.6,31.1,11.7],"posRank":"RB1","adp":7,"round":1,"actualFinish":"RB1","beat":3,"adpPosRank":"RB4","adpHistory":[12,12,10,8,8,8,8.1,8,8.1,7.3,7.2,7.1,6.9,7],"draftedPct":11.0,"draftedCount":11},{"name":"Puka Nacua","pos":"WR","team":"LA","fpts":394.0,"gp":16,"ppg":24.6,"weekly":[26.1,27.6,25.8,39.0,24.5,4.8,0,null,22.8,17.4,15.3,16.7,13.2,38.7,30.9,49.5,15.7,26.0],"posRank":"WR1","adp":13.5,"round":2,"actualFinish":"WR1","beat":6,"adpPosRank":"WR7","adpHistory":[10,10,9,7,7,7,7.9,8,7.9,9,9.1,11.1,13.1,13.5],"draftedPct":5.0,"draftedCount":5},{"name":"Bijan Robinson","pos":"RB","team":"ATL","fpts":392.8,"gp":17,"ppg":23.1,"weekly":[27.4,22.8,16.1,31.1,null,38.8,21.2,6.8,17.6,10.8,33.3,12.7,33.3,10.4,30.5,29.8,42.9,7.3],"posRank":"RB2","adp":2.4,"round":1,"actualFinish":"RB2","beat":-1,"adpPosRank":"RB1","adpHistory":[4,4,4,4,4,4,3.6,3.6,3.6,2.5,2.4,2.4,2.4,2.4],"draftedPct":11.0,"draftedCount":11},{"name":"Jaxon Smith-Njigba","pos":"WR","team":"SEA","fpts":387.9,"gp":17,"ppg":22.8,"weekly":[23.4,21.3,20.6,13.0,30.2,33.2,29.3,null,25.0,20.3,23.6,40.1,4.3,28.1,21.3,23.6,16.2,14.4],"posRank":"WR2","adp":30.2,"round":3,"actualFinish":"WR2","beat":11,"adpPosRank":"WR13","adpHistory":[32,33,33,32,32,33,34.5,35,33.6,34,33.7,32.4,31.2,30.2],"draftedPct":10.0,"draftedCount":10},{"name":"Josh Allen","pos":"QB","team":"BUF","fpts":384.5,"gp":16,"ppg":24.0,"weekly":[41.8,11.8,23.0,25.9,21.4,17.4,null,23.2,28.8,24.3,47.7,10.1,17.7,35.8,24.5,6.9,24.2,0],"posRank":"QB1","adp":25.8,"round":3,"actualFinish":"QB1","beat":0,"adpPosRank":"QB1","adpHistory":[21,21,25,26,27,28,29.2,28.7,28.5,28.6,28.3,27.3,26.4,25.8],"draftedPct":8.0,"draftedCount":8},{"name":"Jahmyr Gibbs","pos":"RB","team":"DET","fpts":379.9,"gp":17,"ppg":22.3,"weekly":[15.0,19.4,26.9,17.7,16.7,7.5,39.8,null,5.8,41.2,22.6,58.4,11.6,37.0,9.8,22.8,7.4,20.3],"posRank":"RB3","adp":4.5,"round":1,"actualFinish":"RB3","beat":0,"adpPosRank":"RB3","adpHistory":[5,5,5,5,5,5,5.4,5.2,5.2,4.9,4.7,4.8,4.7,4.5],"draftedPct":7.0,"draftedCount":7},{"name":"Jonathan Taylor","pos":"RB","team":"IND","fpts":376.3,"gp":17,"ppg":22.1,"weekly":[12.8,32.5,35.8,14.6,29.6,26.7,34.2,40.4,7.7,52.6,null,8.6,15.1,12.4,13.1,16.9,17.4,5.9],"posRank":"RB4","adp":18.9,"round":2,"actualFinish":"RB4","beat":4,"adpPosRank":"RB8","adpHistory":[19,19,19,19,20,20,20.1,20,20.1,20.2,20.2,20.3,20.3,18.9],"draftedPct":5.0,"draftedCount":5},{"name":"Matthew Stafford","pos":"QB","team":"LA","fpts":373.3,"gp":17,"ppg":22.0,"weekly":[13.6,18.3,14.8,30.4,29.6,10.3,27.4,null,26.8,26.9,13.2,22.9,14.6,23.2,24.9,33.9,15.8,26.7],"posRank":"QB2","adp":166.2,"round":14,"actualFinish":"QB2","beat":25,"adpPosRank":"QB27","adpHistory":[145,144,142,144,144,142,142.2,141.1,142.2,152.4,156.3,161.8,169.2,166.2],"draftedPct":8.0,"draftedCount":8},{"name":"Drake Maye","pos":"QB","team":"NE","fpts":361.9,"gp":17,"ppg":21.3,"weekly":[16.8,26.3,21.2,23.2,12.1,25.2,23.1,27.3,18.4,19.1,15.4,17.0,20.5,null,21.5,26.7,32.4,15.7],"posRank":"QB3","adp":113.4,"round":10,"actualFinish":"QB3","beat":12,"adpPosRank":"QB15","adpHistory":[122,124,122,118,118,119,119.3,118.5,117.3,116.2,116.9,112,112.5,113.4],"draftedPct":8.0,"draftedCount":8},{"name":"Trevor Lawrence","pos":"QB","team":"JAX","fpts":354.1,"gp":17,"ppg":20.8,"weekly":[11.3,21.2,8.8,11.7,28.2,19.2,17.6,null,22.2,11.8,16.0,21.1,19.7,19.4,47.3,31.2,24.1,23.3],"posRank":"QB4","adp":131.9,"round":11,"actualFinish":"QB4","beat":16,"adpPosRank":"QB20","adpHistory":[126,131,130,129,132,131,132.3,131.8,131.7,130.1,131.1,130.7,131,131.9],"draftedPct":9.0,"draftedCount":9},{"name":"Amon-Ra St. Brown","pos":"WR","team":"DET","fpts":339.0,"gp":17,"ppg":19.9,"weekly":[8.5,42.2,20.7,26.0,21.0,13.7,20.6,null,18.7,16.8,6.2,32.9,0.0,15.2,44.4,9.4,14.8,27.9],"posRank":"WR3","adp":10.7,"round":1,"actualFinish":"WR3","beat":3,"adpPosRank":"WR6","adpHistory":[9,9,8,10,11,11,11.3,10.7,10.6,10.7,10.9,11.4,10.5,10.7],"draftedPct":5.0,"draftedCount":5},{"name":"Dak Prescott","pos":"QB","team":"DAL","fpts":337.8,"gp":17,"ppg":19.9,"weekly":[7.8,26.1,12.0,34.0,28.3,22.3,23.3,8.6,16.4,null,25.3,31.1,22.6,21.4,12.0,19.2,25.7,1.7],"posRank":"QB5","adp":90.2,"round":8,"actualFinish":"QB5","beat":4,"adpPosRank":"QB9","adpHistory":[121,106,107,108,108,108,106.4,102,98.4,94.9,92.5,91.9,91.5,90.2],"draftedPct":8.0,"draftedCount":8},{"name":"Ja'Marr Chase","pos":"WR","team":"CIN","fpts":335.6,"gp":16,"ppg":21.0,"weekly":[4.6,39.5,9.9,7.3,32.0,25.1,41.1,21.1,20.1,null,6.0,0,21.0,10.2,26.2,22.9,25.0,23.6],"posRank":"WR4","adp":1.1,"round":1,"actualFinish":"WR4","beat":-3,"adpPosRank":"WR1","adpHistory":[1.1,1,1,1,1,1,1.1,1.1,1.1,1.1,1.1,1.1,1.1,1.1],"draftedPct":9.0,"draftedCount":9},{"name":"De'Von Achane","pos":"RB","team":"MIA","fpts":334.8,"gp":16,"ppg":20.9,"weekly":[16.5,26.2,16.1,17.1,16.6,34.0,12.8,20.1,16.6,43.5,24.5,null,22.4,17.5,18.7,18.0,14.2,0],"posRank":"RB5","adp":20,"round":2,"actualFinish":"RB5","beat":4,"adpPosRank":"RB9","adpHistory":[17,17,17,18,18,16,14.4,14.5,14.4,14.3,14.4,14.1,17.3,20],"draftedPct":14.0,"draftedCount":14},{"name":"James Cook","pos":"RB","team":"BUF","fpts":332.2,"gp":17,"ppg":19.5,"weekly":[21.2,29.5,23.8,25.5,4.9,8.7,null,36.6,16.5,11.7,20.4,24.9,22.7,12.1,34.1,29.4,8.7,1.5],"posRank":"RB6","adp":32.4,"round":3,"actualFinish":"RB6","beat":8,"adpPosRank":"RB14","adpHistory":[35,35,38,39,39,39,39.5,39.7,40.4,39.1,39,39.3,32.5,32.4],"draftedPct":5.0,"draftedCount":5},{"name":"Jared Goff","pos":"QB","team":"DET","fpts":328.1,"gp":17,"ppg":19.3,"weekly":[11.9,37.0,12.7,13.7,21.1,16.8,12.3,null,19.4,27.8,13.1,18.2,20.6,19.2,28.5,29.5,7.1,19.2],"posRank":"QB6","adp":105.2,"round":9,"actualFinish":"QB6","beat":6,"adpPosRank":"QB12","adpHistory":[90,93,93,97,99,100,102.9,101.1,102.3,102.5,102.4,103.1,105,105.2],"draftedPct":6.0,"draftedCount":6},{"name":"Caleb Williams","pos":"QB","team":"CHI","fpts":327.3,"gp":17,"ppg":19.3,"weekly":[24.2,18.0,29.1,12.8,null,19.9,5.7,12.8,38.7,25.1,10.3,22.7,10.5,15.9,19.0,21.0,26.0,15.6],"posRank":"QB7","adp":111.3,"round":10,"actualFinish":"QB7","beat":7,"adpPosRank":"QB14","adpHistory":[94,98,101,102,102,106,105.9,107,106.7,109.1,110.4,112.8,111.8,111.3],"draftedPct":7.0,"draftedCount":7},{"name":"Trey McBride","pos":"TE","team":"ARI","fpts":324.9,"gp":17,"ppg":19.1,"weekly":[12.1,13.8,15.3,12.2,9.1,21.2,29.4,null,16.5,30.7,30.5,16.9,22.2,10.8,40.4,6.7,23.6,13.5],"posRank":"TE1","adp":25.4,"round":3,"actualFinish":"TE1","beat":1,"adpPosRank":"TE2","adpHistory":[22,24,23,23,24,24,25.2,25.5,25,25.7,25.8,25.2,25.3,25.4],"draftedPct":11.0,"draftedCount":11},{"name":"Bo Nix","pos":"QB","team":"DEN","fpts":321.8,"gp":17,"ppg":18.9,"weekly":[9.8,21.2,13.4,29.7,15.9,13.4,36.0,24.8,17.5,7.8,12.6,null,20.4,16.0,32.1,20.2,20.5,10.5],"posRank":"QB8","adp":85.4,"round":8,"actualFinish":"QB8","beat":0,"adpPosRank":"QB8","adpHistory":[84,89,90,91,91,91,91.8,90.6,90.6,91,89.2,88.2,88.1,85.4],"draftedPct":2.0,"draftedCount":2},{"name":"Jalen Hurts","pos":"QB","team":"PHI","fpts":313.0,"gp":16,"ppg":19.6,"weekly":[24.3,11.5,30.0,19.4,19.5,21.6,27.0,25.4,null,13.0,14.5,30.9,18.3,6.4,22.9,19.4,8.9,0],"posRank":"QB9","adp":43.5,"round":4,"actualFinish":"QB9","beat":-5,"adpPosRank":"QB4","adpHistory":[46,47,47,47,46,45,44.4,44.1,45,44.4,43.4,43.2,44.2,43.5],"draftedPct":11.0,"draftedCount":11},{"name":"Justin Herbert","pos":"QB","team":"LAC","fpts":311.8,"gp":16,"ppg":19.5,"weekly":[30.9,19.8,18.6,12.5,15.6,18.8,32.9,26.3,28.7,14.7,4.3,null,13.8,14.2,11.4,33.2,16.1,0],"posRank":"QB10","adp":120.4,"round":11,"actualFinish":"QB10","beat":6,"adpPosRank":"QB16","adpHistory":[109,112,114,117,117,117,118.2,117.5,117.2,118.4,117.9,117.7,119.1,120.4],"draftedPct":6.0,"draftedCount":6},{"name":"Derrick Henry","pos":"RB","team":"BAL","fpts":306.5,"gp":17,"ppg":18.0,"weekly":[33.2,2.3,11.7,7.8,9.3,17.0,null,19.1,16.1,11.4,23.2,22.8,17.4,11.2,13.0,26.8,48.6,15.6],"posRank":"RB7","adp":10.9,"round":1,"actualFinish":"RB7","beat":-2,"adpPosRank":"RB5","adpHistory":[11,11,12,12,13,13,12.7,12.8,12.8,12.8,12.7,11.7,10.9,10.9],"draftedPct":5.0,"draftedCount":5},{"name":"George Pickens","pos":"WR","team":"DAL","fpts":304.9,"gp":17,"ppg":17.9,"weekly":[6.0,17.8,17.8,36.4,13.7,34.8,12.2,14.8,13.9,null,32.4,32.6,14.8,8.7,6.3,29.0,11.8,1.9],"posRank":"WR5","adp":48.8,"round":5,"actualFinish":"WR5","beat":19,"adpPosRank":"WR24","adpHistory":[88,57,57,55,54,54,53.7,52.8,52.3,50.4,50.1,49.4,49.8,48.8],"draftedPct":14.0,"draftedCount":14},{"name":"Patrick Mahomes","pos":"QB","team":"KC","fpts":298.7,"gp":14,"ppg":21.3,"weekly":[26.0,23.1,13.2,27.3,30.7,31.5,26.2,25.0,9.5,null,14.3,19.1,29.4,9.3,14.1,0,0,0],"posRank":"QB11","adp":73.1,"round":7,"actualFinish":"QB11","beat":-5,"adpPosRank":"QB6","adpHistory":[63,67,70,71,70,71,71.3,69.4,70.6,72.4,72.4,73.6,73.8,73.1],"draftedPct":2.0,"draftedCount":2},{"name":"Chase Brown","pos":"RB","team":"CIN","fpts":289.6,"gp":17,"ppg":17.0,"weekly":[13.1,8.5,6.0,10.1,11.8,6.9,15.0,25.5,19.2,null,18.7,18.0,18.3,18.5,16.0,32.9,32.1,19.0],"posRank":"RB8","adp":15.9,"round":2,"actualFinish":"RB8","beat":-1,"adpPosRank":"RB7","adpHistory":[31,31,30,28,28,27,27.7,27.6,26.4,23.9,21.4,18.7,16.8,15.9],"draftedPct":6.0,"draftedCount":6},{"name":"Baker Mayfield","pos":"QB","team":"TB","fpts":287.9,"gp":17,"ppg":16.9,"weekly":[22.6,19.9,17.7,19.9,27.7,19.6,12.1,5.1,null,22.9,18.8,5.5,14.5,12.1,18.2,13.7,23.4,14.2],"posRank":"QB12","adp":80.9,"round":7,"actualFinish":"QB12","beat":-5,"adpPosRank":"QB7","adpHistory":[72,79,79,81,82,82,82.3,82.3,82.4,83.4,85.5,82.1,81,80.9],"draftedPct":7.0,"draftedCount":7},{"name":"Chris Olave","pos":"WR","team":"NO","fpts":278.0,"gp":16,"ppg":17.4,"weekly":[12.4,11.4,15.7,10.0,12.9,15.8,26.8,14.0,8.7,24.4,null,16.0,14.7,6.0,20.5,39.8,28.9,0],"posRank":"WR6","adp":77.8,"round":7,"actualFinish":"WR6","beat":35,"adpPosRank":"WR41","adpHistory":[71,75,74,72,72,72,71.3,72.5,70.8,68.3,68.7,75.3,77.2,77.8],"draftedPct":16.0,"draftedCount":16},{"name":"Kyren Williams","pos":"RB","team":"LA","fpts":268.3,"gp":17,"ppg":15.8,"weekly":[13.9,10.0,19.2,11.4,32.1,16.7,8.5,null,20.4,22.4,16.6,5.8,13.2,17.7,21.8,11.5,16.0,11.1],"posRank":"RB9","adp":28.3,"round":3,"actualFinish":"RB9","beat":3,"adpPosRank":"RB12","adpHistory":[29,29,32,33,33,35,33.3,32.5,31.9,31.9,31.7,29.2,28.4,28.3]},{"name":"Travis Etienne","pos":"RB","team":"JAX","fpts":259.9,"gp":17,"ppg":15.3,"weekly":[21.6,16.9,11.6,22.5,8.8,9.5,6.5,null,16.5,15.7,19.3,20.6,5.1,21.2,31.5,16.6,11.2,4.8],"posRank":"RB10","actualFinish":"RB10","adpHistory":[116,118,118,112,109,104,101.2,99.9,96.2,97.8,100.1,102,97.8,100.3],"draftedPct":14.0,"draftedCount":14},{"name":"Sam Darnold","pos":"QB","team":"SEA","fpts":257.4,"gp":17,"ppg":15.1,"weekly":[6.4,17.8,16.7,16.1,31.6,20.0,10.6,null,31.2,7.9,8.3,17.7,4.1,23.3,11.3,17.5,8.1,8.8],"posRank":"QB13","adp":163.3,"round":14,"actualFinish":"QB13","beat":13,"adpPosRank":"QB26","adpHistory":[158,159,160,164,164,162,161.9,162,162.3,164.9,166.4,166.5,163,163.3],"draftedPct":4.0,"draftedCount":4},{"name":"Zay Flowers","pos":"WR","team":"BAL","fpts":255.3,"gp":17,"ppg":15.0,"weekly":[31.1,14.9,3.3,14.4,12.2,9.6,null,14.1,11.4,12.1,11.3,11.9,1.6,23.6,15.8,22.2,13.0,32.8],"posRank":"WR7","adp":60.5,"round":6,"actualFinish":"WR7","beat":24,"adpPosRank":"WR31","adpHistory":[51,56,54,54,53,53,53.5,54.8,54.8,55.7,56.9,57.7,59.1,60.5],"draftedPct":8.0,"draftedCount":8},{"name":"Ashton Jeanty","pos":"RB","team":"LV","fpts":252.1,"gp":17,"ppg":14.8,"weekly":[12.0,7.4,6.3,37.5,15.9,16.6,4.4,null,19.9,15.3,9.4,24.8,12.1,5.8,8.2,34.8,9.3,12.4],"posRank":"RB11","adp":12.3,"round":2,"actualFinish":"RB11","beat":-5,"adpPosRank":"RB6","adpHistory":[7,7,7,9,9,10,11.2,11.9,12.5,12.4,12.1,14.2,13,12.3],"draftedPct":4.0,"draftedCount":4},{"name":"Javonte Williams","pos":"RB","team":"DAL","fpts":250.8,"gp":16,"ppg":15.7,"weekly":[20.4,25.0,13.2,19.0,29.9,8.4,21.8,17.9,8.3,null,10.3,12.1,17.0,14.7,15.1,6.3,11.4,0],"posRank":"RB12","adp":116.2,"round":10,"actualFinish":"RB12","beat":24,"adpPosRank":"RB36","adpHistory":[120,116,112,115,120,121,120.7,121.3,118.8,117.8,122.5,121.8,118,116.2],"draftedPct":14.0,"draftedCount":14},{"name":"Jacoby Brissett","pos":"QB","team":"ARI","fpts":249.4,"gp":14,"ppg":17.8,"weekly":[0,0.2,0,0,0.0,24.7,20.8,null,24.8,19.4,26.9,21.7,23.6,20.0,21.6,11.6,16.5,17.6],"posRank":"QB14","actualFinish":"QB14"},{"name":"Jaxson Dart","pos":"QB","team":"NYG","fpts":246.5,"gp":14,"ppg":17.6,"weekly":[0,-0.3,0.3,19.8,18.6,23.6,29.4,19.4,27.2,27.3,0,0,11.6,null,23.1,1.0,25.1,20.4],"posRank":"QB15","adp":189.8,"round":16,"actualFinish":"QB15","beat":15,"adpPosRank":"QB30","adpHistory":[190,195,195,209,208,211,212,212.2,211.8,216.8,217.4,213.6,198,189.8],"draftedPct":10.0,"draftedCount":10},{"name":"Jordan Love","pos":"QB","team":"GB","fpts":245.3,"gp":15,"ppg":16.4,"weekly":[15.9,20.9,12.1,30.3,null,16.0,13.4,29.3,10.0,8.8,15.7,7.1,25.8,20.3,15.9,3.8,0,0],"posRank":"QB16","adp":130.6,"round":11,"actualFinish":"QB16","beat":3,"adpPosRank":"QB19","adpHistory":[117,121,120,123,124,124,124,123.4,122,121.7,122.7,121.3,130,130.6],"draftedPct":2.0,"draftedCount":2},{"name":"Daniel Jones","pos":"QB","team":"IND","fpts":241.4,"gp":13,"ppg":18.6,"weekly":[29.5,25.8,15.8,12.4,16.7,23.5,20.2,23.2,22.1,17.5,null,16.8,16.1,1.8,0,0,0,0],"posRank":"QB17","adp":187.8,"round":16,"actualFinish":"QB17","beat":12,"adpPosRank":"QB29","adpHistory":[218,223,215,185,185,186,187.4,188.4,191.2,203.9,212,212.2,207.4,187.8],"draftedPct":4.0,"draftedCount":4},{"name":"Saquon Barkley","pos":"RB","team":"PHI","fpts":240.3,"gp":16,"ppg":15.0,"weekly":[18.4,17.4,9.5,17.4,17.8,8.7,5.2,36.4,null,13.1,10.0,13.4,5.6,21.2,17.2,22.2,6.8,0],"posRank":"RB13","adp":3.7,"round":1,"actualFinish":"RB13","beat":-11,"adpPosRank":"RB2","adpHistory":[2,2,2,2,2,2,2.8,2.8,3,3.4,3.6,3.6,3.7,3.7],"draftedPct":9.0,"draftedCount":9},{"name":"D'Andre Swift","pos":"RB","team":"CHI","fpts":239.6,"gp":16,"ppg":15.0,"weekly":[9.5,14.9,10.8,16.0,null,28.5,23.8,15.1,0,14.8,9.0,2.9,23.8,11.2,22.6,9.0,21.9,5.8],"posRank":"RB14","adp":64,"round":6,"actualFinish":"RB14","beat":8,"adpPosRank":"RB22","adpHistory":[86,83,82,75,73,70,68.2,67.3,66.5,64.3,64.3,64.3,64.5,64],"draftedPct":7.0,"draftedCount":7},{"name":"Josh Jacobs","pos":"RB","team":"GB","fpts":239.1,"gp":15,"ppg":15.9,"weekly":[14.0,14.4,12.4,31.7,null,32.0,18.8,13.5,20.0,20.7,4.0,0,10.1,17.2,23.2,5.8,1.3,0],"posRank":"RB15","adp":22.7,"round":2,"actualFinish":"RB15","beat":-4,"adpPosRank":"RB11","adpHistory":[24,23,22,22,23,23,24.1,24.1,23.2,23.9,24.3,23.4,23.2,22.7],"draftedPct":5.0,"draftedCount":5},{"name":"Bryce Young","pos":"QB","team":"CAR","fpts":237.0,"gp":16,"ppg":14.8,"weekly":[11.2,26.3,11.6,10.3,14.0,19.5,10.5,0,4.0,3.6,32.8,10.3,22.5,null,15.4,17.6,9.9,17.5],"posRank":"QB18","adp":147.6,"round":13,"actualFinish":"QB18","beat":5,"adpPosRank":"QB23","adpHistory":[153,151,150,150,148,148,146.3,147,148,148.3,146.7,144.2,145.9,147.6],"draftedPct":13.0,"draftedCount":13},{"name":"A.J. Brown","pos":"WR","team":"PHI","fpts":235.3,"gp":15,"ppg":15.7,"weekly":[1.8,7.7,25.9,2.7,9.3,14.0,31.1,0,null,3.3,11.9,28.0,38.2,19.0,12.1,18.5,11.8,0],"posRank":"WR8","adp":20.3,"round":2,"actualFinish":"WR8","beat":2,"adpPosRank":"WR10","adpHistory":[20,20,20,20,19,19,19.3,19.3,19.2,19.1,18.7,18.7,19.8,20.3],"draftedPct":7.0,"draftedCount":7},{"name":"Nico Collins","pos":"WR","team":"HOU","fpts":234.2,"gp":15,"ppg":15.6,"weekly":[5.5,14.2,26.4,11.9,16.0,null,6.7,0,14.5,23.6,24.2,8.5,21.5,19.1,23.5,9.9,8.7,0],"posRank":"WR9","adp":8.6,"round":1,"actualFinish":"WR9","beat":-5,"adpPosRank":"WR4","adpHistory":[13,13,13,13,12,12,11.7,11.6,11.2,11,11,9.4,8.9,8.6],"draftedPct":15.0,"draftedCount":15},{"name":"Aaron Rodgers","pos":"QB","team":"PIT","fpts":233.2,"gp":16,"ppg":14.6,"weekly":[25.7,10.4,12.7,12.8,null,17.5,24.6,16.8,12.1,8.4,9.4,0,3.7,21.5,17.0,15.5,7.3,17.8],"posRank":"QB19","adp":179.1,"round":15,"actualFinish":"QB19","beat":9,"adpPosRank":"QB28","adpHistory":[198,206,209,169,168,167,168.1,168.5,171,174.1,175.6,177.6,180.5,179.1],"draftedPct":5.0,"draftedCount":5},{"name":"Jameson Williams","pos":"WR","team":"DET","fpts":231.9,"gp":17,"ppg":13.6,"weekly":[6.6,21.8,6.3,5.7,2.0,18.6,0.0,null,16.6,26.9,19.7,0.0,29.9,17.3,29.4,12.0,5.7,13.4],"posRank":"WR10","adp":46.6,"round":4,"actualFinish":"WR10","beat":12,"adpPosRank":"WR22","adpHistory":[55,53,50,45,44,43,44.8,46.2,47.8,48,47.4,47.1,47.2,46.6],"draftedPct":13.0,"draftedCount":13},{"name":"Michael Wilson","pos":"WR","team":"ARI","fpts":229.6,"gp":17,"ppg":13.5,"weekly":[1.5,8.1,1.5,4.5,3.6,8.4,7.0,null,9.1,7.4,36.5,24.8,6.6,40.2,16.4,13.2,19.9,20.9],"posRank":"WR11","adp":205.7,"round":18,"actualFinish":"WR11","beat":70,"adpPosRank":"WR81","adpHistory":[203,199,192,189,190,188,188.7,191.6,191.8,193.6,199.5,200.2,205.3,205.7],"draftedPct":15.0,"draftedCount":15},{"name":"Wan'Dale Robinson","pos":"WR","team":"NYG","fpts":226.9,"gp":16,"ppg":14.2,"weekly":[11.5,31.2,3.6,4.4,8.2,20.4,15.5,7.8,13.6,12.2,7.6,33.6,10.4,null,16.4,5.2,25.3,0],"posRank":"WR12","actualFinish":"WR12","adpHistory":[168,162,161,161,162,164,164.7,164.9,165,167.7,174.1,172.1,169.7,165.7],"draftedPct":13.0,"draftedCount":13},{"name":"Rico Dowdle","pos":"RB","team":"CAR","fpts":226.3,"gp":17,"ppg":13.3,"weekly":[3.6,2.9,10.8,4.0,35.4,36.9,10.6,5.4,31.1,15.3,15.0,11.4,9.9,null,12.4,8.3,9.3,4.0],"posRank":"RB16","adp":176.8,"round":15,"actualFinish":"RB16","beat":40,"adpPosRank":"RB56","adpHistory":[164,161,166,170,170,169,170.7,173.2,175.6,180,180.9,178.9,175.4,176.8],"draftedPct":5.0,"draftedCount":5},{"name":"Davante Adams","pos":"WR","team":"LA","fpts":225.9,"gp":14,"ppg":16.1,"weekly":[9.1,25.6,14.6,15.6,13.8,7.9,26.5,null,23.0,19.7,7.1,23.2,21.8,6.9,11.1,0,0,0],"posRank":"WR13","adp":40.6,"round":4,"actualFinish":"WR13","beat":5,"adpPosRank":"WR18","adpHistory":[36,36,35,34,34,34,32.4,32.2,30.9,31.8,33.3,35.4,40.1,40.6],"draftedPct":13.0,"draftedCount":13},{"name":"Stefon Diggs","pos":"WR","team":"NE","fpts":225.3,"gp":17,"ppg":13.3,"weekly":[11.7,7.2,5.3,19.1,27.6,5.8,13.9,10.4,12.8,15.6,22.5,4.0,5.6,null,5.6,25.8,25.1,7.3],"posRank":"WR14","adp":75.4,"round":7,"actualFinish":"WR14","beat":26,"adpPosRank":"WR40","adpHistory":[80,82,86,83,81,81,80.6,80.7,78.9,72.8,69.9,70.2,71.9,75.4],"draftedPct":8.0,"draftedCount":8},{"name":"Courtland Sutton","pos":"WR","team":"DEN","fpts":223.7,"gp":17,"ppg":13.2,"weekly":[18.1,1.6,26.8,19.1,17.9,2.7,14.7,10.7,10.0,5.4,9.9,null,17.2,12.2,27.3,20.6,8.0,1.5],"posRank":"WR15","adp":45.9,"round":4,"actualFinish":"WR15","beat":6,"adpPosRank":"WR21","adpHistory":[52,50,51,49,49,49,47.9,47.5,48.6,48.4,48.6,47.9,48.4,45.9],"draftedPct":4.0,"draftedCount":4},{"name":"Jaylen Warren","pos":"RB","team":"PIT","fpts":223.1,"gp":16,"ppg":13.9,"weekly":[13.9,17.4,13.1,0,null,8.3,22.8,9.3,16.9,11.1,8.7,12.8,12.4,15.2,7.8,32.1,6.4,14.9],"posRank":"RB17","adp":92.4,"round":8,"actualFinish":"RB17","beat":14,"adpPosRank":"RB31","adpHistory":[104,101,99,94,94,96,98.1,99.3,100.2,99.1,96.6,97.5,92.7,92.4],"draftedPct":9.0,"draftedCount":9},{"name":"Lamar Jackson","pos":"QB","team":"BAL","fpts":222.8,"gp":13,"ppg":17.1,"weekly":[29.4,26.3,27.0,12.7,0,0,null,0,25.6,14.6,6.7,7.2,9.5,22.1,15.6,4.7,0,21.4],"posRank":"QB20","adp":28.1,"round":3,"actualFinish":"QB20","beat":-18,"adpPosRank":"QB2","adpHistory":[26,27,28,30,29,30,30.1,29.5,29.2,29.2,28.6,27.8,26.9,28.1],"draftedPct":11.0,"draftedCount":11},{"name":"Kenneth Gainwell","pos":"RB","team":"PIT","fpts":222.3,"gp":17,"ppg":13.1,"weekly":[5.3,6.6,9.6,31.4,null,9.6,3.5,4.5,7.4,2.4,29.5,18.2,6.5,16.2,19.6,23.8,6.8,21.4],"posRank":"RB18","adp":226.8,"round":19,"actualFinish":"RB18","beat":62,"adpPosRank":"RB80","adpHistory":[228,250,248,322,245,268,228.1,225.5,226.6,227.1,225.7,227.2,226.4,226.8]},{"name":"Breece Hall","pos":"RB","team":"NYJ","fpts":221.7,"gp":16,"ppg":13.9,"weekly":[19.5,5.8,9.2,16.1,21.5,5.9,7.2,35.9,null,19.5,8.4,14.9,15.6,4.3,5.7,8.3,23.9,0],"posRank":"RB19","adp":49.7,"round":5,"actualFinish":"RB19","beat":-1,"adpPosRank":"RB18","adpHistory":[38,39,39,36,36,36,36.1,36.2,34.8,35.6,36.2,37.7,44.2,49.7],"draftedPct":11.0,"draftedCount":11},{"name":"C.J. Stroud","pos":"QB","team":"HOU","fpts":219.7,"gp":14,"ppg":15.7,"weekly":[9.7,15.0,12.4,18.4,28.8,null,14.7,25.7,4.4,0,0,0,10.0,12.6,23.4,11.5,15.8,17.3],"posRank":"QB21","adp":125.8,"round":11,"actualFinish":"QB21","beat":-3,"adpPosRank":"QB18","adpHistory":[115,117,121,125,126,126,126.6,125.8,125,125.1,125.9,125.4,124.5,125.8],"draftedPct":11.0,"draftedCount":11},{"name":"Tetairoa McMillan","pos":"WR","team":"CAR","fpts":219.4,"gp":17,"ppg":12.9,"weekly":[11.8,19.0,7.8,10.2,13.3,17.9,6.3,16.9,8.6,11.0,36.0,11.5,11.3,null,4.5,19.3,1.5,12.5],"posRank":"WR16","adp":43.3,"round":4,"actualFinish":"WR16","beat":4,"adpPosRank":"WR20","adpHistory":[50,49,48,44,47,48,50.3,51.5,50.8,49.9,49.5,44.1,41.7,43.3],"draftedPct":10.0,"draftedCount":10},{"name":"CeeDee Lamb","pos":"WR","team":"DAL","fpts":218.9,"gp":13,"ppg":16.8,"weekly":[21.0,23.2,0,0,0,0,25.0,14.6,15.5,null,17.6,11.5,27.2,21.1,20.1,11.1,9.6,1.4],"posRank":"WR17","adp":4,"round":1,"actualFinish":"WR17","beat":-15,"adpPosRank":"WR2","adpHistory":[6,6,6,6,6,6,5.6,5.6,5.5,5.1,4.1,3.9,4.1,4],"draftedPct":12.0,"draftedCount":12},{"name":"Drake London","pos":"WR","team":"ATL","fpts":215.9,"gp":12,"ppg":18.0,"weekly":[13.5,6.9,10.5,28.0,null,34.8,8.2,0,41.8,25.4,21.9,0,0,0,0,5.7,1.4,17.8],"posRank":"WR18","adp":15.3,"round":2,"actualFinish":"WR18","beat":-9,"adpPosRank":"WR9","adpHistory":[18,18,18,17,15,15,16.2,16.4,16.2,16.2,16.2,16,15.6,15.3],"draftedPct":10.0,"draftedCount":10},{"name":"Kyle Pitts","pos":"TE","team":"ATL","fpts":213.8,"gp":17,"ppg":12.6,"weekly":[12.9,7.7,7.9,18.0,null,4.8,13.2,14.9,7.8,5.8,3.4,4.5,15.2,15.0,48.6,18.7,3.6,11.8],"posRank":"TE2","adp":125,"round":11,"actualFinish":"TE2","beat":11,"adpPosRank":"TE13","adpHistory":[140,141,148,158,158,158,158.2,157.4,158.9,143.1,138.1,129.5,126.4,125],"draftedPct":5.0,"draftedCount":5},{"name":"TreVeyon Henderson","pos":"RB","team":"NE","fpts":213.2,"gp":17,"ppg":12.5,"weekly":[11.1,6.0,7.7,12.6,4.7,4.6,0.5,6.5,12.7,31.0,32.3,11.1,11.6,null,33.1,2.2,8.2,17.3],"posRank":"RB20","adp":34.4,"round":3,"actualFinish":"RB20","beat":-5,"adpPosRank":"RB15","adpHistory":[61,62,64,63,62,62,63,62.4,62,59.2,58.8,49.3,36.2,34.4],"draftedPct":7.0,"draftedCount":7},{"name":"Tee Higgins","pos":"WR","team":"CIN","fpts":212.6,"gp":15,"ppg":14.2,"weekly":[6.3,14.6,2.5,6.2,11.2,11.2,21.6,11.4,34.1,null,15.3,8.1,0,27.2,0,14.3,9.9,18.7],"posRank":"WR19","adp":26.3,"round":3,"actualFinish":"WR19","beat":-7,"adpPosRank":"WR12","adpHistory":[25,25,24,25,25,25,25.7,26.5,25.6,26.1,26.4,26,26,26.3],"draftedPct":10.0,"draftedCount":10},{"name":"Justin Jefferson","pos":"WR","team":"MIN","fpts":210.5,"gp":17,"ppg":12.4,"weekly":[14.8,11.1,12.5,25.6,22.3,null,12.9,14.4,16.7,7.7,11.1,8.8,2.4,3.1,4.2,14.5,7.0,21.4],"posRank":"WR20","adp":6.4,"round":1,"actualFinish":"WR20","beat":-17,"adpPosRank":"WR3","adpHistory":[3,3,3,3,3,3,3.3,3.4,3.3,5,6,6.1,6.4,6.4],"draftedPct":6.0,"draftedCount":6},{"name":"DeVonta Smith","pos":"WR","team":"PHI","fpts":207.8,"gp":17,"ppg":12.2,"weekly":[4.6,9.3,20.0,4.9,22.4,8.9,36.3,14.4,null,16.9,1.8,14.9,9.8,7.7,7.0,16.2,4.5,8.2],"posRank":"WR21","adp":55.8,"round":5,"actualFinish":"WR21","beat":8,"adpPosRank":"WR29","adpHistory":[48,48,49,51,50,51,51.1,51.6,51.5,53.7,53.5,53.6,54.7,55.8],"draftedPct":13.0,"draftedCount":13},{"name":"RJ Harvey","pos":"RB","team":"DEN","fpts":207.6,"gp":17,"ppg":12.2,"weekly":[7.9,3.4,4.6,19.8,6.0,6.5,7.2,24.1,16.6,3.8,8.0,null,21.2,22.0,11.5,22.1,18.6,4.3],"posRank":"RB21","actualFinish":"RB21","adpHistory":[54,51,52,62,63,63,65.1,64.8,63.9,61.7,60.5,61.5,58.3,59.2],"draftedPct":1.0,"draftedCount":1},{"name":"Michael Pittman","pos":"WR","team":"IND","fpts":203.4,"gp":17,"ppg":12.0,"weekly":[20.0,8.0,19.3,15.1,14.9,4.0,18.8,23.5,23.5,3.9,null,13.7,2.3,16.9,5.6,7.2,3.6,3.1],"posRank":"WR22","actualFinish":"WR22","adpHistory":[108,107,100,105,104,105,105.4,106.3,105.3,100.9,102,102.1,99.3,95.1],"draftedPct":8.0,"draftedCount":8},{"name":"Emeka Egbuka","pos":"WR","team":"TB","fpts":202.7,"gp":17,"ppg":11.9,"weekly":[23.6,12.9,14.5,23.1,32.3,4.4,9.8,6.5,null,26.5,9.0,6.2,8.2,3.5,10.4,5.0,5.0,1.8],"posRank":"WR23","adp":51.9,"round":5,"actualFinish":"WR23","beat":3,"adpPosRank":"WR26","adpHistory":[103,102,103,100,98,95,95.7,96.4,93.9,80.4,73.1,64.6,59.4,51.9],"draftedPct":19.0,"draftedCount":19},{"name":"Cam Ward","pos":"QB","team":"TEN","fpts":200.7,"gp":17,"ppg":11.8,"weekly":[3.5,10.8,13.0,5.5,9.0,9.9,12.2,13.8,6.4,null,14.1,23.9,6.3,12.1,15.0,18.0,18.0,9.2],"posRank":"QB22","adp":150.1,"round":13,"actualFinish":"QB22","beat":2,"adpPosRank":"QB24","adpHistory":[142,152,156,157,155,154,153.7,153.2,151.1,151,149.8,148.5,149.6,150.1],"draftedPct":18.0,"draftedCount":18},{"name":"Kenneth Walker III","pos":"RB","team":"SEA","fpts":197.9,"gp":17,"ppg":11.6,"weekly":[5.4,21.8,18.0,12.0,9.6,4.7,6.6,null,8.1,8.0,20.1,13.1,10.4,3.8,2.9,28.4,7.7,17.3],"posRank":"RB22","actualFinish":"RB22","adpHistory":[56,58,58,57,56,55,54.2,53.7,52.7,47,44.5,42.5,42.2,41.5],"draftedPct":7.0,"draftedCount":7},{"name":"Tony Pollard","pos":"RB","team":"TEN","fpts":197.8,"gp":17,"ppg":11.6,"weekly":[8.9,9.2,13.9,10.6,15.8,6.7,12.1,6.3,7.8,null,5.6,8.1,6.3,31.1,21.2,13.2,11.5,9.5],"posRank":"RB23","adp":67.9,"round":6,"actualFinish":"RB23","beat":1,"adpPosRank":"RB24","adpHistory":[82,80,81,86,85,85,85.3,85.9,85,84.4,82.6,77.2,70.2,67.9],"draftedPct":9.0,"draftedCount":9},{"name":"Jaylen Waddle","pos":"WR","team":"MIA","fpts":197.1,"gp":16,"ppg":12.3,"weekly":[7.0,17.8,14.9,7.8,26.0,15.8,2.5,20.9,14.2,19.4,8.2,null,7.0,18.1,4.6,12.2,0.7,0],"posRank":"WR24","adp":62.3,"round":6,"actualFinish":"WR24","beat":8,"adpPosRank":"WR32","adpHistory":[66,66,59,58,58,58,56.1,57,57.7,58.8,58.8,59.9,61.1,62.3],"draftedPct":14.0,"draftedCount":14},{"name":"Brock Purdy","pos":"QB","team":"SF","fpts":193.4,"gp":9,"ppg":21.5,"weekly":[18.8,0,0,21.7,0,0,0,0,0,0,19.3,10.3,17.1,null,27.2,31.9,40.9,6.2],"posRank":"QB23","adp":101.2,"round":9,"actualFinish":"QB23","beat":-12,"adpPosRank":"QB11","adpHistory":[107,108,105,104,103,103,104.3,104.6,104,103.4,104.1,103.6,102.1,101.2],"draftedPct":13.0,"draftedCount":13},{"name":"DK Metcalf","pos":"WR","team":"PIT","fpts":193.2,"gp":15,"ppg":12.9,"weekly":[12.3,11.0,12.2,26.6,null,19.5,8.0,16.5,2.6,6.5,9.9,14.4,6.2,24.8,14.5,8.2,0,0],"posRank":"WR25","actualFinish":"WR25","adpHistory":[58,55,56,42,42,42,42.6,43.5,44.8,45.9,44.5,46.8,52,52.7],"draftedPct":4.0,"draftedCount":4},{"name":"Geno Smith","pos":"QB","team":"LV","fpts":192.9,"gp":15,"ppg":12.9,"weekly":[21.5,6.2,24.1,12.8,7.9,9.7,2.8,null,27.3,5.4,13.9,15.2,13.0,9.0,0,15.0,9.1,0],"posRank":"QB24","adp":156.5,"round":14,"actualFinish":"QB24","beat":1,"adpPosRank":"QB25","adpHistory":[152,154,153,152,154,153,152.7,152.9,155.1,156.5,156.8,154.8,155.5,156.5],"draftedPct":7.0,"draftedCount":7},{"name":"Travis Kelce","pos":"TE","team":"KC","fpts":191.2,"gp":17,"ppg":11.2,"weekly":[12.7,10.1,6.6,9.8,19.1,13.8,8.4,21.9,10.6,null,24.1,8.4,15.5,1.8,14.0,1.6,8.6,4.2],"posRank":"TE3","adp":79.4,"round":7,"actualFinish":"TE3","beat":3,"adpPosRank":"TE6","adpHistory":[74,77,78,78,78,79,80.1,79.1,79,79.2,78.3,77.9,77.9,79.4],"draftedPct":1.0,"draftedCount":1},{"name":"Harold Fannin Jr.","pos":"TE","team":"CLE","fpts":190.4,"gp":16,"ppg":11.9,"weekly":[13.6,9.8,5.5,4.5,11.3,15.1,7.6,18.4,null,8.4,4.6,8.4,12.3,28.4,12.0,19.5,11.0,0],"posRank":"TE4","adp":213.9,"round":18,"actualFinish":"TE4","beat":28,"adpPosRank":"TE32","adpHistory":[236,305,299,299,298,278,228.5,228.5,228.6,228.5,227.3,228.3,224,213.9],"draftedPct":3.0,"draftedCount":3},{"name":"Alec Pierce","pos":"WR","team":"IND","fpts":189.3,"gp":15,"ppg":12.6,"weekly":[4.6,10.8,10.7,0,0,6.8,14.8,8.9,20.5,18.4,null,3.6,17.8,13.0,2.6,24.6,0.0,32.2],"posRank":"WR26","adp":184.2,"round":16,"actualFinish":"WR26","beat":48,"adpPosRank":"WR74","adpHistory":[177,171,169,174,175,175,174.6,174.8,175.2,178.1,177.1,182.9,188.3,184.2],"draftedPct":5.0,"draftedCount":5},{"name":"Tyler Warren","pos":"TE","team":"IND","fpts":188.5,"gp":17,"ppg":11.1,"weekly":[14.9,11.9,6.8,18.3,14.4,18.3,16.9,9.3,7.6,17.9,null,9.5,11.2,3.7,4.9,6.0,9.3,7.6],"posRank":"TE5","adp":76.4,"round":7,"actualFinish":"TE5","beat":0,"adpPosRank":"TE5","adpHistory":[97,96,102,113,114,114,111.9,110.1,109.5,107.6,103.5,94.9,83.8,76.4],"draftedPct":16.0,"draftedCount":16},{"name":"Deebo Samuel Sr.","pos":"WR","team":"WAS","fpts":188.2,"gp":16,"ppg":11.8,"weekly":[22.6,17.4,4.9,20.1,23.6,5.4,0,4.2,9.4,12.9,20.7,null,11.1,6.7,7.3,6.5,11.3,4.1],"posRank":"WR27","actualFinish":"WR27","adpHistory":[62,61,63,65,65,65,65.8,65.2,65.5,64.8,65.8,66.1,66.4,65.7],"draftedPct":2.0,"draftedCount":2},{"name":"Dallas Goedert","pos":"TE","team":"PHI","fpts":188.1,"gp":15,"ppg":12.5,"weekly":[11.4,0,10.3,19.7,10.9,29.0,4.8,17.8,null,8.3,4.4,4.0,4.7,15.8,25.0,12.2,9.8,0],"posRank":"TE6","adp":142,"round":12,"actualFinish":"TE6","beat":10,"adpPosRank":"TE16","adpHistory":[135,136,139,138,138,138,138.5,137.7,137.2,136.4,135.2,134.2,135.6,142],"draftedPct":15.0,"draftedCount":15},{"name":"Jake Ferguson","pos":"TE","team":"DAL","fpts":188.1,"gp":17,"ppg":11.1,"weekly":[7.3,16.8,21.2,17.0,23.9,12.3,21.9,0.0,9.0,null,11.6,11.1,8.6,9.8,3.6,4.9,7.6,1.5],"posRank":"TE7","adp":136.6,"round":12,"actualFinish":"TE7","beat":8,"adpPosRank":"TE15","adpHistory":[143,146,146,148,147,147,147.5,146,145.6,139.8,137.5,141.9,140,136.6],"draftedPct":6.0,"draftedCount":6},{"name":"Ladd McConkey","pos":"WR","team":"LAC","fpts":186.9,"gp":16,"ppg":11.7,"weekly":[13.4,9.8,8.1,2.1,14.9,26.0,15.7,20.8,9.6,23.7,4.3,null,13.9,2.2,4.0,14.3,4.1,0],"posRank":"WR28","adp":21.8,"round":2,"actualFinish":"WR28","beat":-17,"adpPosRank":"WR11","adpHistory":[16,16,16,16,17,18,18.3,18.5,18.3,18.7,20,21.8,21.7,21.8],"draftedPct":5.0,"draftedCount":5},{"name":"Keenan Allen","pos":"WR","team":"LAC","fpts":185.7,"gp":17,"ppg":10.9,"weekly":[19.8,17.1,19.5,8.7,10.8,6.7,31.9,8.4,6.1,3.9,9.3,null,7.0,5.2,8.6,9.4,2.7,10.6],"posRank":"WR29","adp":108.8,"round":10,"actualFinish":"WR29","beat":21,"adpPosRank":"WR50","adpHistory":[176,181,183,188,189,191,195.6,195.1,196.3,197.6,190.6,131.6,115.2,108.8],"draftedPct":9.0,"draftedCount":9},{"name":"Zach Charbonnet","pos":"RB","team":"SEA","fpts":182.4,"gp":16,"ppg":11.4,"weekly":[10.7,1.0,0,12.4,11.8,4.7,19.5,null,5.6,14.3,6.7,9.5,11.2,8.6,3.1,15.4,29.2,18.7],"posRank":"RB24","adp":94.2,"round":8,"actualFinish":"RB24","beat":8,"adpPosRank":"RB32","adpHistory":[118,113,116,116,115,115,116,117.3,116.4,115.4,113.4,110,103.2,94.2],"draftedPct":16.0,"draftedCount":16},{"name":"Juwan Johnson","pos":"TE","team":"NO","fpts":181.9,"gp":17,"ppg":10.7,"weekly":[15.6,15.9,11.1,5.8,3.7,2.5,12.9,10.3,12.1,19.2,null,10.6,8.9,7.8,7.0,16.9,13.5,8.1],"posRank":"TE8","adp":222.2,"round":19,"actualFinish":"TE8","beat":25,"adpPosRank":"TE33","adpHistory":[212,208,202,200,201,203,205.4,206.7,208.4,210.7,215.8,220.2,220.6,222.2],"draftedPct":8.0,"draftedCount":8},{"name":"Hunter Henry","pos":"TE","team":"NE","fpts":181.8,"gp":17,"ppg":10.7,"weekly":[10.6,1.9,29.0,11.9,6.6,5.7,7.3,7.7,9.1,1.9,8.5,27.5,11.3,null,2.8,15.5,13.9,10.6],"posRank":"TE9","adp":161.5,"round":14,"actualFinish":"TE9","beat":10,"adpPosRank":"TE19","adpHistory":[178,178,177,173,173,176,170.7,170.1,171.2,171.9,170.3,168.5,165.1,161.5],"draftedPct":6.0,"draftedCount":6},{"name":"Rhamondre Stevenson","pos":"RB","team":"NE","fpts":180.8,"gp":14,"ppg":12.9,"weekly":[4.7,19.2,6.6,5.1,15.7,1.8,16.8,5.9,0,0,0,2.0,11.0,null,10.7,15.8,27.2,38.3],"posRank":"RB25","adp":139.8,"round":12,"actualFinish":"RB25","beat":19,"adpPosRank":"RB44","adpHistory":[124,123,125,124,125,125,125.9,127.7,127,127.1,126.4,126.2,134.6,139.8],"draftedPct":4.0,"draftedCount":4},{"name":"Brock Bowers","pos":"TE","team":"LV","fpts":180.2,"gp":12,"ppg":15.0,"weekly":[18.3,8.8,7.8,9.6,0,0,0,null,46.3,3.7,14.2,11.5,22.3,14.6,8.8,14.3,0,0],"posRank":"TE10","adp":18.1,"round":2,"actualFinish":"TE10","beat":-9,"adpPosRank":"TE1","adpHistory":[15,15,15,15,16,17,17.9,17.9,18,18,17.9,18.1,18.5,18.1],"draftedPct":10.0,"draftedCount":10},{"name":"Parker Washington","pos":"WR","team":"JAX","fpts":178.7,"gp":16,"ppg":11.2,"weekly":[0.0,12.6,7.4,-0.1,9.6,4.9,10.2,null,17.0,11.9,4.0,18.1,3.6,0,8.3,29.5,22.0,19.7],"posRank":"WR30","actualFinish":"WR30"},{"name":"Dalton Schultz","pos":"TE","team":"HOU","fpts":177.7,"gp":17,"ppg":10.5,"weekly":[5.8,5.9,8.9,8.0,11.0,null,18.8,4.4,13.7,18.3,11.1,1.8,12.5,5.2,21.6,14.5,4.9,11.3],"posRank":"TE11","adp":212,"round":18,"actualFinish":"TE11","beat":19,"adpPosRank":"TE30","adpHistory":[194,194,191,194,194,198,201.7,202.1,204.6,205.6,204.5,204.7,207.7,212],"draftedPct":4.0,"draftedCount":4},{"name":"Tua Tagovailoa","pos":"QB","team":"MIA","fpts":177.6,"gp":14,"ppg":12.7,"weekly":[6.3,22.6,13.8,15.7,22.7,9.6,1.6,24.2,9.5,12.8,6.8,null,5.7,9.1,17.2,0,0,0],"posRank":"QB25","adp":145.8,"round":13,"actualFinish":"QB25","beat":-3,"adpPosRank":"QB22","adpHistory":[138,142,144,141,139,137,139,139,139.5,139.9,141.9,142.6,144.5,145.8],"draftedPct":12.0,"draftedCount":12},{"name":"Jakobi Meyers","pos":"WR","team":"JAX","fpts":176.8,"gp":16,"ppg":11.1,"weekly":[17.7,12.8,9.3,7.0,7.2,7.9,0,null,6.3,7.1,11.4,15.0,21.3,14.8,12.1,8.6,8.9,9.4],"posRank":"WR31","adp":72,"round":6,"actualFinish":"WR31","beat":7,"adpPosRank":"WR38","adpHistory":[76,76,73,74,74,73,72.2,71.8,69.3,65.9,65.8,66.7,68.5,72],"draftedPct":6.0,"draftedCount":6},{"name":"Quentin Johnston","pos":"WR","team":"LAC","fpts":175.2,"gp":13,"ppg":13.5,"weekly":[24.9,15.9,14.9,23.8,7.9,0,11.0,0,15.3,9.2,0.0,null,11.3,2.8,0,23.4,14.8,0],"posRank":"WR32","adp":181.7,"round":16,"actualFinish":"WR32","beat":41,"adpPosRank":"WR73","adpHistory":[156,158,157,156,153,151,150.3,149.4,144.1,138.8,139.3,149.5,172.2,181.7],"draftedPct":4.0,"draftedCount":4},{"name":"Jauan Jennings","pos":"WR","team":"SF","fpts":172.3,"gp":15,"ppg":11.5,"weekly":[3.6,19.9,0,4.4,0,1.7,7.1,8.5,14.1,18.1,9.4,15.1,13.9,null,18.7,18.1,12.2,7.5],"posRank":"WR33","adp":87,"round":8,"actualFinish":"WR33","beat":9,"adpPosRank":"WR42","adpHistory":[73,71,66,66,66,66,68,71.8,73.5,72.9,80.7,82.2,83.9,87],"draftedPct":17.0,"draftedCount":17},{"name":"DJ Moore","pos":"WR","team":"CHI","fpts":172.2,"gp":17,"ppg":10.1,"weekly":[10.6,9.6,12.8,7.8,null,8.2,8.2,11.6,23.0,0.0,3.1,23.4,4.7,0.6,22.9,21.9,1.7,2.1],"posRank":"WR34","actualFinish":"WR34","adpHistory":[44,41,40,40,40,41,41.9,42.1,42.5,43,42.6,44.1,46.9,50.7],"draftedPct":4.0,"draftedCount":4},{"name":"Troy Franklin","pos":"WR","team":"DEN","fpts":172.1,"gp":17,"ppg":10.1,"weekly":[8.4,24.0,2.8,9.5,6.5,4.1,10.9,26.9,6.3,15.0,12.4,null,4.1,4.1,20.8,10.6,5.7,0.0],"posRank":"WR35","adp":206.2,"round":18,"actualFinish":"WR35","beat":48,"adpPosRank":"WR83","adpHistory":[240,null,null,null,null,null,null,null,null,null,270,234.5,222.7,206.2]},{"name":"Quinshon Judkins","pos":"RB","team":"CLE","fpts":170.8,"gp":14,"ppg":12.2,"weekly":[0,10.1,16.5,21.5,16.8,3.6,26.4,4.7,null,10.5,5.9,16.7,13.9,9.4,4.7,10.1,0,0],"posRank":"RB26","adp":128.8,"round":11,"actualFinish":"RB26","beat":16,"adpPosRank":"RB42","adpHistory":[67,68,71,73,75,75,75.2,89.7,107.9,124.1,136.6,150.5,113.7,128.8],"draftedPct":1.0,"draftedCount":1},{"name":"Khalil Shakir","pos":"WR","team":"BUF","fpts":170.4,"gp":16,"ppg":10.7,"weekly":[12.4,2.2,14.5,17.9,11.0,6.3,null,20.8,11.3,12.8,0.7,21.0,1.5,9.6,11.5,7.4,9.5,0],"posRank":"WR36","adp":92,"round":8,"actualFinish":"WR36","beat":9,"adpPosRank":"WR45","adpHistory":[77,78,76,77,76,76,76.5,76.9,76.4,75.9,83,90.5,91.2,92],"draftedPct":15.0,"draftedCount":15},{"name":"Tyler Shough","pos":"QB","team":"NO","fpts":170.0,"gp":11,"ppg":15.5,"weekly":[0,0,0.0,0,0,0,0,5.3,10.2,19.0,null,9.9,17.4,22.3,18.1,20.1,24.9,22.8],"posRank":"QB26","adp":221.3,"round":19,"actualFinish":"QB26","beat":8,"adpPosRank":"QB34","adpHistory":[209,186,185,197,198,201,202.6,204.3,202.7,205.1,206.8,218.9,220.5,221.3],"draftedPct":4.0,"draftedCount":4},{"name":"David Montgomery","pos":"RB","team":"DET","fpts":168.9,"gp":17,"ppg":9.9,"weekly":[8.3,13.1,32.4,1.2,18.2,8.1,5.9,null,12.0,8.1,4.7,6.7,12.8,14.3,9.2,1.4,6.0,6.5],"posRank":"RB27","adp":72.6,"round":7,"actualFinish":"RB27","beat":-2,"adpPosRank":"RB25","adpHistory":[64,64,67,68,69,69,70.6,69.9,69.4,68.7,68.7,68.7,70.1,72.6],"draftedPct":7.0,"draftedCount":7},{"name":"Colston Loveland","pos":"TE","team":"CHI","fpts":168.1,"gp":16,"ppg":10.5,"weekly":[3.2,0.0,4.1,0,null,3.1,5.4,6.8,32.8,9.5,7.0,14.9,5.8,12.9,10.1,6.0,21.4,25.1],"posRank":"TE12","adp":107.9,"round":9,"actualFinish":"TE12","beat":-1,"adpPosRank":"TE11","adpHistory":[98,115,119,126,130,132,133.6,132.1,130.4,126.5,118.8,114.4,108.3,107.9],"draftedPct":12.0,"draftedCount":12},{"name":"Tyrone Tracy Jr.","pos":"RB","team":"NYG","fpts":164.8,"gp":15,"ppg":11.0,"weekly":[5.5,9.1,5.6,0,0,0.6,10.6,7.3,6.7,8.1,17.9,16.0,4.3,null,24.7,9.8,6.7,31.9],"posRank":"RB28","actualFinish":"RB28","adpHistory":[95,95,96,99,100,98,100.4,102.3,102.7,103.3,103.1,91.8,84,82.3],"draftedPct":4.0,"draftedCount":4},{"name":"Tre Tucker","pos":"WR","team":"LV","fpts":164.7,"gp":17,"ppg":9.7,"weekly":[13.4,4.9,43.9,4.2,11.1,12.0,8.3,null,6.8,5.5,14.7,5.8,5.0,4.4,0.0,9.4,9.9,5.4],"posRank":"WR37","adp":226.3,"round":19,"actualFinish":"WR37","beat":69,"adpPosRank":"WR106","adpHistory":[267,298,305,313,289,309,230.2,228.9,230,228.9,228.8,227.7,226.8,226.3],"draftedPct":8.0,"draftedCount":8},{"name":"George Kittle","pos":"TE","team":"SF","fpts":164.5,"gp":11,"ppg":15.0,"weekly":[12.5,0,0,0,0,0,0.0,14.3,6.9,23.4,24.7,13.8,10.7,null,22.8,27.5,0,7.9],"posRank":"TE13","adp":34.7,"round":3,"actualFinish":"TE13","beat":-10,"adpPosRank":"TE3","adpHistory":[47,46,42,41,41,40,39.6,39.1,37.7,36.9,36.8,36,35.1,34.7],"draftedPct":20.0,"draftedCount":20},{"name":"Romeo Doubs","pos":"WR","team":"GB","fpts":163.4,"gp":16,"ppg":10.2,"weekly":[8.8,11.8,4.5,29.8,null,10.5,13.2,7.4,16.1,1.5,9.3,4.3,12.0,0.0,5.6,19.4,9.2,0],"posRank":"WR38","adp":155.2,"round":13,"actualFinish":"WR38","beat":25,"adpPosRank":"WR63","adpHistory":[165,166,165,165,165,165,166.6,166.1,166.3,163.2,163.5,162.4,159.9,155.2],"draftedPct":6.0,"draftedCount":6},{"name":"Joe Flacco","pos":"QB","team":"CIN","fpts":161.9,"gp":13,"ppg":12.5,"weekly":[14.2,10.8,4.7,4.3,0,16.8,29.0,24.3,34.7,null,10.9,10.6,0,0,0,0.2,1.2,0.2],"posRank":"QB27","adp":212.3,"round":18,"actualFinish":"QB27","beat":6,"adpPosRank":"QB33","adpHistory":[242,null,null,null,null,null,null,null,null,230,226.4,218.4,216.9,212.3]},{"name":"Rome Odunze","pos":"WR","team":"CHI","fpts":152.1,"gp":12,"ppg":12.7,"weekly":[15.7,34.8,15.2,16.9,null,5.2,5.1,21.4,0.0,20.6,6.1,8.3,2.8,0,0,0,0,0],"posRank":"WR39","adp":70.3,"round":6,"actualFinish":"WR39","beat":-2,"adpPosRank":"WR37","adpHistory":[68,72,72,70,68,68,66.8,66.6,66.1,66.8,67.5,70.2,72.3,70.3],"draftedPct":16.0,"draftedCount":16},{"name":"Rashee Rice","pos":"WR","team":"KC","fpts":151.1,"gp":8,"ppg":18.9,"weekly":[0,0,0,0,0,0,23.2,25.5,18.6,null,9.8,25.1,29.4,7.4,12.1,0,0,0],"posRank":"WR40","adp":63.4,"round":6,"actualFinish":"WR40","beat":-7,"adpPosRank":"WR33","adpHistory":[39,37,31,24,22,21,21.8,22,40.6,45.7,48.7,55.5,59.5,63.4],"draftedPct":11.0,"draftedCount":11},{"name":"Kareem Hunt","pos":"RB","team":"KC","fpts":149.4,"gp":17,"ppg":8.8,"weekly":[4.6,4.4,11.4,5.7,18.7,4.4,1.8,17.2,12.5,null,13.2,24.0,9.0,9.0,3.0,0.2,3.8,6.5],"posRank":"RB29","adp":191.9,"round":16,"actualFinish":"RB29","beat":33,"adpPosRank":"RB62","adpHistory":[172,170,172,182,182,182,184,184.4,186.6,187.3,187.9,188.1,194.8,191.9]},{"name":"Kyle Monangai","pos":"RB","team":"CHI","fpts":148.7,"gp":17,"ppg":8.7,"weekly":[2.1,4.6,3.0,1.8,null,5.4,17.4,2.4,25.8,8.8,10.7,10.8,22.0,6.7,3.3,12.3,7.7,3.9],"posRank":"RB30","adp":217.9,"round":19,"actualFinish":"RB30","beat":39,"adpPosRank":"RB69","adpHistory":[222,265,298,256,256,239,224.9,225.4,225.7,225.8,224.2,212.1,209,217.9],"draftedPct":3.0,"draftedCount":3},{"name":"Rashid Shaheed","pos":"WR","team":"SEA","fpts":148.6,"gp":18,"ppg":8.3,"weekly":[9.3,15.2,8.2,9.2,24.4,6.8,8.0,15.5,11.8,3.3,4.9,0.5,2.6,10.7,12.1,3.1,1.8,1.2],"posRank":"WR41","adp":115.9,"round":10,"actualFinish":"WR41","beat":11,"adpPosRank":"WR52","adpHistory":[131,135,126,122,121,123,121.6,122.8,122.9,120.8,120.5,117.3,114.5,115.9],"draftedPct":16.0,"draftedCount":16},{"name":"Jacory Croskey-Merritt","pos":"RB","team":"WAS","fpts":148.3,"gp":17,"ppg":8.7,"weekly":[14.2,1.7,10.1,7.7,31.0,6.8,4.2,2.5,5.1,3.0,4.3,null,2.0,3.2,15.6,8.5,25.5,2.9],"posRank":"RB31","adp":90.6,"round":8,"actualFinish":"RB31","beat":-1,"adpPosRank":"RB30","adpHistory":[230,274,281,290,270,272,227.8,228.4,228.2,218.7,203.2,186.9,144.3,90.6],"draftedPct":10.0,"draftedCount":10},{"name":"AJ Barner","pos":"TE","team":"SEA","fpts":147.3,"gp":17,"ppg":8.7,"weekly":[1.2,10.8,3.3,12.2,24.3,10.1,1.9,null,11.5,0.3,17.1,3.8,7.7,5.7,5.7,15.0,13.3,3.4],"posRank":"TE14","actualFinish":"TE14"},{"name":"Joe Burrow","pos":"QB","team":"CIN","fpts":145.4,"gp":8,"ppg":18.2,"weekly":[8.8,7.0,0,0,0,0,0,0,0,null,0,0,19.2,25.4,7.5,32.0,23.4,22.1],"posRank":"QB28","adp":44.7,"round":4,"actualFinish":"QB28","beat":-23,"adpPosRank":"QB5","adpHistory":[40,42,44,46,45,44,46.2,45.5,46.3,46.7,46.3,45.3,45.2,44.7],"draftedPct":5.0,"draftedCount":5},{"name":"Mac Jones","pos":"QB","team":"SF","fpts":145.2,"gp":11,"ppg":13.2,"weekly":[0,22.8,14.3,0,25.2,16.2,6.2,17.0,16.8,27.1,-0.3,0,0.2,null,0,-0.3,0,0],"posRank":"QB29","actualFinish":"QB29"},{"name":"Woody Marks","pos":"RB","team":"HOU","fpts":145.1,"gp":16,"ppg":9.1,"weekly":[0.3,6.1,4.6,27.9,2.4,null,12.5,15.1,2.7,16.1,6.1,7.9,7.7,15.6,4.8,0,8.5,6.8],"posRank":"RB32","adp":180.5,"round":16,"actualFinish":"RB32","beat":25,"adpPosRank":"RB57","adpHistory":[234,220,218,271,275,299,228.7,229.3,229.3,203.3,186.8,180.9,181.2,180.5],"draftedPct":26.0,"draftedCount":26},{"name":"Rachaad White","pos":"RB","team":"TB","fpts":143.0,"gp":17,"ppg":8.4,"weekly":[2.6,14.6,2.4,8.6,23.1,17.6,8.4,8.1,null,10.4,8.2,5.2,5.9,6.5,3.6,8.0,3.7,6.1],"posRank":"RB33","adp":162.8,"round":14,"actualFinish":"RB33","beat":19,"adpPosRank":"RB52","adpHistory":[141,138,140,140,141,134,134,134.4,134.3,133.9,137.1,145.3,159.9,162.8],"draftedPct":8.0,"draftedCount":8},{"name":"Bucky Irving","pos":"RB","team":"TB","fpts":142.5,"gp":10,"ppg":14.2,"weekly":[14.5,18.1,13.9,29.5,0,0,0,0,null,0,0,0,16.1,16.1,8.1,7.1,8.3,10.8],"posRank":"RB34","adp":20.6,"round":2,"actualFinish":"RB34","beat":-24,"adpPosRank":"RB10","adpHistory":[23,22,21,21,21,22,22.6,22.9,22.2,22.8,23.3,21.9,21,20.6],"draftedPct":12.0,"draftedCount":12},{"name":"Jordan Addison","pos":"WR","team":"MIN","fpts":141.1,"gp":14,"ppg":10.1,"weekly":[0,0,0,18.4,15.1,null,24.8,11.6,8.4,6.5,10.0,0.0,8.6,10.2,8.6,4.6,12.5,1.8],"posRank":"WR42","adp":87.2,"round":8,"actualFinish":"WR42","beat":1,"adpPosRank":"WR43","adpHistory":[70,70,69,69,71,74,74.8,75.3,78.5,77.7,78.2,84.8,85.8,87.2],"draftedPct":13.0,"draftedCount":13},{"name":"Brian Thomas Jr.","pos":"WR","team":"JAX","fpts":138.8,"gp":14,"ppg":9.9,"weekly":[9.0,8.9,7.5,10.6,12.0,23.0,6.1,null,8.5,0,0,0,4.8,11.7,17.1,3.8,7.9,7.9],"posRank":"WR43","adp":14,"round":2,"actualFinish":"WR43","beat":-35,"adpPosRank":"WR8","adpHistory":[14,14,14,14,14,14,14.1,14.2,13.9,13.8,13.8,13.8,13.6,14],"draftedPct":13.0,"draftedCount":13},{"name":"Omarion Hampton","pos":"RB","team":"LAC","fpts":138.7,"gp":9,"ppg":15.4,"weekly":[8.1,3.5,24.9,30.5,13.0,0,0,0,0,0,0,null,0,14.7,7.5,16.5,20.0,0],"posRank":"RB35","adp":29.1,"round":3,"actualFinish":"RB35","beat":-22,"adpPosRank":"RB13","adpHistory":[42,44,46,48,48,47,45.9,43.1,38.8,31.6,29.6,29.5,29.4,29.1],"draftedPct":5.0,"draftedCount":5},{"name":"Josh Downs","pos":"WR","team":"IND","fpts":138.4,"gp":16,"ppg":8.7,"weekly":[3.2,11.1,5.4,6.4,11.4,16.2,0,12.9,17.7,1.3,null,3.0,6.4,6.3,10.3,11.8,5.4,9.6],"posRank":"WR44","adp":103.6,"round":9,"actualFinish":"WR44","beat":4,"adpPosRank":"WR48","adpHistory":[106,97,92,90,90,89,87,87.2,85.5,86.7,87.6,87.4,98.8,103.6],"draftedPct":10.0,"draftedCount":10},{"name":"Marquise Brown","pos":"WR","team":"KC","fpts":137.7,"gp":16,"ppg":8.6,"weekly":[19.9,8.0,8.2,12.8,8.8,20.5,9.4,0.0,9.3,null,8.0,2.0,10.0,4.5,0,5.2,1.7,9.4],"posRank":"WR45","actualFinish":"WR45"},{"name":"J.J. McCarthy","pos":"QB","team":"MIN","fpts":137.3,"gp":10,"ppg":13.7,"weekly":[21.2,5.8,0,0,0,null,0,0,19.9,16.7,8.0,2.5,0,20.4,24.5,10.3,0,8.0],"posRank":"QB30","adp":124.1,"round":11,"actualFinish":"QB30","beat":-13,"adpPosRank":"QB17","adpHistory":[128,125,123,120,119,118,115.4,115.1,113.9,114.7,116.8,119.9,122.7,124.1],"draftedPct":13.0,"draftedCount":13},{"name":"Justin Fields","pos":"QB","team":"NYJ","fpts":136.6,"gp":9,"ppg":15.2,"weekly":[29.5,5.0,0,26.1,21.9,4.9,4.0,16.9,null,8.0,20.3,0,0,0,0,0,0,0],"posRank":"QB31","adp":109.6,"round":10,"actualFinish":"QB31","beat":-18,"adpPosRank":"QB13","adpHistory":[100,100,97,98,97,97,97.5,96.9,96.4,106.3,106.1,105.5,108.7,109.6],"draftedPct":7.0,"draftedCount":7},{"name":"Oronde Gadsden II","pos":"TE","team":"LAC","fpts":135.4,"gp":15,"ppg":9.0,"weekly":[0,0,9.6,3.6,2.4,12.8,32.4,18.7,11.8,4.3,6.1,null,3.7,1.7,10.1,1.7,12.2,4.3],"posRank":"TE15","actualFinish":"TE15","adpHistory":[250,305,280,265,292,276,228.8,226.9,225.7,227.6,228.5,230.3,230.7,229.6],"draftedPct":2.0,"draftedCount":2},{"name":"Christian Watson","pos":"WR","team":"GB","fpts":135.4,"gp":10,"ppg":13.5,"weekly":[0,0,0,0,null,0,0,12.5,7.8,6.5,20.6,9.9,18.3,24.9,5.9,3.7,25.3,0],"posRank":"WR46","adp":228.6,"round":20,"actualFinish":"WR46","beat":68,"adpPosRank":"WR114","adpHistory":[233,270,275,282,256,269,227.3,226.5,228,228.6,230.3,230,229.6,228.6]},{"name":"Luther Burden III","pos":"WR","team":"CHI","fpts":133.9,"gp":15,"ppg":8.9,"weekly":[0.7,1.5,22.8,1.6,null,9.1,3.1,0.9,0,8.1,5.7,9.1,7.6,11.0,14.4,0,30.8,7.5],"posRank":"WR47","actualFinish":"WR47","adpHistory":[113,122,128,136,137,140,139.6,141.1,137.4,140.8,134.8,136.7,133.1,133.7],"draftedPct":8.0,"draftedCount":8},{"name":"Marcus Mariota","pos":"QB","team":"WAS","fpts":133.4,"gp":10,"ppg":13.3,"weekly":[0,0,21.3,15.2,0,0,4.9,13.3,0,18.7,16.4,null,24.3,-0.1,15.7,3.7,0,0],"posRank":"QB32","actualFinish":"QB32"},{"name":"Jordan Mason","pos":"RB","team":"MIN","fpts":132.9,"gp":16,"ppg":8.3,"weekly":[8.5,5.8,26.6,10.2,13.6,null,11.7,1.6,4.7,4.1,10.5,4.2,5.8,11.2,2.9,2.1,0,9.4],"posRank":"RB36","adp":88.6,"round":8,"actualFinish":"RB36","beat":-7,"adpPosRank":"RB29","adpHistory":[110,111,111,107,106,101,99.4,97.8,95.1,92.1,89.7,87.3,89,88.6],"draftedPct":14.0,"draftedCount":14},{"name":"Dalton Kincaid","pos":"TE","team":"BUF","fpts":132.1,"gp":12,"ppg":11.0,"weekly":[14.8,7.7,17.6,9.8,19.8,0,null,3.3,25.1,5.7,0,0,0,14.1,6.4,0.0,0,7.8],"posRank":"TE16","adp":129.9,"round":11,"actualFinish":"TE16","beat":-2,"adpPosRank":"TE14","adpHistory":[133,134,137,134,133,133,131.8,129.9,128.2,131,130.3,127.7,127.6,129.9],"draftedPct":6.0,"draftedCount":6},{"name":"Mark Andrews","pos":"TE","team":"BAL","fpts":131.0,"gp":17,"ppg":7.7,"weekly":[1.5,1.4,27.1,10.0,4.2,6.6,null,6.4,16.6,10.4,15.7,2.1,8.7,1.9,3.8,4.4,6.8,3.4],"posRank":"TE17","adp":94.3,"round":8,"actualFinish":"TE17","beat":-8,"adpPosRank":"TE9","adpHistory":[102,103,104,103,101,102,103.5,102.3,100.3,99.9,94.6,93.7,92.8,94.3],"draftedPct":12.0,"draftedCount":12},{"name":"Colby Parkinson","pos":"TE","team":"LA","fpts":130.8,"gp":14,"ppg":9.3,"weekly":[0.4,0,0,3.7,0.0,0,7.7,null,3.0,14.1,9.4,14.1,6.7,12.2,24.5,4.1,11.3,19.6],"posRank":"TE18","actualFinish":"TE18"},{"name":"Jayden Higgins","pos":"WR","team":"HOU","fpts":129.5,"gp":17,"ppg":7.6,"weekly":[5.2,3.8,1.5,9.4,7.2,null,0.0,13.4,1.4,15.2,9.5,13.8,11.5,6.4,1.4,2.7,16.8,10.3],"posRank":"WR48","adp":113.8,"round":10,"actualFinish":"WR48","beat":3,"adpPosRank":"WR51","adpHistory":[112,104,109,109,110,109,107.3,108.3,106,103.8,103.4,104.7,111.1,113.8],"draftedPct":10.0,"draftedCount":10},{"name":"Theo Johnson","pos":"TE","team":"NYG","fpts":127.8,"gp":15,"ppg":8.5,"weekly":[1.5,7.4,2.0,10.7,21.3,4.7,15.6,5.0,11.7,14.5,6.6,10.7,5.9,null,10.2,0.0,0,0],"posRank":"TE19","adp":213.7,"round":18,"actualFinish":"TE19","beat":12,"adpPosRank":"TE31","adpHistory":[219,349,220,214,213,212,212.5,213.4,214.9,216.4,217.5,217,212.3,213.7],"draftedPct":15.0,"draftedCount":15},{"name":"Zach Ertz","pos":"TE","team":"WAS","fpts":127.4,"gp":13,"ppg":9.8,"weekly":[11.6,18.4,6.8,4.1,0.0,16.3,12.7,5.6,8.6,9.4,8.2,null,23.6,2.1,0,0,0,0],"posRank":"TE20","adp":144.8,"round":13,"actualFinish":"TE20","beat":-3,"adpPosRank":"TE17","adpHistory":[148,150,152,153,156,155,153.8,153.1,153.8,157.1,151.7,146.8,145.5,144.8],"draftedPct":2.0,"draftedCount":2},{"name":"Kayshon Boutte","pos":"WR","team":"NE","fpts":127.1,"gp":14,"ppg":9.1,"weekly":[19.3,8.6,4.8,2.8,7.3,26.3,13.5,16.5,0.0,0,0,3.5,13.5,null,4.0,2.6,0,4.4],"posRank":"WR49","actualFinish":"WR49"},{"name":"Kimani Vidal","pos":"RB","team":"LAC","fpts":126.9,"gp":13,"ppg":9.8,"weekly":[0,0,0,0.0,2.9,25.8,7.5,22.7,3.0,17.8,3.2,null,23.7,11.4,5.8,1.1,0,2.0],"posRank":"RB37","actualFinish":"RB37"},{"name":"Cam Skattebo","pos":"RB","team":"NYG","fpts":126.7,"gp":8,"ppg":15.8,"weekly":[2.9,13.9,24.1,11.0,15.4,31.0,18.4,10.0,0,0,0,0,0,null,0,0,0,0],"posRank":"RB38","adp":120.7,"round":11,"actualFinish":"RB38","beat":0,"adpPosRank":"RB38","adpHistory":[99,99,106,111,113,113,114,113.7,113.5,104.1,104.2,116.5,123.5,120.7],"draftedPct":2.0,"draftedCount":2},{"name":"Chuba Hubbard","pos":"RB","team":"CAR","fpts":126.4,"gp":15,"ppg":8.4,"weekly":[17.9,18.7,9.6,9.9,0,0,7.5,9.4,1.7,2.5,3.8,8.3,20.4,null,4.8,4.4,3.8,3.7],"posRank":"RB39","adp":53.7,"round":5,"actualFinish":"RB39","beat":-20,"adpPosRank":"RB19","adpHistory":[53,54,53,52,51,52,51.8,52.1,52.2,52.7,52.2,52.9,53.7,53.7],"draftedPct":4.0,"draftedCount":4},{"name":"Michael Penix Jr.","pos":"QB","team":"ATL","fpts":126.2,"gp":9,"ppg":14.0,"weekly":[24.0,5.3,5.8,22.7,null,14.6,13.2,0,22.7,10.0,7.9,0,0,0,0,0,0,0],"posRank":"QB33","adp":137.9,"round":12,"actualFinish":"QB33","beat":-12,"adpPosRank":"QB21","adpHistory":[144,140,141,139,135,136,135.9,135.4,135.5,134.3,135.3,136.1,137.5,137.9],"draftedPct":6.0,"draftedCount":6},{"name":"Marvin Harrison Jr.","pos":"WR","team":"ARI","fpts":125.8,"gp":12,"ppg":10.5,"weekly":[18.1,4.7,7.4,18.6,13.8,5.2,7.8,null,22.6,12.3,0,0,12.9,0,0,2.4,0.0,0],"posRank":"WR50","adp":36.6,"round":4,"actualFinish":"WR50","beat":-34,"adpPosRank":"WR16","adpHistory":[33,30,29,31,30,29,30.7,31.3,30.4,30.3,32.7,33.2,35.4,36.6],"draftedPct":7.0,"draftedCount":7},{"name":"Blake Corum","pos":"RB","team":"LA","fpts":125.2,"gp":17,"ppg":7.4,"weekly":[2.6,10.4,5.3,3.6,1.3,2.3,5.3,null,5.8,5.6,1.5,2.4,14.1,29.1,13.1,13.1,1.8,7.9],"posRank":"RB40","adp":212.4,"round":18,"actualFinish":"RB40","beat":28,"adpPosRank":"RB68","adpHistory":[196,203,208,210,212,214,214.4,213.8,214.8,216.6,219.2,215.5,209.8,212.4],"draftedPct":9.0,"draftedCount":9},{"name":"Chig Okonkwo","pos":"TE","team":"TEN","fpts":124.0,"gp":17,"ppg":7.3,"weekly":[4.9,7.5,11.6,1.4,8.8,10.6,0.0,9.3,3.0,null,8.6,7.0,6.9,4.0,7.3,16.4,14.5,2.2],"posRank":"TE21","adp":170.2,"round":15,"actualFinish":"TE21","beat":-1,"adpPosRank":"TE20","adpHistory":[195,191,189,191,186,185,180.5,180,181.1,182.8,182.2,177.3,173.3,170.2],"draftedPct":12.0,"draftedCount":12},{"name":"Tucker Kraft","pos":"TE","team":"GB","fpts":123.2,"gp":8,"ppg":15.4,"weekly":[9.9,27.4,5.9,10.6,null,12.3,16.8,36.3,4.0,0,0,0,0,0,0,0,0,0],"posRank":"TE22","adp":114.7,"round":10,"actualFinish":"TE22","beat":-10,"adpPosRank":"TE12","adpHistory":[123,130,133,130,131,129,127.2,124.9,122.9,121,125.5,120.8,118.8,114.7],"draftedPct":4.0,"draftedCount":4},{"name":"Tyler Allgeier","pos":"RB","team":"ATL","fpts":123.0,"gp":17,"ppg":7.2,"weekly":[2.4,15.0,1.4,11.1,null,10.8,1.6,9.4,0.6,17.7,9.6,5.9,13.5,8.7,1.8,8.3,2.3,2.9],"posRank":"RB41","adp":165.7,"round":14,"actualFinish":"RB41","beat":13,"adpPosRank":"RB54","adpHistory":[166,163,162,163,163,163,162.9,163,164.3,164.8,166.7,168.2,166.4,165.7],"draftedPct":12.0,"draftedCount":12},{"name":"Cade Otton","pos":"TE","team":"TB","fpts":122.2,"gp":15,"ppg":8.1,"weekly":[0.0,5.5,0,3.9,12.1,10.1,13.5,8.0,null,17.2,4.8,6.1,2.9,4.9,0,3.5,7.3,22.4],"posRank":"TE23","adp":172.3,"round":15,"actualFinish":"TE23","beat":-2,"adpPosRank":"TE21","adpHistory":[167,174,178,179,179,179,178.3,177.4,178.7,183.5,187.6,188,181.6,172.3],"draftedPct":13.0,"draftedCount":13},{"name":"J.K. Dobbins","pos":"RB","team":"DEN","fpts":121.9,"gp":10,"ppg":12.2,"weekly":[14.8,15.5,15.3,14.5,15.4,4.0,9.0,17.1,6.9,9.4,0,null,0,0,0,0,0,0],"posRank":"RB42","adp":103,"round":9,"actualFinish":"RB42","beat":-8,"adpPosRank":"RB34","adpHistory":[186,183,188,135,123,120,115.5,110.3,107.8,104.9,105.3,99.3,102.8,103],"draftedPct":12.0,"draftedCount":12},{"name":"Jerry Jeudy","pos":"WR","team":"CLE","fpts":121.7,"gp":17,"ppg":7.2,"weekly":[11.6,9.1,2.7,7.8,3.5,9.3,3.7,0.0,null,19.8,5.1,3.9,5.6,16.6,4.2,4.2,10.4,4.2],"posRank":"WR51","adp":74.3,"round":7,"actualFinish":"WR51","beat":-12,"adpPosRank":"WR39","adpHistory":[69,69,68,67,67,67,69.5,70.5,71.2,72.6,72.2,73.1,74.3,74.3],"draftedPct":11.0,"draftedCount":11},{"name":"Ryan Flournoy","pos":"WR","team":"DAL","fpts":120.0,"gp":15,"ppg":8.0,"weekly":[0,0.0,4.1,4.6,21.4,6.3,0.0,1.7,9.2,null,7.2,0.0,6.4,29.5,8.0,9.8,0,11.8],"posRank":"WR52","actualFinish":"WR52"},{"name":"Aaron Jones","pos":"RB","team":"MIN","fpts":119.7,"gp":12,"ppg":10.0,"weekly":[15.7,2.3,0,0,0,null,0,5.0,11.8,15.9,11.1,8.7,5.5,7.6,9.5,11.3,15.3,0],"posRank":"RB43","actualFinish":"RB43","adpHistory":[78,74,75,76,77,77,77.5,75.8,75,75.5,75.1,76.8,76.9,76.8],"draftedPct":1.0,"draftedCount":1},{"name":"Brenton Strange","pos":"TE","team":"JAX","fpts":118.0,"gp":12,"ppg":9.8,"weekly":[9.9,4.7,12.1,10.5,3.2,0,0,null,0,0,0,14.3,13.5,5.7,3.6,14.9,8.4,17.2],"posRank":"TE24","adp":154,"round":13,"actualFinish":"TE24","beat":-6,"adpPosRank":"TE18","adpHistory":[169,169,167,168,167,166,163.5,163.3,163.2,163.2,161.5,155.2,153.7,154],"draftedPct":6.0,"draftedCount":6},{"name":"Jayden Daniels","pos":"QB","team":"WAS","fpts":117.1,"gp":7,"ppg":16.7,"weekly":[20.1,17.7,0,0,17.1,23.6,18.7,0,16.2,0,0,null,0,3.7,0,0,0,0],"posRank":"QB34","adp":36.9,"round":4,"actualFinish":"QB34","beat":-31,"adpPosRank":"QB3","adpHistory":[34,34,36,38,38,38,38.4,37.9,38.6,38.7,39.6,40.1,38.3,36.9],"draftedPct":8.0,"draftedCount":8},{"name":"Pat Freiermuth","pos":"TE","team":"PIT","fpts":116.6,"gp":15,"ppg":7.8,"weekly":[5.8,6.1,1.6,0,null,2.1,31.1,4.3,11.7,6.3,2.9,10.9,0,2.9,7.5,6.0,9.3,8.1],"posRank":"TE25","adp":208,"round":18,"actualFinish":"TE25","beat":4,"adpPosRank":"TE29","adpHistory":[173,167,170,162,161,172,196.8,198.2,202.9,203.1,203,204.5,203.9,208],"draftedPct":1.0,"draftedCount":1},{"name":"Elic Ayomanor","pos":"WR","team":"TEN","fpts":116.5,"gp":16,"ppg":7.3,"weekly":[3.3,15.6,13.8,6.4,3.8,5.7,4.9,9.2,7.6,null,3.1,0,1.5,8.4,2.7,8.8,13.7,8.0],"posRank":"WR53","adp":194.6,"round":17,"actualFinish":"WR53","beat":23,"adpPosRank":"WR76","adpHistory":[185,184,194,202,210,209,212.2,212.9,212.3,214,220,220,210.2,194.6],"draftedPct":13.0,"draftedCount":13},{"name":"Mack Hollins","pos":"WR","team":"NE","fpts":116.4,"gp":14,"ppg":8.3,"weekly":[1.3,7.8,6.7,7.4,0,4.8,7.3,15.9,2.9,19.6,10.4,5.0,5.3,null,8.1,13.9,0,0],"posRank":"WR54","actualFinish":"WR54"},{"name":"Cooper Kupp","pos":"WR","team":"SEA","fpts":116.3,"gp":16,"ppg":7.3,"weekly":[3.5,16.0,5.1,6.6,11.9,12.0,3.2,null,0,9.4,5.3,4.4,5.4,11.5,9.6,5.9,1.6,4.9],"posRank":"WR55","adp":88.1,"round":8,"actualFinish":"WR55","beat":-11,"adpPosRank":"WR44","adpHistory":[79,81,80,82,83,84,84.6,84.2,84.2,87.9,87.9,85.8,86.5,88.1],"draftedPct":2.0,"draftedCount":2},{"name":"Chimere Dike","pos":"WR","team":"TEN","fpts":116.1,"gp":17,"ppg":6.8,"weekly":[0.9,2.8,3.5,-0.4,3.7,2.8,16.9,16.4,1.5,null,3.4,15.4,1.9,13.4,5.0,13.0,10.2,5.7],"posRank":"WR56","adp":231.7,"round":20,"actualFinish":"WR56","beat":63,"adpPosRank":"WR119","adpHistory":[256,323,340,345,358,313,231.6,230.7,231.1,231.8,231.7,230.6,229.8,231.7]},{"name":"Terry McLaurin","pos":"WR","team":"WAS","fpts":114.2,"gp":10,"ppg":11.4,"weekly":[4.7,9.8,10.4,0,0,0,0,14.4,0,0,0,null,22.6,7.1,15.9,8.3,11.3,9.7],"posRank":"WR57","adp":47.2,"round":4,"actualFinish":"WR57","beat":-34,"adpPosRank":"WR23","adpHistory":[27,26,26,29,31,32,32.8,34.3,36.1,42.5,47.4,52,49.2,47.2],"draftedPct":4.0,"draftedCount":4},{"name":"T.J. Hockenson","pos":"TE","team":"MIN","fpts":112.8,"gp":15,"ppg":7.5,"weekly":[4.5,2.2,15.9,7.9,9.8,null,10.3,4.6,9.1,2.8,6.9,5.9,11.9,9.2,10.6,1.2,0,0],"posRank":"TE26","adp":84.7,"round":8,"actualFinish":"TE26","beat":-19,"adpPosRank":"TE7","adpHistory":[81,85,85,85,86,87,87.1,86.3,84.4,83.7,87.5,88.4,84.4,84.7],"draftedPct":6.0,"draftedCount":6},{"name":"Kirk Cousins","pos":"QB","team":"ATL","fpts":112.6,"gp":10,"ppg":11.3,"weekly":[0,0,1.2,0,null,0,0,7.1,0,0,2.1,15.5,13.4,4.5,29.9,19.6,9.1,10.2],"posRank":"QB35","actualFinish":"QB35"},{"name":"Malik Washington","pos":"WR","team":"MIA","fpts":111.7,"gp":17,"ppg":6.6,"weekly":[4.9,3.5,6.2,4.1,4.0,6.3,8.0,13.6,8.1,9.3,7.2,null,7.0,4.0,2.0,10.2,1.5,11.8],"posRank":"WR58","adp":224.6,"round":19,"actualFinish":"WR58","beat":38,"adpPosRank":"WR96","adpHistory":[250,325,325,300,297,294,229.2,229.1,229.5,229.1,228.5,229.1,228.9,224.6],"draftedPct":5.0,"draftedCount":5},{"name":"Tyjae Spears","pos":"RB","team":"TEN","fpts":111.7,"gp":13,"ppg":8.6,"weekly":[0,0,0,0,1.4,9.0,7.0,17.2,9.2,null,8.4,6.5,8.4,6.7,5.6,21.5,1.1,9.7],"posRank":"RB44","adp":159.8,"round":14,"actualFinish":"RB44","beat":6,"adpPosRank":"RB50","adpHistory":[137,137,135,131,128,127,123.5,122.4,120.9,119.9,118.3,128,150.7,159.8],"draftedPct":13.0,"draftedCount":13},{"name":"Xavier Worthy","pos":"WR","team":"KC","fpts":109.9,"gp":14,"ppg":7.9,"weekly":[0.0,0,0,17.1,11.1,10.6,7.8,10.3,6.0,null,5.5,9.9,11.4,8.5,5.5,6.1,0.1,0],"posRank":"WR59","adp":41.8,"round":4,"actualFinish":"WR59","beat":-40,"adpPosRank":"WR19","adpHistory":[45,45,41,43,43,46,47.8,49.4,42.7,41.6,40.6,40.9,42.7,41.8],"draftedPct":7.0,"draftedCount":7},{"name":"Sam LaPorta","pos":"TE","team":"DET","fpts":106.9,"gp":9,"ppg":11.9,"weekly":[13.9,5.6,7.3,6.9,20.2,16.5,4.5,null,21.7,10.3,0,0,0,0,0,0,0,0],"posRank":"TE27","adp":67.6,"round":6,"actualFinish":"TE27","beat":-23,"adpPosRank":"TE4","adpHistory":[57,59,61,61,61,61,63,62.5,63.1,63.4,63,63.4,69,67.6],"draftedPct":3.0,"draftedCount":3},{"name":"Devin Singletary","pos":"RB","team":"NYG","fpts":106.8,"gp":17,"ppg":6.3,"weekly":[0.9,1.0,1.1,2.8,3.4,1.0,0.2,3.8,7.1,10.3,17.7,4.7,19.2,null,2.4,5.6,17.0,8.6],"posRank":"RB45","actualFinish":"RB45"},{"name":"Spencer Rattler","pos":"QB","team":"NO","fpts":106.1,"gp":9,"ppg":11.8,"weekly":[11.5,21.7,12.7,13.9,16.1,11.1,14.5,4.6,0,0,null,0,0,0,0.0,0,0,0],"posRank":"QB36","actualFinish":"QB36"},{"name":"Keon Coleman","pos":"WR","team":"BUF","fpts":104.4,"gp":12,"ppg":8.7,"weekly":[28.2,5.6,5.0,7.5,11.3,4.1,null,6.0,3.7,13.6,0,0,8.9,3.6,0,0,0,6.9],"posRank":"WR60","adp":95.1,"round":8,"actualFinish":"WR60","beat":-14,"adpPosRank":"WR46","adpHistory":[136,126,115,110,111,110,110.2,110.4,110.2,109.8,105.8,105.2,100.3,95.1],"draftedPct":7.0,"draftedCount":7},{"name":"Evan Engram","pos":"TE","team":"DEN","fpts":102.8,"gp":16,"ppg":6.4,"weekly":[5.1,2.2,0,6.9,13.3,9.9,9.2,7.6,0.0,3.2,7.3,null,13.9,2.8,2.2,5.6,6.1,7.5],"posRank":"TE28","adp":93.7,"round":8,"actualFinish":"TE28","beat":-20,"adpPosRank":"TE8","adpHistory":[105,109,110,96,95,93,94.5,93.8,93.8,94.5,94.1,93.2,93.9,93.7],"draftedPct":2.0,"draftedCount":2},{"name":"Alvin Kamara","pos":"RB","team":"NO","fpts":102.7,"gp":11,"ppg":9.3,"weekly":[13.7,17.0,6.6,11.2,9.5,12.6,5.9,6.5,1.7,14.5,null,3.5,0,0,0,0,0,0],"posRank":"RB46","adp":47,"round":4,"actualFinish":"RB46","beat":-29,"adpPosRank":"RB17","adpHistory":[49,52,55,53,52,50,48.2,47.8,47.2,47,47.9,48.3,48.1,47],"draftedPct":7.0,"draftedCount":7},{"name":"Dawson Knox","pos":"TE","team":"BUF","fpts":101.7,"gp":16,"ppg":6.4,"weekly":[4.0,3.9,0,0.0,3.5,8.9,null,2.5,4.0,6.7,3.3,4.7,5.8,15.3,18.7,2.0,8.0,10.4],"posRank":"TE29","actualFinish":"TE29"},{"name":"Jalen Nailor","pos":"WR","team":"MIN","fpts":101.7,"gp":17,"ppg":6.0,"weekly":[3.8,6.1,6.7,7.2,7.2,null,5.7,0.0,2.6,26.4,2.6,0.0,0.0,6.0,19.5,0.0,0.0,7.9],"posRank":"WR61","adp":218.6,"round":19,"actualFinish":"WR61","beat":29,"adpPosRank":"WR90","adpHistory":[250,255,263,257,267,282,225.3,222.1,219.7,215.9,215.4,198.2,202,218.6],"draftedPct":7.0,"draftedCount":7},{"name":"Ty Johnson","pos":"RB","team":"BUF","fpts":100.3,"gp":17,"ppg":5.9,"weekly":[2.4,0.6,3.1,0.0,1.0,2.6,null,0.6,10.0,4.6,15.0,8.2,5.5,5.9,5.8,7.6,7.8,19.6],"posRank":"RB47","adp":229,"round":20,"actualFinish":"RB47","beat":41,"adpPosRank":"RB88","adpHistory":[257,279,301,323,322,316,228.2,229.4,229.7,230.4,230.6,229.5,229.1,229],"draftedPct":6.0,"draftedCount":6},{"name":"Garrett Wilson","pos":"WR","team":"NYJ","fpts":99.5,"gp":7,"ppg":14.2,"weekly":[22.5,9.0,24.4,20.2,19.1,4.3,0,0,null,0.0,0,0,0,0,0,0,0,0],"posRank":"WR62","adp":39.2,"round":4,"actualFinish":"WR62","beat":-45,"adpPosRank":"WR17","adpHistory":[30,28,27,27,26,26,28.4,28.4,27.2,28.1,28.4,31.2,35.1,39.2],"draftedPct":10.0,"draftedCount":10},{"name":"Michael Carter","pos":"RB","team":"ARI","fpts":99.0,"gp":13,"ppg":7.6,"weekly":[0,0,0,0.1,18.3,8.4,5.6,null,0,0.4,7.8,8.8,11.4,5.1,13.4,6.5,6.3,6.9],"posRank":"RB48","actualFinish":"RB48"},{"name":"Shedeur Sanders","pos":"QB","team":"CLE","fpts":99.0,"gp":8,"ppg":12.4,"weekly":[0,0,0,0,0,0,0,0,null,0,2.5,11.3,10.6,37.5,6.5,13.2,11.4,6.0],"posRank":"QB37","adp":225.1,"round":19,"actualFinish":"QB37","beat":-2,"adpPosRank":"QB35","adpHistory":[214,216,216,217,220,222,222.8,221.9,222.8,222.3,223.9,207.7,219.5,225.1],"draftedPct":3.0,"draftedCount":3},{"name":"DeMario Douglas","pos":"WR","team":"NE","fpts":98.8,"gp":16,"ppg":6.2,"weekly":[8.2,1.8,2.7,0,3.7,16.1,4.7,5.7,23.0,5.4,6.1,6.1,6.3,null,0.5,1.6,2.0,4.9],"posRank":"WR63","adp":146.5,"round":13,"actualFinish":"WR63","beat":-2,"adpPosRank":"WR61","adpHistory":[197,190,184,183,181,181,179.4,181.1,181.2,173.4,165.4,155.5,148.5,146.5],"draftedPct":7.0,"draftedCount":7},{"name":"Kendrick Bourne","pos":"WR","team":"SF","fpts":98.1,"gp":14,"ppg":7.0,"weekly":[0,6.2,7.8,2.7,27.2,22.2,3.4,7.4,5.4,2.9,0,0,0.0,null,3.7,5.7,3.5,0.0],"posRank":"WR64","actualFinish":"WR64"},{"name":"Xavier Hutchinson","pos":"WR","team":"HOU","fpts":98.0,"gp":16,"ppg":6.1,"weekly":[5.5,4.9,4.6,3.7,16.8,null,2.3,17.9,6.0,0,7.2,0.9,5.9,0.0,2.6,1.4,4.9,13.4],"posRank":"WR65","actualFinish":"WR65"},{"name":"Darius Slayton","pos":"WR","team":"NYG","fpts":95.8,"gp":14,"ppg":6.8,"weekly":[0.0,8.1,7.0,7.4,5.1,0,0,4.6,11.2,12.9,0,3.3,12.1,null,9.3,1.8,5.6,7.4],"posRank":"WR66","adp":209.5,"round":18,"actualFinish":"WR66","beat":19,"adpPosRank":"WR85","adpHistory":[215,213,207,207,206,208,205.4,204.7,205.4,205.5,206.3,214.5,214.5,209.5],"draftedPct":13.0,"draftedCount":13},{"name":"Emanuel Wilson","pos":"RB","team":"GB","fpts":95.5,"gp":17,"ppg":5.6,"weekly":[0.4,0.0,2.5,11.1,null,1.7,2.5,11.7,2.7,1.4,11.9,29.5,1.4,1.0,0.3,8.2,3.4,5.8],"posRank":"RB49","actualFinish":"RB49"},{"name":"Ricky Pearsall","pos":"WR","team":"SF","fpts":94.6,"gp":9,"ppg":10.5,"weekly":[17.8,9.2,22.7,8.6,0,0,0,0,0,0,1.0,2.8,3.4,null,15.6,0,13.5,0],"posRank":"WR67","adp":57.5,"round":5,"actualFinish":"WR67","beat":-37,"adpPosRank":"WR30","adpHistory":[87,84,83,84,84,83,82.9,81.2,87.8,79.3,73.9,67.6,60.8,57.5],"draftedPct":10.0,"draftedCount":10},{"name":"Sean Tucker","pos":"RB","team":"TB","fpts":94.4,"gp":17,"ppg":5.6,"weekly":[0.2,0.0,0.0,0.0,2.9,8.5,1.6,10.2,null,6.1,37.0,5.6,0.0,8.9,6.7,6.3,0.8,-0.4],"posRank":"RB50","adp":220.5,"round":19,"actualFinish":"RB50","beat":20,"adpPosRank":"RB70","adpHistory":[258,309,310,331,324,333,230,230.2,230,230.6,230.7,219.4,216,220.5],"draftedPct":5.0,"draftedCount":5},{"name":"Bam Knight","pos":"RB","team":"ARI","fpts":93.9,"gp":12,"ppg":7.8,"weekly":[0,0.0,0,0.0,9.4,12.4,9.4,null,6.7,4.3,14.5,13.2,17.8,6.4,-0.2,0,0,0],"posRank":"RB51","actualFinish":"RB51"},{"name":"Jake Tonges","pos":"TE","team":"SF","fpts":93.3,"gp":10,"ppg":9.3,"weekly":[10.5,7.1,4.1,14.8,17.1,11.8,0,7.2,0,0,0.0,0,0,null,0,1.7,19.0,0],"posRank":"TE30","actualFinish":"TE30"},{"name":"Tez Johnson","pos":"WR","team":"TB","fpts":92.4,"gp":15,"ppg":6.2,"weekly":[0.0,0,0.0,2.3,9.9,11.5,15.8,9.3,null,20.2,1.6,12.3,1.5,0,0.0,0.9,3.9,3.2],"posRank":"WR68","actualFinish":"WR68"},{"name":"Chris Rodriguez Jr.","pos":"RB","team":"WAS","fpts":92.0,"gp":12,"ppg":7.7,"weekly":[0,0,3.9,5.9,0.7,0,7.2,0.2,12.5,7.6,9.5,null,10.1,5.2,0,13.9,0,15.3],"posRank":"RB52","adp":184,"round":16,"actualFinish":"RB52","beat":7,"adpPosRank":"RB59","adpHistory":[231,null,null,null,null,null,null,null,null,null,null,250,185,184],"draftedPct":3.0,"draftedCount":3},{"name":"Adonai Mitchell","pos":"WR","team":"NYJ","fpts":91.9,"gp":16,"ppg":5.7,"weekly":[4.1,4.0,0.0,11.6,0.0,0,1.8,0.0,1.7,0,2.0,6.2,27.2,3.4,17.4,7.3,5.2,0.0],"posRank":"WR69","adp":224.3,"round":19,"actualFinish":"WR69","beat":25,"adpPosRank":"WR94","adpHistory":[271,277,273,274,259,279,227.7,227.7,227.8,228.2,228.1,222.2,222.2,224.3],"draftedPct":17.0,"draftedCount":17},{"name":"Gunnar Helm","pos":"TE","team":"TEN","fpts":91.7,"gp":16,"ppg":5.7,"weekly":[2.6,2.9,5.7,2.2,7.4,3.5,7.6,10.3,2.5,null,6.9,11.1,8.3,1.8,14.9,2.9,1.1,0],"posRank":"TE31","adp":228.6,"round":20,"actualFinish":"TE31","beat":7,"adpPosRank":"TE38","adpHistory":[232,276,325,341,345,327,229.7,227.3,231.1,232.6,229.6,231.1,229.6,228.6],"draftedPct":2.0,"draftedCount":2},{"name":"Andrei Iosivas","pos":"WR","team":"CIN","fpts":89.9,"gp":15,"ppg":6.0,"weekly":[0,2.2,0,3.7,13.2,1.5,7.9,0.0,18.0,null,5.0,10.6,9.9,3.7,0.0,3.1,8.1,3.0],"posRank":"WR70","adp":199.6,"round":17,"actualFinish":"WR70","beat":9,"adpPosRank":"WR79","adpHistory":[189,187,190,195,196,200,200.8,201.6,201.6,200.5,199.2,198.6,199.9,199.6],"draftedPct":2.0,"draftedCount":2},{"name":"Bhayshul Tuten","pos":"RB","team":"JAX","fpts":89.6,"gp":15,"ppg":6.0,"weekly":[1.1,15.4,8.1,3.2,2.1,4.8,2.2,null,9.6,2.0,13.4,1.7,8.9,-0.5,9.3,0,0,8.3],"posRank":"RB53","adp":145.3,"round":13,"actualFinish":"RB53","beat":-6,"adpPosRank":"RB47","adpHistory":[134,129,129,133,136,139,141.5,143.7,143.3,147.2,156.3,156,148,145.3],"draftedPct":6.0,"draftedCount":6},{"name":"Jalen Coker","pos":"WR","team":"CAR","fpts":89.4,"gp":11,"ppg":8.1,"weekly":[0,0,0,0,0,0,0.0,6.6,1.9,5.1,9.2,6.2,17.4,null,15.0,7.7,3.6,16.7],"posRank":"WR71","adp":213.8,"round":18,"actualFinish":"WR71","beat":16,"adpPosRank":"WR87","adpHistory":[204,210,219,215,217,219,217.9,218.7,219.2,223.7,225.9,222.1,221.7,213.8],"draftedPct":9.0,"draftedCount":9},{"name":"Xavier Legette","pos":"WR","team":"CAR","fpts":89.3,"gp":15,"ppg":6.0,"weekly":[4.0,0.8,0,0,11.1,3.1,24.2,3.7,3.2,0.0,18.3,5.2,1.1,null,5.9,2.2,1.3,5.2],"posRank":"WR72","adp":174,"round":15,"actualFinish":"WR72","beat":-2,"adpPosRank":"WR70","adpHistory":[161,168,159,160,159,159,161.5,163.8,164.6,168.9,169.6,174.1,177.2,174],"draftedPct":3.0,"draftedCount":3},{"name":"Marvin Mims Jr.","pos":"WR","team":"DEN","fpts":89.0,"gp":15,"ppg":5.9,"weekly":[4.2,10.4,1.4,20.5,3.9,4.8,15.8,1.8,0,0,0.2,null,3.7,1.7,7.7,5.9,4.0,3.0],"posRank":"WR73","adp":117.2,"round":10,"actualFinish":"WR73","beat":-20,"adpPosRank":"WR53","adpHistory":[129,128,127,127,127,128,127.8,125.5,125.8,125.8,124.5,123.2,121.3,117.2],"draftedPct":1.0,"draftedCount":1},{"name":"Darren Waller","pos":"TE","team":"MIA","fpts":88.7,"gp":9,"ppg":9.9,"weekly":[0,0,0,17.7,18.8,9.2,0.0,0,0,0,0,null,6.7,2.7,25.6,7.0,1.0,0],"posRank":"TE32","adp":203.6,"round":17,"actualFinish":"TE32","beat":-4,"adpPosRank":"TE28","adpHistory":[250,750,750,750,700,195,186.8,190,195.8,207.6,212.7,213.8,217.7,203.6],"draftedPct":2.0,"draftedCount":2},{"name":"Dylan Sampson","pos":"RB","team":"CLE","fpts":88.6,"gp":15,"ppg":5.9,"weekly":[17.3,10.9,0.2,-0.2,1.2,4.4,2.7,7.9,null,0.9,1.9,16.2,2.3,10.8,0,0,5.7,6.4],"posRank":"RB54","adp":151,"round":13,"actualFinish":"RB54","beat":-6,"adpPosRank":"RB48","adpHistory":[170,180,187,193,193,189,191.6,171.2,151.2,146.5,145.4,143.9,154.1,151],"draftedPct":13.0,"draftedCount":13},{"name":"Nick Chubb","pos":"RB","team":"HOU","fpts":88.3,"gp":15,"ppg":5.9,"weekly":[6.0,15.2,7.0,8.2,12.1,null,2.1,8.9,3.4,6.2,1.7,2.5,9.4,0.3,0,5.2,0.1,0],"posRank":"RB55","adp":124.4,"round":11,"actualFinish":"RB55","beat":-16,"adpPosRank":"RB39","adpHistory":[187,198,205,172,172,171,172.6,170.2,171.5,137.5,124.8,136.1,127.1,124.4],"draftedPct":4.0,"draftedCount":4},{"name":"Mike Evans","pos":"WR","team":"TB","fpts":87.8,"gp":8,"ppg":11.0,"weekly":[10.1,10.6,13.3,0,0,0,0.0,0,null,0,0,0,0,0,22.2,14.1,12.1,5.4],"posRank":"WR74","adp":32.5,"round":3,"actualFinish":"WR74","beat":-60,"adpPosRank":"WR14","adpHistory":[37,38,37,37,37,37,37.2,37.6,37.2,36.5,35.4,35.5,35.9,32.5],"draftedPct":10.0,"draftedCount":10},{"name":"Isiah Pacheco","pos":"RB","team":"KC","fpts":87.3,"gp":13,"ppg":6.7,"weekly":[4.8,3.9,5.8,12.8,8.6,6.1,12.4,5.8,0,null,0,0,5.3,3.0,2.1,13.5,3.2,0],"posRank":"RB56","adp":65,"round":6,"actualFinish":"RB56","beat":-33,"adpPosRank":"RB23","adpHistory":[96,98,84,80,80,78,78.7,76.7,76.5,76.9,75.8,73.3,67.8,65],"draftedPct":10.0,"draftedCount":10},{"name":"Mason Taylor","pos":"TE","team":"NYJ","fpts":86.9,"gp":13,"ppg":6.7,"weekly":[3.0,1.5,5.8,11.5,15.7,1.2,6.1,14.4,null,1.4,7.0,5.1,4.1,10.1,0,0,0,0],"posRank":"TE33","adp":184,"round":16,"actualFinish":"TE33","beat":-9,"adpPosRank":"TE24","adpHistory":[163,165,174,180,183,183,185,186.1,186.8,187.6,183.8,197.9,184,184],"draftedPct":4.0,"draftedCount":4},{"name":"David Njoku","pos":"TE","team":"CLE","fpts":86.3,"gp":11,"ppg":7.8,"weekly":[6.7,8.0,9.0,3.1,18.7,5.8,0,13.7,null,10.1,1.7,0,2.4,7.1,0,0,0,0],"posRank":"TE34","adp":101.9,"round":9,"actualFinish":"TE34","beat":-24,"adpPosRank":"TE10","adpHistory":[111,120,124,119,116,116,113.4,111.9,111.3,111.7,109.3,106.6,104.9,101.9],"draftedPct":7.0,"draftedCount":7},{"name":"Calvin Austin III","pos":"WR","team":"PIT","fpts":86.2,"gp":14,"ppg":6.2,"weekly":[17.0,3.2,12.4,3.3,null,0,0,6.8,10.6,3.4,1.5,7.6,0.0,4.1,0.0,1.8,0,14.5],"posRank":"WR75","actualFinish":"WR75","adpHistory":[259,204,203,192,192,193,188.4,186.5,185.5,187.7,192.2,198.2,211.4,218.3],"draftedPct":9.0,"draftedCount":9},{"name":"KaVontae Turpin","pos":"WR","team":"DAL","fpts":85.5,"gp":15,"ppg":5.7,"weekly":[4.7,15.3,8.8,6.4,0,0,2.7,0.8,3.3,null,1.0,5.2,8.1,5.0,3.2,4.7,15.6,0.7],"posRank":"WR76","actualFinish":"WR76"},{"name":"Jonnu Smith","pos":"TE","team":"PIT","fpts":85.2,"gp":17,"ppg":5.0,"weekly":[12.5,6.7,5.3,2.6,null,5.8,11.8,3.7,5.5,1.4,0.0,5.8,1.6,0.0,10.6,2.8,7.7,1.4],"posRank":"TE35","adp":173.5,"round":15,"actualFinish":"TE35","beat":-13,"adpPosRank":"TE22","adpHistory":[89,90,95,101,107,111,129.7,136.1,144.2,157.4,157.1,159.6,168,173.5],"draftedPct":3.0,"draftedCount":3},{"name":"Olamide Zaccheaus","pos":"WR","team":"CHI","fpts":84.8,"gp":14,"ppg":6.1,"weekly":[8.2,4.1,6.6,9.1,null,4.8,2.9,10.3,17.8,1.5,0,1.6,3.9,8.7,0.0,5.3,0,0],"posRank":"WR77","adp":224.5,"round":19,"actualFinish":"WR77","beat":18,"adpPosRank":"WR95","adpHistory":[269,258,259,264,247,265,230.3,225.9,226.7,225.2,227.1,225.6,223.2,224.5]},{"name":"Chris Godwin Jr.","pos":"WR","team":"TB","fpts":84.0,"gp":9,"ppg":9.3,"weekly":[0,0,0,5.6,5.6,0,0,0,null,0,0,2.9,10.8,10.5,12.0,8.0,26.8,1.8],"posRank":"WR78","actualFinish":"WR78","adpHistory":[60,65,65,64,64,64,66.2,68.1,71.4,88.7,94.5,100.1,110.9,117.7],"draftedPct":16.0,"draftedCount":16},{"name":"Sterling Shepard","pos":"WR","team":"TB","fpts":83.0,"gp":13,"ppg":6.4,"weekly":[6.9,7.4,12.0,4.0,11.9,7.1,8.5,1.8,null,6.1,10.1,4.2,1.5,1.5,0,0,0,0],"posRank":"WR79","actualFinish":"WR79"},{"name":"Darnell Mooney","pos":"WR","team":"ATL","fpts":82.3,"gp":15,"ppg":5.5,"weekly":[0,4.0,8.4,2.5,null,0,9.8,2.1,2.5,2.7,6.4,16.4,4.5,1.6,6.5,4.4,5.5,5.0],"posRank":"WR80","adp":132.4,"round":12,"actualFinish":"WR80","beat":-23,"adpPosRank":"WR57","adpHistory":[114,110,98,93,93,94,94.9,95,94.6,107.7,113.3,115.3,128.9,132.4],"draftedPct":20.0,"draftedCount":20},{"name":"Kyler Murray","pos":"QB","team":"ARI","fpts":81.8,"gp":5,"ppg":16.4,"weekly":[18.3,15.0,14.1,18.1,16.3,0,0,null,0,0,0,0,0,0,0,0,0,0],"posRank":"QB38","adp":98.1,"round":9,"actualFinish":"QB38","beat":-28,"adpPosRank":"QB10","adpHistory":[91,94,94,92,92,92,93.7,92.9,92.8,94.2,95,96.5,97.9,98.1],"draftedPct":8.0,"draftedCount":8},{"name":"Tyquan Thornton","pos":"WR","team":"KC","fpts":80.8,"gp":12,"ppg":6.7,"weekly":[6.1,13.9,18.1,8.1,12.0,0,4.9,0,0.0,null,7.1,0.0,0.0,3.9,6.7,0,0,0],"posRank":"WR81","actualFinish":"WR81"},{"name":"Samaje Perine","pos":"RB","team":"CIN","fpts":79.9,"gp":15,"ppg":5.3,"weekly":[2.6,0.0,1.1,0.4,4.9,5.2,3.1,17.0,0.5,null,0,0,6.4,4.8,5.3,12.1,8.3,8.2],"posRank":"RB57","actualFinish":"RB57"},{"name":"Carson Wentz","pos":"QB","team":"MIN","fpts":79.3,"gp":5,"ppg":15.9,"weekly":[0,0,15.3,24.2,14.7,null,16.3,8.8,0,0,0,0,0,0,0,0,0,0],"posRank":"QB39","actualFinish":"QB39"},{"name":"Noah Fant","pos":"TE","team":"CIN","fpts":77.8,"gp":13,"ppg":6.0,"weekly":[12.6,5.8,6.6,0,0,6.7,14.4,7.1,10.8,null,7.6,1.9,1.3,2.5,0,0,0.0,0.5],"posRank":"TE36","adp":230.2,"round":20,"actualFinish":"TE36","beat":9,"adpPosRank":"TE45","adpHistory":[265,347,350,351,340,352,230.6,228.8,230.8,229.3,227.7,229.1,228.6,230.2]},{"name":"Cole Kmet","pos":"TE","team":"CHI","fpts":76.7,"gp":16,"ppg":4.8,"weekly":[4.1,4.9,8.0,7.6,null,1.0,2.6,0,2.0,1.5,9.5,1.3,12.6,6.2,4.8,3.4,3.6,3.6],"posRank":"TE37","adp":227.1,"round":19,"actualFinish":"TE37","beat":-2,"adpPosRank":"TE35","adpHistory":[266,232,268,243,239,247,227.1,226.3,226.4,228.3,227.3,228.4,225.6,227.1]},{"name":"Isaac TeSlaa","pos":"WR","team":"DET","fpts":75.9,"gp":14,"ppg":5.4,"weekly":[8.3,3.9,0.0,0,8.2,0,0.0,null,0,2.1,0.0,0.0,11.5,10.0,0.0,15.2,13.9,2.8],"posRank":"WR82","adp":180.9,"round":16,"actualFinish":"WR82","beat":-10,"adpPosRank":"WR72","adpHistory":[208,209,213,222,230,232,225.5,225.8,227,225.9,220.3,216.3,200,180.9],"draftedPct":5.0,"draftedCount":5},{"name":"Dontayvion Wicks","pos":"WR","team":"GB","fpts":75.8,"gp":13,"ppg":5.8,"weekly":[5.0,8.4,4.1,3.9,null,3.5,1.5,0,0,7.8,1.9,5.2,28.0,0,1.6,3.2,1.7,0],"posRank":"WR83","adp":227.9,"round":19,"actualFinish":"WR83","beat":26,"adpPosRank":"WR109","adpHistory":[272,218,221,223,221,221,220.4,220.3,220.8,221.4,225.4,227.2,227.1,227.9],"draftedPct":1.0,"draftedCount":1},{"name":"Greg Dortch","pos":"WR","team":"ARI","fpts":75.1,"gp":12,"ppg":6.3,"weekly":[0.8,2.1,2.8,7.9,3.2,9.9,2.5,null,0.9,6.2,18.6,16.8,3.4,0,0,0,0,0],"posRank":"WR84","adp":229.5,"round":20,"actualFinish":"WR84","beat":33,"adpPosRank":"WR117","adpHistory":[273,302,325,352,350,319,231.2,231.1,229.9,230.3,229.6,232.4,229.9,229.5]},{"name":"Pat Bryant","pos":"WR","team":"DEN","fpts":74.8,"gp":13,"ppg":5.8,"weekly":[0,3.8,0,0.0,0.0,4.2,1.6,12.0,4.0,5.3,13.2,null,7.2,7.2,0,9.2,0,7.1],"posRank":"WR85","adp":180.5,"round":16,"actualFinish":"WR85","beat":-14,"adpPosRank":"WR71","adpHistory":[211,193,186,181,180,180,182.6,184.5,184.2,184.2,187.2,193.6,192.1,180.5],"draftedPct":2.0,"draftedCount":2},{"name":"Michael Mayer","pos":"TE","team":"LV","fpts":73.8,"gp":13,"ppg":5.7,"weekly":[7.8,2.9,0.0,0,0,16.0,2.0,null,5.6,5.2,4.3,2.4,0,0,0.0,2.0,17.9,7.7],"posRank":"TE38","adp":230,"round":20,"actualFinish":"TE38","beat":5,"adpPosRank":"TE43","adpHistory":[242,null,null,null,null,null,null,null,null,231.2,231.1,231,229.5,230],"draftedPct":1.0,"draftedCount":1},{"name":"JuJu Smith-Schuster","pos":"WR","team":"KC","fpts":73.5,"gp":17,"ppg":4.3,"weekly":[10.5,1.5,9.5,13.6,3.7,8.7,6.5,4.9,1.2,null,0.0,1.8,0.0,1.5,0.0,2.2,4.6,3.3],"posRank":"WR86","actualFinish":"WR86"},{"name":"Darnell Washington","pos":"TE","team":"PIT","fpts":72.4,"gp":13,"ppg":5.6,"weekly":[0,0.0,0,5.0,null,9.2,9.2,0,8.3,2.5,10.7,4.2,6.5,2.2,5.5,5.6,3.5,0],"posRank":"TE39","actualFinish":"TE39"},{"name":"Dillon Gabriel","pos":"QB","team":"CLE","fpts":72.0,"gp":10,"ppg":7.2,"weekly":[0,4.8,0,0.0,16.1,8.8,5.8,13.5,null,20.1,2.9,0,0.0,0,0,0.0,0,0],"posRank":"QB40","adp":230.2,"round":20,"actualFinish":"QB40","beat":-2,"adpPosRank":"QB38","adpHistory":[250,300,275,265,247,242,230.4,230.7,226.2,227.1,229.9,231.8,226.9,230.2],"draftedPct":1.0,"draftedCount":1},{"name":"John Metchie III","pos":"WR","team":"NYJ","fpts":71.9,"gp":13,"ppg":5.5,"weekly":[0.0,1.0,1.8,3.0,0,0,0,0,null,0.6,13.5,18.5,5.7,7.4,6.9,1.4,7.1,5.0],"posRank":"WR87","actualFinish":"WR87"},{"name":"Jeremy McNichols","pos":"RB","team":"WAS","fpts":71.7,"gp":16,"ppg":4.5,"weekly":[2.5,0,13.8,1.3,2.8,6.5,6.5,11.8,0.0,3.9,4.9,null,5.0,1.2,2.2,3.2,4.0,2.1],"posRank":"RB58","actualFinish":"RB58"},{"name":"Tyler Higbee","pos":"TE","team":"LA","fpts":71.1,"gp":10,"ppg":7.1,"weekly":[0.0,7.7,0.0,4.5,0,14.0,4.9,null,10.3,6.3,3.3,0,0,0,0,0,0,20.1],"posRank":"TE40","adp":222.6,"round":19,"actualFinish":"TE40","beat":-6,"adpPosRank":"TE34","adpHistory":[210,219,223,228,226,226,221.6,221.5,221.2,222,221.2,220.3,221.5,222.6],"draftedPct":11.0,"draftedCount":11},{"name":"Mike Gesicki","pos":"TE","team":"CIN","fpts":70.7,"gp":12,"ppg":5.9,"weekly":[2.4,4.8,1.6,1.8,3.5,0,0,0,0,null,0,7.5,3.9,20.6,2.1,12.5,6.7,3.3],"posRank":"TE41","adp":191.3,"round":16,"actualFinish":"TE41","beat":-16,"adpPosRank":"TE25","adpHistory":[160,160,163,167,169,170,168.8,168.8,169.8,171.5,178,184.8,189.2,191.3],"draftedPct":6.0,"draftedCount":6},{"name":"Matthew Golden","pos":"WR","team":"GB","fpts":70.0,"gp":14,"ppg":5.0,"weekly":[3.6,1.5,10.1,11.3,null,13.2,7.7,3.4,2.9,0,3.4,0,0,0.0,8.5,0.4,2.2,1.8],"posRank":"WR88","adp":69.8,"round":6,"actualFinish":"WR88","beat":-52,"adpPosRank":"WR36","adpHistory":[83,87,87,88,88,88,88.8,89.3,88.5,88.4,83.7,76.1,72.5,69.8],"draftedPct":9.0,"draftedCount":9},{"name":"Van Jefferson","pos":"WR","team":"TEN","fpts":70.0,"gp":14,"ppg":5.0,"weekly":[0,3.0,1.8,1.6,0,11.5,8.1,1.6,3.1,null,11.2,2.1,5.0,3.7,5.3,4.4,7.6,0],"posRank":"WR89","actualFinish":"WR89"},{"name":"Tre Harris","pos":"WR","team":"LAC","fpts":69.4,"gp":16,"ppg":4.3,"weekly":[2.1,5.4,0.0,0.0,0,6.7,4.3,8.8,3.8,2.4,2.2,null,6.0,3.1,7.9,9.4,2.5,4.8],"posRank":"WR90","adp":158.5,"round":14,"actualFinish":"WR90","beat":-26,"adpPosRank":"WR64","adpHistory":[119,114,113,121,122,122,120.8,124,118,112.7,116.1,135.6,142.1,158.5],"draftedPct":2.0,"draftedCount":2},{"name":"Isaiah Davis","pos":"RB","team":"NYJ","fpts":69.2,"gp":16,"ppg":4.3,"weekly":[1.8,1.6,0.0,4.7,6.3,1.1,5.2,15.9,null,2.1,1.1,0.7,0.0,2.2,13.5,10.0,3.0,0],"posRank":"RB59","actualFinish":"RB59"},{"name":"Jaylin Noel","pos":"WR","team":"HOU","fpts":68.4,"gp":17,"ppg":4.0,"weekly":[1.7,0.0,1.4,1.0,9.8,null,11.7,11.3,-0.3,7.5,2.2,1.9,0.0,3.3,0.0,0.0,14.6,2.3],"posRank":"WR91","adp":220.2,"round":19,"actualFinish":"WR91","beat":0,"adpPosRank":"WR91","adpHistory":[180,182,181,186,188,190,195.2,196.9,197.9,198.5,201.7,207.8,214.9,220.2],"draftedPct":8.0,"draftedCount":8},{"name":"Davis Mills","pos":"QB","team":"HOU","fpts":67.6,"gp":6,"ppg":11.3,"weekly":[0,0,0,0,1.2,null,0,0,6.2,26.7,16.4,14.5,0,0,0,0,0,2.6],"posRank":"QB41","actualFinish":"QB41"},{"name":"Tyler Lockett","pos":"WR","team":"LV","fpts":67.1,"gp":17,"ppg":3.9,"weekly":[0.0,2.9,7.7,0.0,1.6,1.0,3.8,null,0.0,9.4,6.3,10.2,2.1,7.1,3.0,1.6,8.9,1.5],"posRank":"WR92","adp":194.6,"round":17,"actualFinish":"WR92","beat":-15,"adpPosRank":"WR77","adpHistory":[200,197,197,203,203,206,207.4,207.4,207.6,206.8,207.4,207.4,198.5,194.6]},{"name":"DeAndre Hopkins","pos":"WR","team":"BAL","fpts":67.0,"gp":17,"ppg":3.9,"weekly":[11.5,14.4,2.3,0.0,6.6,4.0,null,2.4,0.0,3.6,2.1,3.3,4.5,0.0,4.2,8.1,0.0,0.0],"posRank":"WR93","adp":191,"round":16,"actualFinish":"WR93","beat":-18,"adpPosRank":"WR75","adpHistory":[174,173,173,177,176,177,177.1,176.6,178.1,181.8,181.3,183,184.4,191],"draftedPct":7.0,"draftedCount":7},{"name":"Travis Hunter","pos":"WR","team":"JAX","fpts":66.8,"gp":7,"ppg":9.5,"weekly":[9.3,5.2,3.1,7.2,9.4,5.5,27.1,null,0,0,0,0,0,0,0,0,0,0],"posRank":"WR94","actualFinish":"WR94","adpHistory":[41,43,45,50,55,56,59.5,60.5,60.6,61.8,61.8,60.9,65.5,67.3],"draftedPct":5.0,"draftedCount":5},{"name":"Devaughn Vele","pos":"WR","team":"NO","fpts":66.3,"gp":9,"ppg":7.4,"weekly":[2.3,7.3,0,0,3.3,0,0,2.0,0,2.5,null,6.7,23.3,7.0,11.9,0,0,0],"posRank":"WR95","adp":228,"round":19,"actualFinish":"WR95","beat":16,"adpPosRank":"WR111","adpHistory":[270,304,265,238,244,261,226.1,226,227.6,227.1,227.7,228.3,228.9,228],"draftedPct":1.0,"draftedCount":1},{"name":"Tyrod Taylor","pos":"QB","team":"NYJ","fpts":65.4,"gp":6,"ppg":10.9,"weekly":[0,8.3,18.7,0,0,0,4.1,0,null,0,0,13.8,21.3,-0.8,0,0,0,0],"posRank":"QB42","actualFinish":"QB42"},{"name":"Justice Hill","pos":"RB","team":"BAL","fpts":65.2,"gp":10,"ppg":6.5,"weekly":[-0.1,5.5,7.5,28.7,2.2,9.4,null,0.2,3.5,8.3,0,0.0,0,0,0,0,0,0],"posRank":"RB60","adp":200.8,"round":17,"actualFinish":"RB60","beat":3,"adpPosRank":"RB63","adpHistory":[188,179,179,184,184,184,185.3,187.6,188.9,190.5,192.4,195.2,198.5,200.8],"draftedPct":9.0,"draftedCount":9},{"name":"Tommy Tremble","pos":"TE","team":"CAR","fpts":63.9,"gp":15,"ppg":4.3,"weekly":[1.2,5.0,3.6,15.2,1.7,7.9,1.0,1.4,0.0,0,6.4,0,1.2,null,3.3,1.6,1.6,12.8],"posRank":"TE42","actualFinish":"TE42"},{"name":"Greg Dulcich","pos":"TE","team":"MIA","fpts":63.8,"gp":9,"ppg":7.1,"weekly":[0,0,0,0,0,0,0,0,9.9,3.2,3.8,null,4.4,7.1,6.6,6.6,16.1,6.1],"posRank":"TE43","actualFinish":"TE43"},{"name":"Brashard Smith","pos":"RB","team":"KC","fpts":63.3,"gp":17,"ppg":3.7,"weekly":[0.0,0.2,1.3,6.6,6.6,5.1,13.1,0.8,0.7,null,2.8,6.6,0.0,0.7,0.1,1.4,9.5,7.8],"posRank":"RB61","adp":222,"round":19,"actualFinish":"RB61","beat":10,"adpPosRank":"RB71","adpHistory":[213,215,224,221,219,220,212.1,212.3,210.1,203.8,205.3,217.7,223.3,222],"draftedPct":3.0,"draftedCount":3},{"name":"Davis Allen","pos":"TE","team":"LA","fpts":62.8,"gp":15,"ppg":4.2,"weekly":[8.3,7.8,1.3,1.0,4.4,1.7,1.4,null,6.7,8.8,0,5.9,1.4,4.1,4.6,5.4,0,0.0],"posRank":"TE44","actualFinish":"TE44"},{"name":"Isaiah Likely","pos":"TE","team":"BAL","fpts":62.7,"gp":12,"ppg":5.2,"weekly":[0,0,0,0,2.2,2.6,null,2.8,9.0,3.7,3.5,2.0,13.5,12.5,0,0.0,5.7,5.2],"posRank":"TE45","adp":176.3,"round":15,"actualFinish":"TE45","beat":-22,"adpPosRank":"TE23","adpHistory":[125,132,134,132,134,135,137,136.5,136.8,143.8,163.7,167.8,171.7,176.3],"draftedPct":7.0,"draftedCount":7},{"name":"Brian Robinson","pos":"RB","team":"SF","fpts":62.5,"gp":17,"ppg":3.7,"weekly":[4.7,2.9,2.2,2.1,1.2,3.8,3.6,0.0,11.3,11.5,2.4,5.4,2.6,null,2.1,2.0,3.8,0.9],"posRank":"RB62","actualFinish":"RB62","adpHistory":[85,86,88,87,87,86,86.1,84.4,82.5,81.7,81.8,83,91,116.9],"draftedPct":2.0,"draftedCount":2},{"name":"Ray Davis","pos":"RB","team":"BUF","fpts":61.1,"gp":17,"ppg":3.6,"weekly":[1.1,2.4,0.0,0.3,0.1,9.9,null,1.6,0.0,0.8,0.0,0.0,6.2,0.0,2.3,5.4,2.6,28.4],"posRank":"RB63","adp":153.2,"round":13,"actualFinish":"RB63","beat":-14,"adpPosRank":"RB49","adpHistory":[159,157,147,145,145,145,143.6,144.1,145.3,145.7,147.1,138.7,146.4,153.2],"draftedPct":11.0,"draftedCount":11},{"name":"Kalif Raymond","pos":"WR","team":"DET","fpts":60.8,"gp":15,"ppg":4.1,"weekly":[3.6,3.3,1.4,3.3,0.0,0.0,4.7,null,0.0,9.9,0.0,5.7,0,0,3.0,16.2,1.5,8.2],"posRank":"WR96","adp":225.1,"round":19,"actualFinish":"WR96","beat":2,"adpPosRank":"WR98","adpHistory":[250,300,261,246,261,290,225,227.3,227,226.8,226.1,226.2,223.9,225.1],"draftedPct":1.0,"draftedCount":1},{"name":"Malik Nabers","pos":"WR","team":"NYG","fpts":60.1,"gp":4,"ppg":15.0,"weekly":[12.1,40.7,3.3,4.0,0,0,0,0,0,0,0,0,0,null,0,0,0,0],"posRank":"WR97","adp":9.7,"round":1,"actualFinish":"WR97","beat":-92,"adpPosRank":"WR5","adpHistory":[8,8,11,11,10,9,9.6,9.7,9.7,9.6,9.5,8.7,9.6,9.7],"draftedPct":7.0,"draftedCount":7},{"name":"Cedric Tillman","pos":"WR","team":"CLE","fpts":60.0,"gp":12,"ppg":5.0,"weekly":[16.2,10.2,5.6,1.6,0,0,0,0,null,3.1,8.2,1.5,0.0,3.3,0,1.8,5.2,3.3],"posRank":"WR98","adp":160.2,"round":14,"actualFinish":"WR98","beat":-33,"adpPosRank":"WR65","adpHistory":[171,176,171,166,166,161,159.5,156.1,156.2,160.6,160.9,160.3,157.9,160.2],"draftedPct":19.0,"draftedCount":19},{"name":"Devin Neal","pos":"RB","team":"NO","fpts":60.0,"gp":9,"ppg":6.7,"weekly":[0.9,0,0,0,0,0,0.1,4.1,2.2,6.1,null,11.1,9.9,15.4,10.2,0,0,0],"posRank":"RB64","adp":227.1,"round":19,"actualFinish":"RB64","beat":19,"adpPosRank":"RB83","adpHistory":[192,196,199,218,223,224,223.3,224,224.3,226.2,226.5,226.5,225.5,227.1]},{"name":"Daniel Bellinger","pos":"TE","team":"NYG","fpts":59.6,"gp":13,"ppg":4.6,"weekly":[2.4,0.0,1.6,2.3,9.2,0,17.8,3.1,0,1.8,0.0,0.0,0,null,6.5,0,3.1,11.8],"posRank":"TE46","actualFinish":"TE46"},{"name":"Austin Hooper","pos":"TE","team":"NE","fpts":59.3,"gp":13,"ppg":4.6,"weekly":[2.0,6.8,4.8,3.4,0,1.5,9.1,5.8,3.0,0.0,0,6.9,0,null,0,5.4,9.1,1.5],"posRank":"TE47","actualFinish":"TE47"},{"name":"Emari Demercado","pos":"RB","team":"ARI","fpts":59.3,"gp":12,"ppg":4.9,"weekly":[0.0,0,0.0,10.1,7.1,0.1,0,null,8.8,13.4,4.0,0,0,0,2.1,3.0,4.0,6.7],"posRank":"RB65","actualFinish":"RB65"},{"name":"Elijah Higgins","pos":"TE","team":"ARI","fpts":59.1,"gp":17,"ppg":3.5,"weekly":[1.3,6.5,1.7,0.0,3.0,5.4,1.3,null,6.0,3.9,2.1,0.0,3.7,1.0,1.3,16.1,0.0,5.8],"posRank":"TE48","actualFinish":"TE48"},{"name":"Tory Horton","pos":"WR","team":"SEA","fpts":59.1,"gp":8,"ppg":7.4,"weekly":[0.0,11.2,12.2,2.0,12.9,0.0,0.0,null,20.8,0,0,0,0,0,0,0,0,0],"posRank":"WR99","adp":198.5,"round":17,"actualFinish":"WR99","beat":-21,"adpPosRank":"WR78","adpHistory":[255,322,326,339,318,357,229.9,228.9,230.4,229.8,227.7,207.8,192.2,198.5],"draftedPct":5.0,"draftedCount":5},{"name":"Christian Kirk","pos":"WR","team":"HOU","fpts":57.9,"gp":11,"ppg":5.3,"weekly":[0,0,5.5,5.0,10.4,null,0,0,6.6,1.3,1.6,16.4,0,1.6,0,6.7,2.1,0.7],"posRank":"WR100","adp":120.5,"round":11,"actualFinish":"WR100","beat":-44,"adpPosRank":"WR56","adpHistory":[130,139,131,128,129,130,131,131,131.4,130.7,129.7,127.3,122.5,120.5],"draftedPct":8.0,"draftedCount":8},{"name":"Tank Bigsby","pos":"RB","team":"PHI","fpts":56.8,"gp":15,"ppg":3.8,"weekly":[1.2,0,0.0,0.0,0.0,0.0,2.0,13.4,null,0.7,3.4,0.8,0,0.4,5.7,9.7,1.9,17.6],"posRank":"RB66","adp":129,"round":11,"actualFinish":"RB66","beat":-23,"adpPosRank":"RB43","adpHistory":[154,149,151,159,160,160,160.3,160.5,161.8,149.1,134.2,125,125.3,129],"draftedPct":14.0,"draftedCount":14},{"name":"Jake Browning","pos":"QB","team":"CIN","fpts":56.7,"gp":5,"ppg":11.3,"weekly":[0,20.7,7.9,5.4,22.1,0,0,0,0,null,0,0.6,0,0,0,0,0,0],"posRank":"QB43","actualFinish":"QB43"},{"name":"Tyreek Hill","pos":"WR","team":"MIA","fpts":56.5,"gp":4,"ppg":14.1,"weekly":[8.0,19.9,15.9,12.7,0,0,0,0,0,0,0,null,0,0,0,0,0,0],"posRank":"WR101","adp":33.4,"round":3,"actualFinish":"WR101","beat":-86,"adpPosRank":"WR15","adpHistory":[28,32,34,35,35,31,25.9,25.5,23.4,21.6,22.2,27.1,31,33.4],"draftedPct":10.0,"draftedCount":10},{"name":"Demarcus Robinson","pos":"WR","team":"SF","fpts":56.2,"gp":14,"ppg":4.0,"weekly":[0,0,0,3.0,6.9,6.4,0.0,2.5,0.0,6.4,2.3,1.8,0.6,null,5.6,10.3,5.0,5.4],"posRank":"WR102","actualFinish":"WR102"},{"name":"Russell Wilson","pos":"QB","team":"NYG","fpts":55.8,"gp":6,"ppg":9.3,"weekly":[11.1,34.3,7.1,0.3,0,0.0,0,0,0,3.0,0,0,0,null,0,0,0,0],"posRank":"QB44","adp":207.4,"round":18,"actualFinish":"QB44","beat":-13,"adpPosRank":"QB31","adpHistory":[191,200,198,198,199,199,197.9,199,199.5,193.6,192.7,195.5,200.5,207.4]},{"name":"Keaton Mitchell","pos":"RB","team":"BAL","fpts":55.4,"gp":13,"ppg":4.3,"weekly":[0,0,0,0,2.3,0.0,null,4.3,2.8,3.1,7.4,2.9,11.1,7.6,6.6,1.3,5.8,0.2],"posRank":"RB67","adp":190.3,"round":16,"actualFinish":"RB67","beat":-7,"adpPosRank":"RB60","adpHistory":[264,278,213,215,211,210,211.1,212.1,213.8,216.4,215.4,195.4,195.2,190.3],"draftedPct":10.0,"draftedCount":10},{"name":"Josh Oliver","pos":"TE","team":"MIN","fpts":55.0,"gp":12,"ppg":4.6,"weekly":[1.5,0,8.2,0.0,11.5,null,1.9,0,0,0,0.7,1.4,0,16.4,2.8,3.9,1.8,4.9],"posRank":"TE49","actualFinish":"TE49"},{"name":"Brandin Cooks","pos":"WR","team":"BUF","fpts":54.9,"gp":13,"ppg":4.2,"weekly":[5.6,4.6,5.4,5.2,1.5,3.1,1.3,5.2,3.6,0,0,0,2.3,0,0.0,0.0,17.1,0],"posRank":"WR103","actualFinish":"WR103"},{"name":"Isaiah Bond","pos":"WR","team":"CLE","fpts":54.7,"gp":15,"ppg":3.6,"weekly":[1.5,2.5,3.6,8.8,4.9,2.9,0,0.0,null,0,0.8,7.8,3.7,0.0,10.9,2.0,2.6,2.7],"posRank":"WR104","actualFinish":"WR104"},{"name":"Ollie Gordon II","pos":"RB","team":"MIA","fpts":54.1,"gp":17,"ppg":3.2,"weekly":[1.3,2.3,9.8,1.0,-0.2,1.2,2.3,13.6,1.9,-0.3,10.5,null,1.0,7.7,0.0,-0.1,0.0,2.1],"posRank":"RB68","adp":160.7,"round":14,"actualFinish":"RB68","beat":-17,"adpPosRank":"RB51","adpHistory":[248,229,244,279,281,287,227.8,229.6,228.1,230.2,228.5,226.3,202.7,160.7],"draftedPct":3.0,"draftedCount":3},{"name":"Ja'Tavion Sanders","pos":"TE","team":"CAR","fpts":54.0,"gp":12,"ppg":4.5,"weekly":[4.7,12.4,3.1,0,0,0,0.0,4.9,1.5,8.2,6.2,1.6,0.0,null,2.5,8.9,0,0],"posRank":"TE50","adp":203.1,"round":17,"actualFinish":"TE50","beat":-23,"adpPosRank":"TE27","adpHistory":[225,235,229,226,218,218,217.7,217.4,219.2,219.4,213.2,205,204.3,203.1],"draftedPct":13.0,"draftedCount":13},{"name":"Rashod Bateman","pos":"WR","team":"BAL","fpts":53.4,"gp":13,"ppg":4.1,"weekly":[3.0,3.5,17.3,3.4,0.0,1.8,null,7.1,9.3,2.0,0,0,0.0,4.3,0,0.0,1.7,0],"posRank":"WR105","adp":119.6,"round":10,"actualFinish":"WR105","beat":-50,"adpPosRank":"WR55","adpHistory":[132,119,117,114,112,112,113,114.4,115,115.8,116.3,115.5,117,119.6],"draftedPct":8.0,"draftedCount":8},{"name":"Jackson Hawes","pos":"TE","team":"BUF","fpts":52.7,"gp":13,"ppg":4.1,"weekly":[3.9,1.5,7.5,2.5,0,0,null,3.5,2.8,9.6,0,4.6,2.0,7.3,1.9,4.6,0,1.0],"posRank":"TE51","actualFinish":"TE51"},{"name":"Josh Palmer","pos":"WR","team":"BUF","fpts":52.3,"gp":12,"ppg":4.4,"weekly":[11.1,6.7,1.5,4.5,5.6,8.0,null,0,0,0,3.7,4.1,0,0,2.6,1.2,2.2,1.1],"posRank":"WR106","actualFinish":"WR106"},{"name":"Jaylen Wright","pos":"RB","team":"MIA","fpts":52.2,"gp":9,"ppg":5.8,"weekly":[0,0,0,0,0,0,0,3.8,0,1.7,0.4,null,1.6,19.7,2.1,12.3,5.6,5.0],"posRank":"RB69","adp":207,"round":18,"actualFinish":"RB69","beat":-4,"adpPosRank":"RB65","adpHistory":[184,175,175,171,171,168,165.9,166.5,167.4,171.5,175.4,176.8,181.7,207],"draftedPct":5.0,"draftedCount":5},{"name":"Terrance Ferguson","pos":"TE","team":"LA","fpts":52.1,"gp":11,"ppg":4.7,"weekly":[0,0,0,0,3.1,0.0,10.1,null,7.4,4.2,0,0.0,0.0,0.0,1.6,12.3,13.4,0],"posRank":"TE52","adp":228.8,"round":20,"actualFinish":"TE52","beat":-13,"adpPosRank":"TE39","adpHistory":[193,201,200,208,209,213,217,220.8,220.3,221.3,226.1,228.9,229.7,228.8],"draftedPct":6.0,"draftedCount":6},{"name":"Malik Willis","pos":"QB","team":"GB","fpts":52.1,"gp":4,"ppg":13.0,"weekly":[0,0,0,0,null,0,0,0,0,0,5.8,0.6,0,0,0,13.2,32.5,0],"posRank":"QB45","actualFinish":"QB45"},{"name":"Tim Patrick","pos":"WR","team":"JAX","fpts":51.7,"gp":13,"ppg":4.0,"weekly":[0,0.0,2.6,0.9,0.0,9.6,3.2,null,0,0,11.0,0.0,2.1,18.8,0,2.1,0.0,1.4],"posRank":"WR107","adp":225.1,"round":19,"actualFinish":"WR107","beat":-8,"adpPosRank":"WR99","adpHistory":[274,290,274,252,258,270,228.7,227,227.9,227.6,228.1,226.4,224.6,225.1]},{"name":"Dyami Brown","pos":"WR","team":"JAX","fpts":50.7,"gp":11,"ppg":4.6,"weekly":[8.8,17.6,2.7,0,3.5,4.0,7.0,null,5.9,0.0,0.0,0,0,0,-0.6,0,0,1.8],"posRank":"WR108","adp":216.3,"round":19,"actualFinish":"WR108","beat":-20,"adpPosRank":"WR88","adpHistory":[275,225,212,204,204,202,198.4,200.6,200.9,202.7,202.1,204.8,210.8,216.3],"draftedPct":12.0,"draftedCount":12},{"name":"Calvin Ridley","pos":"WR","team":"TEN","fpts":50.3,"gp":7,"ppg":7.2,"weekly":[6.7,8.7,3.7,5.0,21.1,2.8,0,0,0,null,2.3,0,0,0,0,0,0,0],"posRank":"WR109","adp":55.7,"round":5,"actualFinish":"WR109","beat":-81,"adpPosRank":"WR28","adpHistory":[65,63,62,59,59,59,58.2,58,56.4,55.6,55.5,54,53,55.7],"draftedPct":14.0,"draftedCount":14},{"name":"Jahan Dotson","pos":"WR","team":"PHI","fpts":50.2,"gp":15,"ppg":3.3,"weekly":[8.9,1.4,1.7,0.0,3.4,2.7,0,11.0,null,0.0,6.3,0.0,2.2,1.3,0,4.3,0.0,7.0],"posRank":"WR110","adp":226.1,"round":19,"actualFinish":"WR110","beat":-7,"adpPosRank":"WR103","adpHistory":[250,366,365,329,332,255,228.6,226,227.8,225.7,226.4,227.7,224,226.1],"draftedPct":8.0,"draftedCount":8},{"name":"Luke McCaffrey","pos":"WR","team":"WAS","fpts":49.3,"gp":9,"ppg":5.5,"weekly":[0.0,2.9,14.6,10.1,6.0,10.3,0.0,5.4,0.0,0,0,null,0,0,0,0,0,0],"posRank":"WR111","adp":225,"round":19,"actualFinish":"WR111","beat":-14,"adpPosRank":"WR97","adpHistory":[227,232,265,287,237,294,227,226.1,226.4,226.3,225.6,225.5,224,225],"draftedPct":3.0,"draftedCount":3},{"name":"Luke Musgrave","pos":"TE","team":"GB","fpts":49.2,"gp":13,"ppg":3.8,"weekly":[1.4,5.2,0,1.6,null,1.7,0,1.5,6.4,5.3,0.9,1.7,3.3,4.2,9.2,6.8,0,0],"posRank":"TE53","actualFinish":"TE53"},{"name":"Kyle Williams","pos":"WR","team":"NE","fpts":49.2,"gp":14,"ppg":3.5,"weekly":[2.2,0,1.8,-0.2,0,0.0,0.0,0,0.0,14.2,0.0,2.8,10.3,null,0.0,12.6,5.0,0.5],"posRank":"WR112","adp":168.7,"round":15,"actualFinish":"WR112","beat":-43,"adpPosRank":"WR69","adpHistory":[149,145,138,142,142,143,146.1,148,149.5,144.8,145.5,152,162.7,168.7],"draftedPct":5.0,"draftedCount":5},{"name":"Jameis Winston","pos":"QB","team":"NYG","fpts":49.2,"gp":3,"ppg":16.4,"weekly":[0,0,0,0,0,0,0,0,0,0,13.0,36.2,0,null,0.0,0,0,0],"posRank":"QB46","actualFinish":"QB46"},{"name":"David Sills","pos":"WR","team":"ATL","fpts":49.1,"gp":12,"ppg":4.1,"weekly":[0,0,1.9,0,null,0,0,3.4,0.0,0.0,2.1,9.6,9.5,0.0,13.8,0.0,6.7,2.1],"posRank":"WR113","actualFinish":"WR113"},{"name":"Isaiah Williams","pos":"WR","team":"NYJ","fpts":48.7,"gp":15,"ppg":3.2,"weekly":[0,0.0,0.0,0.0,0,0.0,0.0,8.6,null,1.4,1.6,0.0,0.0,4.4,11.3,6.5,7.5,7.4],"posRank":"WR114","actualFinish":"WR114"},{"name":"Jayden Reed","pos":"WR","team":"GB","fpts":48.5,"gp":5,"ppg":9.7,"weekly":[13.5,0,0,0,null,0,0,0,0,0,0,0,0,9.3,10.5,7.1,8.1,0],"posRank":"WR115","adp":105,"round":9,"actualFinish":"WR115","beat":-66,"adpPosRank":"WR49","adpHistory":[92,91,89,89,89,90,90,89.4,88.5,86.9,84.4,92.3,101.2,105],"draftedPct":9.0,"draftedCount":9},{"name":"Xavier Smith","pos":"WR","team":"LA","fpts":48.3,"gp":16,"ppg":3.0,"weekly":[4.6,0.0,0.0,0.0,0.0,0.0,3.5,null,3.2,2.4,1.8,0,11.2,1.6,0.0,7.7,10.7,1.6],"posRank":"WR116","actualFinish":"WR116"},{"name":"Mitchell Evans","pos":"TE","team":"CAR","fpts":48.2,"gp":14,"ppg":3.4,"weekly":[0,1.9,1.9,11.3,7.4,3.1,4.4,0,0,0.0,4.8,0.0,5.0,null,0.0,5.3,1.6,1.5],"posRank":"TE54","actualFinish":"TE54"},{"name":"Audric Estim\u00e9","pos":"RB","team":"NO","fpts":48.1,"gp":5,"ppg":9.6,"weekly":[0,0,0,0,0,0,0,0,0,0,null,0,0,1.1,8.0,6.6,16.8,15.6],"posRank":"RB70","actualFinish":"RB70"},{"name":"Tanner Hudson","pos":"TE","team":"CIN","fpts":47.8,"gp":10,"ppg":4.8,"weekly":[0,0,0,0,0,11.0,0,1.9,6.2,null,5.2,1.9,8.4,2.1,4.6,1.4,5.1,0],"posRank":"TE55","actualFinish":"TE55"},{"name":"Jeremy Ruckert","pos":"TE","team":"NYJ","fpts":46.9,"gp":14,"ppg":3.4,"weekly":[3.6,7.5,0,3.3,6.8,0.0,0.0,3.4,null,1.0,6.3,0,3.2,3.9,3.3,3.4,1.2,0],"posRank":"TE56","actualFinish":"TE56"},{"name":"Adam Trautman","pos":"TE","team":"DEN","fpts":45.5,"gp":13,"ppg":3.5,"weekly":[1.5,10.0,0.0,5.2,2.1,0,0,0.0,4.5,1.2,1.8,null,7.7,3.7,0,3.4,4.4,0],"posRank":"TE57","actualFinish":"TE57"},{"name":"Tyrell Shavers","pos":"WR","team":"BUF","fpts":45.5,"gp":11,"ppg":4.1,"weekly":[0,0.0,4.4,0.0,0.0,5.7,null,0,1.7,3.4,19.0,0,0,2.6,0,3.1,5.6,0],"posRank":"WR117","actualFinish":"WR117"},{"name":"Jalen Tolbert","pos":"WR","team":"DAL","fpts":44.3,"gp":12,"ppg":3.7,"weekly":[1.0,3.6,5.4,10.1,0.0,1.8,2.6,12.7,0,null,0.0,0,0.0,0,0,0,7.1,0.0],"posRank":"WR118","adp":225.4,"round":19,"actualFinish":"WR118","beat":-18,"adpPosRank":"WR100","adpHistory":[179,205,206,213,214,215,215.4,215.4,216.4,221,223,225.1,225.9,225.4],"draftedPct":2.0,"draftedCount":2},{"name":"Jerome Ford","pos":"RB","team":"CLE","fpts":43.6,"gp":13,"ppg":3.4,"weekly":[1.5,10.4,5.0,1.3,5.8,8.0,3.0,0.9,null,0.1,0.2,-0.3,4.7,3.0,0,0,0,0],"posRank":"RB71","adp":164,"round":14,"actualFinish":"RB71","beat":-18,"adpPosRank":"RB53","adpHistory":[181,188,193,199,202,204,204.2,185.4,170.3,168.9,163.9,160.7,166.2,164],"draftedPct":8.0,"draftedCount":8},{"name":"Malik Davis","pos":"RB","team":"DAL","fpts":43.6,"gp":10,"ppg":4.4,"weekly":[0,0,0,0,0,0,0.0,0.3,0.3,null,2.0,2.4,10.7,0.6,11.7,2.3,13.3,0],"posRank":"RB72","actualFinish":"RB72"},{"name":"Taysom Hill","pos":"TE","team":"NO","fpts":42.8,"gp":13,"ppg":3.3,"weekly":[0,0,0,0,0.7,6.1,2.8,2.2,3.0,2.0,null,1.7,1.7,-0.1,0.2,16.3,0.0,6.2],"posRank":"TE58","adp":228,"round":19,"actualFinish":"TE58","beat":-22,"adpPosRank":"TE36","adpHistory":[183,189,204,211,215,217,216,215.2,216.9,226.2,227.2,228.3,228.3,228]},{"name":"Jack Bech","pos":"WR","team":"LV","fpts":42.4,"gp":14,"ppg":3.0,"weekly":[3.3,0,2.0,0.0,5.7,0.0,3.3,null,0.0,0.0,2.9,0,4.2,11.0,3.7,6.3,0,0.0],"posRank":"WR119","adp":207.5,"round":18,"actualFinish":"WR119","beat":-35,"adpPosRank":"WR84","adpHistory":[127,133,136,143,150,156,158.9,162.5,163.4,169.7,175.2,187.8,196.8,207.5],"draftedPct":1.0,"draftedCount":1},{"name":"Zavier Scott","pos":"RB","team":"MIN","fpts":40.2,"gp":11,"ppg":3.7,"weekly":[0,0,6.0,16.4,0.8,null,1.6,4.4,0.0,0,0,0,3.1,3.0,0,2.2,0.0,2.7],"posRank":"RB73","actualFinish":"RB73"},{"name":"Tyler Huntley","pos":"QB","team":"BAL","fpts":40.1,"gp":5,"ppg":8.0,"weekly":[0,0,0,0,0,6.6,null,16.7,0,0,0,0,0,0,-0.3,2.8,14.3,0],"posRank":"QB47","actualFinish":"QB47"},{"name":"Roman Wilson","pos":"WR","team":"PIT","fpts":39.6,"gp":9,"ppg":4.4,"weekly":[0,1.7,0,0,null,2.2,3.7,17.4,0.4,11.5,2.7,0.0,0.0,0,0,0,0,0],"posRank":"WR120","adp":226,"round":19,"actualFinish":"WR120","beat":-18,"adpPosRank":"WR102","adpHistory":[250,245,240,235,242,256,226.9,227.4,227.5,225.7,226.6,226.9,226.7,226],"draftedPct":1.0,"draftedCount":1},{"name":"Jaylin Lane","pos":"WR","team":"WAS","fpts":39.2,"gp":15,"ppg":2.6,"weekly":[2.1,1.2,0.8,3.8,2.6,5.4,9.0,1.0,5.9,5.1,2.3,null,0.0,0.0,0.0,0.0,0,0],"posRank":"WR121","actualFinish":"WR121"},{"name":"Gunner Olszewski","pos":"WR","team":"NYG","fpts":38.8,"gp":16,"ppg":2.4,"weekly":[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,9.4,0.0,0.0,5.3,0.0,null,0,0.0,2.9,21.2],"posRank":"WR122","actualFinish":"WR122"},{"name":"Noah Gray","pos":"TE","team":"KC","fpts":38.8,"gp":14,"ppg":2.8,"weekly":[1.3,1.1,4.7,1.1,0,4.5,3.8,4.3,0.0,null,2.9,5.5,0,2.4,0,0.0,1.2,6.0],"posRank":"TE59","adp":228.2,"round":20,"actualFinish":"TE59","beat":-22,"adpPosRank":"TE37","adpHistory":[271,224,227,224,225,225,221.4,220.9,223,224.3,224.4,224.8,227.1,228.2],"draftedPct":2.0,"draftedCount":2},{"name":"Chris Moore","pos":"WR","team":"WAS","fpts":38.6,"gp":10,"ppg":3.9,"weekly":[4.4,0,4.5,0.9,0.0,13.6,7.9,0,0,0.0,4.8,null,0,0,0,0.0,2.5,0],"posRank":"WR123","actualFinish":"WR123"},{"name":"Elijah Arroyo","pos":"TE","team":"SEA","fpts":37.9,"gp":13,"ppg":2.9,"weekly":[1.7,5.1,0.0,6.4,2.0,1.6,7.2,null,10.9,1.5,0.0,1.5,0.0,0.0,0,0,0,0],"posRank":"TE60","adp":202,"round":17,"actualFinish":"TE60","beat":-34,"adpPosRank":"TE26","adpHistory":[216,214,214,227,234,234,226.7,227.3,206.8,187.8,188.5,185.9,194.1,202],"draftedPct":7.0,"draftedCount":7},{"name":"Ameer Abdullah","pos":"RB","team":"IND","fpts":37.9,"gp":13,"ppg":2.9,"weekly":[0,0,0,0,6.6,2.6,3.7,1.8,1.5,1.8,null,0.0,0.0,2.9,9.7,1.4,1.4,4.5],"posRank":"RB74","actualFinish":"RB74"},{"name":"Tyler Johnson","pos":"WR","team":"NYJ","fpts":37.7,"gp":9,"ppg":4.2,"weekly":[5.1,0.0,5.2,0,0,0.0,9.0,15.4,null,0.0,0,0,0,0,0,1.7,1.3,0],"posRank":"WR124","actualFinish":"WR124"},{"name":"Adam Thielen","pos":"WR","team":"PIT","fpts":37.6,"gp":14,"ppg":2.7,"weekly":[0.0,4.6,0.0,3.1,null,0,2.0,0.0,0,3.6,1.6,0.0,0,1.4,1.7,8.9,3.4,7.3],"posRank":"WR125","actualFinish":"WR125"},{"name":"Devontez Walker","pos":"WR","team":"BAL","fpts":37.6,"gp":8,"ppg":4.7,"weekly":[0,16.6,4.4,0.0,0.0,0,null,0,0,0,0,4.0,0.0,0,0,0.0,0,12.6],"posRank":"WR126","adp":229,"round":20,"actualFinish":"WR126","beat":-11,"adpPosRank":"WR115","adpHistory":[250,334,334,334,334,334,334,228.5,229.9,230.5,226,227.7,230.8,229],"draftedPct":1.0,"draftedCount":1},{"name":"Hunter Luepke","pos":"RB","team":"DAL","fpts":37.0,"gp":14,"ppg":2.6,"weekly":[0,0.0,0,0.6,2.0,8.7,1.3,0.2,0.0,null,7.1,1.7,0,0.0,5.0,2.4,5.4,2.6],"posRank":"RB75","actualFinish":"RB75"},{"name":"Brock Wright","pos":"TE","team":"DET","fpts":36.8,"gp":8,"ppg":4.6,"weekly":[0,11.8,0,0.0,8.9,0,5.3,null,2.1,0.0,2.8,5.9,0,0,0,0,0,0],"posRank":"TE61","actualFinish":"TE61"},{"name":"Jordan Whittington","pos":"WR","team":"LA","fpts":36.3,"gp":15,"ppg":2.4,"weekly":[0.5,6.2,3.4,1.7,5.3,5.3,2.9,null,0,0,1.9,4.7,0.0,1.5,0.0,2.9,0.0,0.0],"posRank":"WR127","actualFinish":"WR127"},{"name":"Charlie Kolar","pos":"TE","team":"BAL","fpts":36.2,"gp":13,"ppg":2.8,"weekly":[0,0,4.2,0,2.0,0.0,null,8.0,10.3,3.3,0.0,0.0,2.7,2.9,0.0,2.8,0.0,0],"posRank":"TE62","actualFinish":"TE62"},{"name":"Quinn Ewers","pos":"QB","team":"MIA","fpts":36.2,"gp":4,"ppg":9.1,"weekly":[0,0,0,0,0,0,2.1,0,0,0,0,null,0,0,0,8.9,15.8,9.4],"posRank":"QB48","adp":227.9,"round":19,"actualFinish":"QB48","beat":-12,"adpPosRank":"QB36","adpHistory":[224,314,264,248,355,314,231.7,224.9,228.3,229.3,229.4,228.2,227.9,227.9]},{"name":"Hunter Renfrow","pos":"WR","team":"CAR","fpts":35.9,"gp":6,"ppg":6.0,"weekly":[3.1,23.8,2.6,3.0,1.7,1.7,0,0,0,0,0,0,0,null,0,0,0,0],"posRank":"WR128","actualFinish":"WR128"},{"name":"Tyler Badie","pos":"RB","team":"DEN","fpts":35.4,"gp":16,"ppg":2.2,"weekly":[3.6,4.2,0.0,2.1,2.6,0,3.9,0.6,2.6,0.0,1.0,null,4.8,3.1,1.1,1.2,0.0,4.6],"posRank":"RB76","actualFinish":"RB76"},{"name":"Trey Benson","pos":"RB","team":"ARI","fpts":35.4,"gp":4,"ppg":8.8,"weekly":[8.5,8.4,8.1,10.4,0,0,0,null,0,0,0,0,0,0,0,0,0,0],"posRank":"RB77","adp":142.5,"round":12,"actualFinish":"RB77","beat":-31,"adpPosRank":"RB46","adpHistory":[155,155,158,155,151,150,148.9,150.4,152.1,156.6,155.4,146.1,142.9,142.5],"draftedPct":7.0,"draftedCount":7},{"name":"Riley Leonard","pos":"QB","team":"IND","fpts":35.0,"gp":5,"ppg":7.0,"weekly":[0,0,0,0,0,0,0,0.1,0,0,null,0,0,11.3,0,0.0,-1.0,24.6],"posRank":"QB49","actualFinish":"QB49"},{"name":"Philip Rivers","pos":"QB","team":"IND","fpts":34.7,"gp":3,"ppg":11.6,"weekly":[0,0,0,0,0,0,0,0,0,0,null,0,0,0,7.8,18.1,8.8,0],"posRank":"QB50","actualFinish":"QB50"},{"name":"Lil'Jordan Humphrey","pos":"WR","team":"DEN","fpts":34.6,"gp":7,"ppg":4.9,"weekly":[0,0,0,0,0,9.5,0.0,0,0,0,0,null,0.0,5.7,13.2,1.9,4.3,0],"posRank":"WR129","actualFinish":"WR129"},{"name":"Brady Cook","pos":"QB","team":"NYJ","fpts":34.4,"gp":5,"ppg":6.9,"weekly":[0,0,0,0,0,0,0,0,null,0,0,0,0,4.5,11.9,5.7,5.2,7.1],"posRank":"QB51","actualFinish":"QB51"},{"name":"James Conner","pos":"RB","team":"ARI","fpts":33.3,"gp":3,"ppg":11.1,"weekly":[14.4,12.2,6.7,0,0,0,0,null,0,0,0,0,0,0,0,0,0,0],"posRank":"RB78","adp":57.5,"round":5,"actualFinish":"RB78","beat":-58,"adpPosRank":"RB20","adpHistory":[59,60,60,60,60,60,59.4,58.8,58.7,56.5,56.3,57.3,57,57.5],"draftedPct":3.0,"draftedCount":3},{"name":"Kendre Miller","pos":"RB","team":"NO","fpts":33.3,"gp":7,"ppg":4.8,"weekly":[2.4,2.0,5.6,12.5,5.9,4.2,0.7,0,0,0,null,0,0,0,0,0,0,0],"posRank":"RB79","adp":225.9,"round":19,"actualFinish":"RB79","beat":-1,"adpPosRank":"RB78","adpHistory":[240,281,302,327,333,315,226.3,228.2,228.8,227.6,229.2,228.9,228.8,225.9],"draftedPct":7.0,"draftedCount":7},{"name":"Kevin Austin Jr.","pos":"WR","team":"NO","fpts":33.0,"gp":5,"ppg":6.6,"weekly":[0,0,0.0,0,0,0,0,0,0,0,null,0,0,0,6.3,3.8,15.2,7.7],"posRank":"WR130","actualFinish":"WR130"},{"name":"Jalen McMillan","pos":"WR","team":"TB","fpts":32.9,"gp":4,"ppg":8.2,"weekly":[0,0,0,0,0,0,0,0,null,0,0,0,0,0,5.8,3.6,21.4,2.1],"posRank":"WR131","adp":206,"round":18,"actualFinish":"WR131","beat":-49,"adpPosRank":"WR82","adpHistory":[151,156,154,154,157,157,157.8,158.5,158.1,155.4,154.4,153.7,168,206],"draftedPct":8.0,"draftedCount":8},{"name":"Chris Brooks","pos":"RB","team":"GB","fpts":32.7,"gp":17,"ppg":1.9,"weekly":[1.3,5.7,0.0,1.1,null,0.1,0.0,0.0,4.4,0.0,0.8,3.6,2.9,1.6,2.6,0.4,2.1,6.1],"posRank":"RB80","actualFinish":"RB80"},{"name":"Jawhar Jordan","pos":"RB","team":"HOU","fpts":32.7,"gp":4,"ppg":8.2,"weekly":[0,0,0,0,0,null,0,0,0,0,0,0,0,0,16.8,12.0,3.6,0.3],"posRank":"RB81","actualFinish":"RB81"},{"name":"Hunter Long","pos":"TE","team":"JAX","fpts":32.5,"gp":7,"ppg":4.6,"weekly":[7.6,0,3.2,11.3,1.3,3.9,3.6,null,1.6,0,0,0,0,0,0,0,0,0],"posRank":"TE63","actualFinish":"TE63"},{"name":"Marquez Valdes-Scantling","pos":"WR","team":"PIT","fpts":32.0,"gp":9,"ppg":3.6,"weekly":[0,0.0,1.9,0,1.9,4.2,0,0,0,0,0,0,0,0.0,8.9,1.6,5.1,8.4],"posRank":"WR132","actualFinish":"WR132"},{"name":"Drew Sample","pos":"TE","team":"CIN","fpts":31.9,"gp":12,"ppg":2.7,"weekly":[0.0,1.7,10.0,0,0.9,0.8,0.0,0,0,null,0,1.0,2.7,0,3.2,5.1,1.8,4.7],"posRank":"TE64","actualFinish":"TE64"},{"name":"Mitchell Tinsley","pos":"WR","team":"CIN","fpts":31.6,"gp":8,"ppg":4.0,"weekly":[0,8.3,0.0,1.9,0,0,0,0,3.7,null,0,10.9,4.2,0,2.6,0.0,0,0],"posRank":"WR133","actualFinish":"WR133"},{"name":"Malachi Corley","pos":"WR","team":"CLE","fpts":31.6,"gp":12,"ppg":2.6,"weekly":[0,0,0,0,1.1,0,3.7,3.1,null,3.2,2.9,1.2,0.9,0.2,2.0,6.1,1.4,5.8],"posRank":"WR134","actualFinish":"WR134","adpHistory":[252,342,308,258,240,343,240,236.3,239,226.4,232.9,236.4,226.1,240]},{"name":"Jaleel McLaughlin","pos":"RB","team":"DEN","fpts":31.4,"gp":8,"ppg":3.9,"weekly":[0,0,0,0,0,0.0,0,0,0,0,8.4,null,4.0,4.1,0.4,3.7,4.0,6.8],"posRank":"RB82","actualFinish":"RB82"},{"name":"Tutu Atwell","pos":"WR","team":"LA","fpts":31.2,"gp":8,"ppg":3.9,"weekly":[1.4,0.0,0.0,15.8,9.2,0,0,null,0,0,0,0,0,0,1.9,0,0.0,2.9],"posRank":"WR135","adp":227.9,"round":19,"actualFinish":"WR135","beat":-25,"adpPosRank":"WR110","adpHistory":[220,222,225,229,228,229,223.3,224.4,225.3,227.2,227.2,228.3,227.5,227.9],"draftedPct":7.0,"draftedCount":7},{"name":"Gabe Davis","pos":"WR","team":"BUF","fpts":30.9,"gp":6,"ppg":5.1,"weekly":[0,0,0,0,0,0,null,0,0,0,7.0,3.2,1.5,4.1,0,0,0.0,15.1],"posRank":"WR136","actualFinish":"WR136"},{"name":"Mo Alie-Cox","pos":"TE","team":"IND","fpts":30.7,"gp":11,"ppg":2.8,"weekly":[3.0,1.8,0,0,0,2.6,1.6,0,0.0,0.0,null,1.9,0,0.0,0,3.6,11.0,5.2],"posRank":"TE65","actualFinish":"TE65"},{"name":"Luke Farrell","pos":"TE","team":"SF","fpts":30.5,"gp":13,"ppg":2.3,"weekly":[1.4,9.5,0,3.0,1.8,0.0,2.1,0.0,1.9,9.5,0.0,1.3,0.0,null,0,0.0,0,0],"posRank":"TE66","actualFinish":"TE66"},{"name":"Zay Jones","pos":"WR","team":"ARI","fpts":30.3,"gp":6,"ppg":5.0,"weekly":[1.4,0,4.5,0,2.8,12.9,8.7,null,0,0.0,0,0,0,0,0,0,0,0],"posRank":"WR137","actualFinish":"WR137"},{"name":"Brycen Tremayne","pos":"WR","team":"CAR","fpts":30.0,"gp":15,"ppg":2.0,"weekly":[0.0,7.8,3.5,6.6,1.9,0,0.0,0.0,1.8,0,3.7,0.0,0.0,null,0.0,0.0,0.0,4.7],"posRank":"WR138","actualFinish":"WR138"},{"name":"Raheem Mostert","pos":"RB","team":"LV","fpts":29.4,"gp":12,"ppg":2.4,"weekly":[0,0,0,8.3,2.2,-0.4,1.2,null,2.4,2.5,3.3,5.0,0.6,1.2,1.2,1.9,0,0],"posRank":"RB83","adp":223.2,"round":19,"actualFinish":"RB83","beat":-11,"adpPosRank":"RB72","adpHistory":[217,212,217,216,216,216,215.6,216,216.2,218.3,220.7,221.1,222.5,223.2],"draftedPct":2.0,"draftedCount":2},{"name":"Mitchell Trubisky","pos":"QB","team":"BUF","fpts":29.2,"gp":4,"ppg":7.3,"weekly":[0,1.0,0,0,0,0,null,0.9,0,0.4,0,0,0,0,0,0,0,26.9],"posRank":"QB52","actualFinish":"QB52"},{"name":"Julian Hill","pos":"TE","team":"MIA","fpts":29.0,"gp":11,"ppg":2.6,"weekly":[0.0,0,1.4,2.9,6.2,6.1,1.1,0,0,0,2.4,null,0.0,0,4.5,0,2.6,1.8],"posRank":"TE67","actualFinish":"TE67"},{"name":"Treylon Burks","pos":"WR","team":"WAS","fpts":29.0,"gp":8,"ppg":3.6,"weekly":[0,0,0,0,0,0,0,0,2.4,8.8,0,null,7.5,0.0,0.0,5.0,2.1,3.2],"posRank":"WR139","actualFinish":"WR139"},{"name":"Jimmy Horn Jr.","pos":"WR","team":"CAR","fpts":28.7,"gp":10,"ppg":2.9,"weekly":[0,0,0,0,5.1,6.7,2.5,0.9,1.8,0,0,2.1,0,null,1.7,2.5,2.9,2.5],"posRank":"WR140","actualFinish":"WR140"},{"name":"Elijah Moore","pos":"WR","team":"BUF","fpts":28.6,"gp":9,"ppg":3.2,"weekly":[2.1,10.7,6.1,0.0,0,0.0,null,2.4,3.8,2.8,0,0.7,0,0,0,0,0,0],"posRank":"WR141","adp":228.5,"round":20,"actualFinish":"WR141","beat":-28,"adpPosRank":"WR113","adpHistory":[261,273,272,278,242,257,225.8,226.2,227.1,227.6,227.2,227.6,228.4,228.5],"draftedPct":5.0,"draftedCount":5},{"name":"Ben Sinnott","pos":"TE","team":"WAS","fpts":28.4,"gp":9,"ppg":3.2,"weekly":[0,1.7,0,0.0,0,0,0,3.2,0,7.4,0,null,0,1.8,4.6,1.5,5.9,2.3],"posRank":"TE68","adp":229.5,"round":20,"actualFinish":"TE68","beat":-27,"adpPosRank":"TE41","adpHistory":[250,327,324,326,322,348,230.7,229.8,230.9,229.6,230.3,230.4,229.8,229.5],"draftedPct":3.0,"draftedCount":3},{"name":"Miles Sanders","pos":"RB","team":"DAL","fpts":27.7,"gp":4,"ppg":6.9,"weekly":[5.0,9.9,8.3,4.5,0,0,0,0,0,null,0,0,0,0,0,0,0,0],"posRank":"RB84","adp":225.5,"round":19,"actualFinish":"RB84","beat":-10,"adpPosRank":"RB74","adpHistory":[242,null,209,207,210,201,199.5,196.5,194.5,193.4,195.6,203.9,214.7,225.5],"draftedPct":1.0,"draftedCount":1},{"name":"Isaiah Hodgins","pos":"WR","team":"NYG","fpts":27.5,"gp":6,"ppg":4.6,"weekly":[0,0,0,0,0,0,0,0,0,0,10.7,12.2,1.4,null,1.4,0,1.8,0.0],"posRank":"WR142","actualFinish":"WR142"},{"name":"Connor Heyward","pos":"TE","team":"PIT","fpts":27.4,"gp":14,"ppg":2.0,"weekly":[0.0,1.6,0,0.2,null,8.2,0.0,0.0,0.4,0.0,0.3,0.0,0,0.2,6.4,0,2.6,7.5],"posRank":"TE69","actualFinish":"TE69"},{"name":"John Bates","pos":"TE","team":"WAS","fpts":27.3,"gp":10,"ppg":2.7,"weekly":[0,0,0,0,1.9,0,1.5,3.2,4.0,1.6,0,null,2.9,0.0,2.9,0.0,0,9.3],"posRank":"TE70","actualFinish":"TE70"},{"name":"Josh Johnson","pos":"QB","team":"WAS","fpts":27.3,"gp":3,"ppg":9.1,"weekly":[0,0,0,0,0,0,0,0,0,0,0,null,0,0,0,0.7,8.9,17.7],"posRank":"QB53","actualFinish":"QB53"},{"name":"Luke Schoonmaker","pos":"TE","team":"DAL","fpts":27.2,"gp":14,"ppg":1.9,"weekly":[0.0,0.0,1.5,2.8,1.3,1.8,0,4.5,2.4,null,0,0.0,1.1,2.2,3.9,0,3.5,2.2],"posRank":"TE71","actualFinish":"TE71"},{"name":"Jahdae Walker","pos":"WR","team":"CHI","fpts":26.7,"gp":6,"ppg":4.5,"weekly":[0,0,0,0.0,null,0,0,0.0,0.0,0,0,0,0,0,0,10.1,5.0,11.6],"posRank":"WR143","actualFinish":"WR143"},{"name":"Savion Williams","pos":"WR","team":"GB","fpts":26.5,"gp":12,"ppg":2.2,"weekly":[1.1,2.4,-0.1,5.3,null,0.3,0.0,7.9,2.2,2.2,4.3,0.0,0,0,0,0.9,0,0],"posRank":"WR144","adp":231,"round":20,"actualFinish":"WR144","beat":-26,"adpPosRank":"WR118","adpHistory":[243,288,303,312,323,338,227.6,228.5,227.5,230.7,229.8,228.7,227.5,231]},{"name":"Theo Wease Jr.","pos":"WR","team":"MIA","fpts":25.9,"gp":3,"ppg":8.6,"weekly":[0,0,0,0,0,0,0,0,0,0,0,null,0,0,0,5.2,13.3,7.4],"posRank":"WR145","actualFinish":"WR145"},{"name":"Jaret Patterson","pos":"RB","team":"LAC","fpts":25.7,"gp":6,"ppg":4.3,"weekly":[0,0,0,0,0,0,0,3.0,4.4,0.1,0,null,11.4,0,0,0,0.1,6.7],"posRank":"RB85","actualFinish":"RB85"},{"name":"John FitzPatrick","pos":"TE","team":"GB","fpts":25.2,"gp":11,"ppg":2.3,"weekly":[1.2,0.0,9.2,0,null,0,1.6,1.4,0,0,1.5,2.1,0.0,3.4,4.8,0.0,0,0],"posRank":"TE72","actualFinish":"TE72"},{"name":"Konata Mumpfield","pos":"WR","team":"LA","fpts":25.2,"gp":10,"ppg":2.5,"weekly":[0,0,0,0,0,1.7,7.5,null,0,0.0,0,4.5,0.0,1.5,0.0,7.0,3.0,0.0],"posRank":"WR146","actualFinish":"WR146"},{"name":"Dare Ogunbowale","pos":"RB","team":"HOU","fpts":25.1,"gp":14,"ppg":1.8,"weekly":[3.6,0.0,0.0,0,0.0,null,0.0,2.7,1.2,0,1.9,0.0,0.0,6.5,6.4,0.9,0,1.9],"posRank":"RB86","actualFinish":"RB86"},{"name":"LeQuint Allen Jr.","pos":"RB","team":"JAX","fpts":24.8,"gp":16,"ppg":1.6,"weekly":[2.1,1.3,1.9,1.7,0.0,2.2,1.4,null,2.1,1.6,3.6,0.2,0.0,2.8,2.6,1.0,0.3,0],"posRank":"RB87","actualFinish":"RB87"},{"name":"Ian Thomas","pos":"TE","team":"LV","fpts":24.4,"gp":9,"ppg":2.7,"weekly":[0,0.0,0,0.0,5.0,1.4,0,null,1.9,0,3.0,7.6,1.8,3.7,0,0,0,0],"posRank":"TE73","actualFinish":"TE73"},{"name":"Rasheen Ali","pos":"RB","team":"BAL","fpts":24.2,"gp":15,"ppg":1.6,"weekly":[0.5,0.0,0.0,0.0,0.0,0.0,null,0.0,0.0,0,2.5,0,1.7,3.3,11.2,2.2,2.8,0.0],"posRank":"RB88","actualFinish":"RB88"},{"name":"Brevyn Spann-Ford","pos":"TE","team":"DAL","fpts":24.0,"gp":16,"ppg":1.5,"weekly":[0.0,1.3,0.0,0,0.0,1.2,0.0,1.9,0.0,null,1.4,7.4,0.0,1.7,0.0,0.0,4.1,5.0],"posRank":"TE74","actualFinish":"TE74"},{"name":"Dont'e Thornton Jr.","pos":"WR","team":"LV","fpts":23.5,"gp":11,"ppg":2.1,"weekly":[6.5,3.0,4.9,0.0,0.0,0,0.0,null,0,1.4,0,2.4,2.1,0,0,0,3.2,0.0],"posRank":"WR147","adp":164.1,"round":14,"actualFinish":"WR147","beat":-81,"adpPosRank":"WR66","adpHistory":[247,331,265,234,200,192,190.1,192,192.4,186.1,181.4,174.2,173,164.1],"draftedPct":23.0,"draftedCount":23},{"name":"Allen Lazard","pos":"WR","team":"NYJ","fpts":23.0,"gp":9,"ppg":2.6,"weekly":[0,0,9.3,1.8,1.3,0,3.6,1.5,null,0,0,1.9,2.0,0.0,1.6,0,0,0],"posRank":"WR148","actualFinish":"WR148"},{"name":"Andrew Beck","pos":"RB","team":"NYJ","fpts":23.0,"gp":11,"ppg":2.1,"weekly":[0,0,0.0,0,7.1,1.6,0.0,1.9,null,0.0,0,2.0,0.0,2.7,0.5,0,0,7.2],"posRank":"RB89","actualFinish":"RB89"},{"name":"Grant Calcaterra","pos":"TE","team":"PHI","fpts":22.6,"gp":9,"ppg":2.5,"weekly":[0,1.6,0.0,2.6,3.8,0,0,0,null,0.0,0,1.8,0,0,1.4,0,1.3,10.1],"posRank":"TE75","actualFinish":"TE75"},{"name":"Josh Reynolds","pos":"WR","team":"NYJ","fpts":21.1,"gp":5,"ppg":4.2,"weekly":[3.8,0,0,0.0,5.9,5.5,5.9,0,null,0,0,0,0,0,0,0,0,0],"posRank":"WR149","adp":229.2,"round":20,"actualFinish":"WR149","beat":-33,"adpPosRank":"WR116","adpHistory":[253,340,286,270,303,310,227.1,229.3,228.9,228.2,227.6,228.5,229.1,229.2],"draftedPct":3.0,"draftedCount":3},{"name":"Curtis Samuel","pos":"WR","team":"BUF","fpts":21.1,"gp":6,"ppg":3.5,"weekly":[0,0,0,1.9,10.6,0,null,0.0,1.6,3.1,3.9,0,0,0,0,0,0,0],"posRank":"WR150","actualFinish":"WR150"},{"name":"Will Dissly","pos":"TE","team":"LAC","fpts":20.7,"gp":8,"ppg":2.6,"weekly":[2.8,1.7,0,0,0,3.8,0.0,0,0,0,0,null,0,1.1,0,5.8,3.9,1.6],"posRank":"TE76","adp":230.1,"round":20,"actualFinish":"TE76","beat":-32,"adpPosRank":"TE44","adpHistory":[264,336,340,344,329,342,230.8,229.4,230,230.2,230,230.3,231.2,230.1]},{"name":"Jamari Thrash","pos":"WR","team":"CLE","fpts":20.7,"gp":8,"ppg":2.6,"weekly":[1.6,1.5,2.7,0,3.2,3.3,3.3,5.1,null,0.0,0,0,0,0,0,0,0,0],"posRank":"WR151","actualFinish":"WR151"},{"name":"Dante Pettis","pos":"WR","team":"NO","fpts":20.7,"gp":8,"ppg":2.6,"weekly":[0,0,0,0,0,0,0,0,0,0.0,null,2.4,0.0,0.0,0.0,0.0,7.3,11.0],"posRank":"WR152","actualFinish":"WR152"},{"name":"Jaydon Blue","pos":"RB","team":"DAL","fpts":20.4,"gp":5,"ppg":4.1,"weekly":[0,0,0,0,0.7,0.0,4.4,2.9,0,null,0,0,0,0,0,0,0,12.4],"posRank":"RB90","adp":140.4,"round":12,"actualFinish":"RB90","beat":-45,"adpPosRank":"RB45","adpHistory":[139,127,132,137,140,141,141.9,139,143.4,148.5,131.7,132.1,136.6,140.4],"draftedPct":9.0,"draftedCount":9},{"name":"Mason Tipton","pos":"WR","team":"NO","fpts":20.4,"gp":8,"ppg":2.5,"weekly":[0,0,0,0,0,0.0,0.0,0.0,0,0,null,6.3,4.9,0.0,1.1,8.1,0,0],"posRank":"WR153","actualFinish":"WR153"},{"name":"Raheim Sanders","pos":"RB","team":"CLE","fpts":20.3,"gp":4,"ppg":5.1,"weekly":[6.3,0,0,0,0,0,0,0,null,0,0,0,0,0,0,5.6,4.1,4.3],"posRank":"RB91","actualFinish":"RB91"},{"name":"Johnny Mundt","pos":"TE","team":"JAX","fpts":20.1,"gp":12,"ppg":1.7,"weekly":[0.0,0,1.7,0.0,1.7,2.4,1.9,null,0.0,3.1,4.5,2.2,0,0,0,0,0.0,2.6],"posRank":"TE77","actualFinish":"TE77"},{"name":"Ashton Dulin","pos":"WR","team":"IND","fpts":20.0,"gp":12,"ppg":1.7,"weekly":[1.5,0.0,0.0,2.8,7.5,0.0,0,0.2,0.0,2.2,null,5.8,0,0,0,0,0.0,0.0],"posRank":"WR154","actualFinish":"WR154"},{"name":"Nick Westbrook-Ikhine","pos":"WR","team":"MIA","fpts":19.9,"gp":13,"ppg":1.5,"weekly":[1.7,3.8,0.0,1.1,0,0.0,4.6,2.8,4.2,1.7,0,null,0.0,0.0,0.0,0,0,0.0],"posRank":"WR155","adp":227.6,"round":19,"actualFinish":"WR155","beat":-47,"adpPosRank":"WR108","adpHistory":[226,236,252,263,273,311,229.2,228.2,228.4,227.1,227.3,226.6,227.3,227.6]},{"name":"Cade Stover","pos":"TE","team":"HOU","fpts":19.9,"gp":6,"ppg":3.3,"weekly":[6.2,0,0,0,0,null,0,0,0,0,0,0.0,3.9,0,5.2,2.7,0,1.9],"posRank":"TE78","actualFinish":"TE78"},{"name":"Will Shipley","pos":"RB","team":"PHI","fpts":19.5,"gp":14,"ppg":1.4,"weekly":[2.6,0,0,0.0,1.4,0.0,1.7,0.2,null,5.4,0,0.0,2.1,1.3,0.0,1.3,0.2,3.3],"posRank":"RB92","adp":182,"round":16,"actualFinish":"RB92","beat":-34,"adpPosRank":"RB58","adpHistory":[205,192,182,187,187,187,186.6,188.6,189,191.5,196.8,190,183.4,182],"draftedPct":9.0,"draftedCount":9},{"name":"Antonio Gibson","pos":"RB","team":"NE","fpts":18.2,"gp":5,"ppg":3.6,"weekly":[0.3,3.8,1.8,8.7,3.6,0,0,0,0,0,0,0,0,null,0,0,0,0],"posRank":"RB93","actualFinish":"RB93"},{"name":"Darius Cooper","pos":"WR","team":"PHI","fpts":18.2,"gp":6,"ppg":3.0,"weekly":[0,0,0,0,0,0,0,0,null,0,0.0,2.7,0,2.9,4.9,0,1.4,6.3],"posRank":"WR156","actualFinish":"WR156"},{"name":"Tanner Conner","pos":"TE","team":"MIA","fpts":18.1,"gp":8,"ppg":2.3,"weekly":[4.0,0,2.3,0.0,3.6,1.8,3.8,2.6,0.0,0,0,null,0,0,0,0,0,0],"posRank":"TE79","actualFinish":"TE79"},{"name":"Cody White","pos":"WR","team":"SEA","fpts":18.0,"gp":8,"ppg":2.2,"weekly":[0.0,0,0,0,0,0,0,null,13.0,0.0,0.0,0.0,3.1,1.9,0,0.0,0,0],"posRank":"WR157","actualFinish":"WR157"},{"name":"Mason Rudolph","pos":"QB","team":"PIT","fpts":18.0,"gp":5,"ppg":3.6,"weekly":[0,0.5,0,0,null,0.0,0,0,0,0,9.0,9.5,-1.0,0,0,0,0,0],"posRank":"QB54","actualFinish":"QB54"},{"name":"Kameron Johnson","pos":"WR","team":"TB","fpts":17.7,"gp":17,"ppg":1.0,"weekly":[0.0,0.0,0.0,0.0,0.2,16.4,0.0,0.0,null,1.1,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0],"posRank":"WR158","actualFinish":"WR158"},{"name":"Quintin Morris","pos":"TE","team":"JAX","fpts":17.5,"gp":11,"ppg":1.6,"weekly":[0,0.0,0,0.0,0.0,0,0,null,0,0,2.1,0.0,2.4,0.0,4.0,1.5,0.0,7.5],"posRank":"TE80","actualFinish":"TE80"},{"name":"Tyler Conklin","pos":"TE","team":"LAC","fpts":17.3,"gp":6,"ppg":2.9,"weekly":[7.2,0,0.0,1.3,5.0,0,0,0,0,2.2,0,null,0,0,0,0,0,1.6],"posRank":"TE81","adp":228.9,"round":20,"actualFinish":"TE81","beat":-41,"adpPosRank":"TE40","adpHistory":[262,337,320,315,319,303,228.9,229.1,229.4,230.1,230.3,229.8,229.6,228.9]},{"name":"Trayveon Williams","pos":"RB","team":"CLE","fpts":17.1,"gp":6,"ppg":2.9,"weekly":[0,0,0,0,0,0,0,0,null,0.0,0.9,0,0,0,2.7,9.5,1.0,3.0],"posRank":"RB94","actualFinish":"RB94"},{"name":"Ben Skowronek","pos":"WR","team":"PIT","fpts":16.9,"gp":16,"ppg":1.1,"weekly":[9.2,0.0,0.0,0.0,null,0.0,0.0,2.3,0.0,0.0,0.0,3.1,0.0,2.3,0.0,0.0,0,0.0],"posRank":"WR159","actualFinish":"WR159"},{"name":"Nate Adkins","pos":"TE","team":"DEN","fpts":16.8,"gp":6,"ppg":2.8,"weekly":[0,0,0,2.5,0.0,10.3,4.0,0.0,0,0,0,null,0,0,0,0.0,0,0],"posRank":"TE82","actualFinish":"TE82"},{"name":"Jack Stoll","pos":"TE","team":"NO","fpts":16.6,"gp":9,"ppg":1.8,"weekly":[0.0,0,10.1,1.7,0,0,0.0,0.0,0,0,null,1.7,0,0.0,1.7,1.4,0,0],"posRank":"TE83","actualFinish":"TE83"},{"name":"Efton Chism III","pos":"WR","team":"NE","fpts":16.5,"gp":8,"ppg":2.1,"weekly":[0,0,0,0,0,0.0,0.0,0,0.0,0.0,0.0,0,0.0,null,0,0,12.0,4.5],"posRank":"WR160","actualFinish":"WR160","adpHistory":[250,350,295,252,283,285,226.6,229.6,226.6,228.5,228.7,226,222.6,224.2],"draftedPct":2.0,"draftedCount":2},{"name":"Braelon Allen","pos":"RB","team":"NYJ","fpts":16.3,"gp":4,"ppg":4.1,"weekly":[6.9,1.1,6.7,1.6,0,0,0,0,null,0,0,0,0,0,0,0,0,0],"posRank":"RB95","adp":126.6,"round":11,"actualFinish":"RB95","beat":-55,"adpPosRank":"RB40","adpHistory":[175,172,168,176,177,176,176.7,177.8,179.4,176,166.8,154.1,132.3,126.6],"draftedPct":18.0,"draftedCount":18},{"name":"KeAndre Lambert-Smith","pos":"WR","team":"LAC","fpts":16.1,"gp":10,"ppg":1.6,"weekly":[0.0,0.0,0,0.0,0.0,1.1,0,0,0.0,0,0,null,0,0,8.6,2.0,0.0,4.4],"posRank":"WR161","adp":222.9,"round":19,"actualFinish":"WR161","beat":-69,"adpPosRank":"WR92","adpHistory":[250,330,330,330,315,300,285,265,227.8,217.5,215.7,224.1,221.7,222.9],"draftedPct":3.0,"draftedCount":3},{"name":"Shedrick Jackson","pos":"WR","team":"LV","fpts":15.9,"gp":3,"ppg":5.3,"weekly":[0,0,0,0,0,0,0,null,0,0,0,0,0,9.5,0,0,4.0,2.4],"posRank":"WR162","actualFinish":"WR162"},{"name":"George Holani","pos":"RB","team":"SEA","fpts":15.8,"gp":10,"ppg":1.6,"weekly":[0.0,0.0,5.2,0.0,0.0,0.0,0.0,null,0.9,9.1,0.6,0,0,0,0,0,0,0],"posRank":"RB96","actualFinish":"RB96"},{"name":"Adam Prentice","pos":"RB","team":"DEN","fpts":15.7,"gp":13,"ppg":1.2,"weekly":[1.4,0,0,0.4,0.8,0.3,0.0,0,0.2,2.3,2.4,null,2.4,5.3,-0.1,0,0.3,0.0],"posRank":"RB97","actualFinish":"RB97"},{"name":"Trey Lance","pos":"QB","team":"LAC","fpts":15.6,"gp":4,"ppg":3.9,"weekly":[0,0,0,0,2.9,0,0,0,0,0,1.6,null,0.8,0,0,0,0,10.3],"posRank":"QB55","actualFinish":"QB55"},{"name":"Casey Washington","pos":"WR","team":"ATL","fpts":15.4,"gp":5,"ppg":3.1,"weekly":[6.3,0,0,2.9,null,0.0,2.7,3.5,0,0,0,0,0,0,0,0,0,0],"posRank":"WR163","actualFinish":"WR163"},{"name":"Scott Miller","pos":"WR","team":"PIT","fpts":15.2,"gp":5,"ppg":3.0,"weekly":[0,0,0,0.0,null,0,1.9,0,0,0,0,0,0,0,0,4.9,5.5,2.9],"posRank":"WR164","actualFinish":"WR164"},{"name":"Terrell Jennings","pos":"RB","team":"NE","fpts":15.2,"gp":6,"ppg":2.5,"weekly":[0,0,0,0,0,0,1.8,1.5,11.4,0.5,0,0.0,0.0,null,0,0,0,0],"posRank":"RB98","actualFinish":"RB98"},{"name":"Michael Bandy","pos":"WR","team":"DEN","fpts":15.0,"gp":4,"ppg":3.8,"weekly":[0,0,0,0,0,0,0,0,2.6,0.0,0,null,0,0,9.0,0,3.4,0],"posRank":"WR165","actualFinish":"WR165"},{"name":"Skyy Moore","pos":"WR","team":"SF","fpts":14.8,"gp":17,"ppg":0.9,"weekly":[0.0,0.0,2.0,0.0,0.1,0.0,2.5,0.0,3.1,2.8,0.0,0.0,0.0,null,0.0,3.3,1.0,0.0],"posRank":"WR166","actualFinish":"WR166"},{"name":"Tanner McKee","pos":"QB","team":"PHI","fpts":14.7,"gp":4,"ppg":3.7,"weekly":[0,0,0,0,0,0,0,-0.2,null,0,0,0,0,0,2.2,-0.2,0,12.9],"posRank":"QB56","actualFinish":"QB56"},{"name":"Malik Heath","pos":"WR","team":"GB","fpts":14.6,"gp":7,"ppg":2.1,"weekly":[0,4.7,0.0,1.9,null,0,0.0,5.9,2.1,0,0,0,0.0,0,0,0,0,0],"posRank":"WR167","actualFinish":"WR167"},{"name":"Josh Whyle","pos":"TE","team":"GB","fpts":14.6,"gp":6,"ppg":2.4,"weekly":[0,0,0,0,null,0,0,0,0,0,7.2,1.1,0.0,3.1,0,0,1.8,1.4],"posRank":"TE84","actualFinish":"TE84"},{"name":"Tylan Wallace","pos":"WR","team":"BAL","fpts":14.5,"gp":11,"ppg":1.3,"weekly":[0.0,10.5,0.0,2.4,0,0.0,null,1.6,0.0,0.0,0.0,0.0,0,0,0.0,0,0,0],"posRank":"WR168","actualFinish":"WR168"},{"name":"Gage Larvadain","pos":"WR","team":"CLE","fpts":14.4,"gp":13,"ppg":1.1,"weekly":[0,0,0,0,0.0,4.2,0.0,0.3,null,0.0,0.0,0.0,4.3,3.8,1.8,0.0,0.0,0.0],"posRank":"WR169","actualFinish":"WR169"},{"name":"Ray-Ray McCloud","pos":"WR","team":"NYG","fpts":13.9,"gp":6,"ppg":2.3,"weekly":[8.1,0.0,4.0,0.3,0,0,0,0,1.5,0.0,0,0,0,null,0,0,0,0],"posRank":"WR170","adp":211.6,"round":18,"actualFinish":"WR170","beat":-84,"adpPosRank":"WR86","adpHistory":[260,237,228,227,224,223,218.8,217.5,217,212.5,211.6,215.9,212.8,211.6],"draftedPct":7.0,"draftedCount":7},{"name":"Trevor Etienne","pos":"RB","team":"CAR","fpts":13.7,"gp":17,"ppg":0.8,"weekly":[0.4,1.2,0.0,3.3,3.9,1.7,0.0,1.6,0.0,0.0,0.2,0.0,1.4,null,0.0,0.0,0.0,0.0],"posRank":"RB99","adp":228.7,"round":20,"actualFinish":"RB99","beat":-12,"adpPosRank":"RB87","adpHistory":[241,297,304,321,272,328,228.7,228.1,228.4,227.8,227.7,228.9,225.9,228.7],"draftedPct":2.0,"draftedCount":2},{"name":"Xavier Weaver","pos":"WR","team":"ARI","fpts":13.7,"gp":7,"ppg":2.0,"weekly":[0,0,0,0.0,0,0,0.0,null,0,0,3.5,1.9,0.0,0,0,3.9,4.4,0],"posRank":"WR171","actualFinish":"WR171"},{"name":"Arian Smith","pos":"WR","team":"NYJ","fpts":13.5,"gp":13,"ppg":1.0,"weekly":[0.0,0.8,2.2,0,2.4,0.0,1.0,3.3,null,1.3,0,0.8,0,0,0.0,0.0,1.5,0.2],"posRank":"WR172","adp":225.5,"round":19,"actualFinish":"WR172","beat":-71,"adpPosRank":"WR101","adpHistory":[251,334,335,335,326,351,229.9,231.8,231.3,231,228.4,230,229.6,225.5],"draftedPct":2.0,"draftedCount":2},{"name":"Noah Brown","pos":"WR","team":"WAS","fpts":13.3,"gp":4,"ppg":3.3,"weekly":[4.7,1.9,0,0,0,0,0,0,0,0,0,null,0,2.9,3.8,0,0,0],"posRank":"WR173","actualFinish":"WR173"},{"name":"Anthony Firkser","pos":"TE","team":"DET","fpts":13.3,"gp":5,"ppg":2.7,"weekly":[0,0,0,0,0,0,0,null,0,0,0,0,1.4,1.7,0,8.0,0.0,2.2],"posRank":"TE85","actualFinish":"TE85"},{"name":"Joe Milton III","pos":"QB","team":"DAL","fpts":13.2,"gp":4,"ppg":3.3,"weekly":[0,0,0.6,0,0,0,0,6.3,0,null,0,0,0,0,0,0.1,0,6.2],"posRank":"QB57","actualFinish":"QB57"},{"name":"Austin Ekeler","pos":"RB","team":"WAS","fpts":13.1,"gp":2,"ppg":6.5,"weekly":[8.7,4.4,0,0,0,0,0,0,0,0,0,null,0,0,0,0,0,0],"posRank":"RB100","adp":128,"round":11,"actualFinish":"RB100","beat":-59,"adpPosRank":"RB41","adpHistory":[157,153,155,151,152,152,151.6,152.2,153.4,154.9,157.8,157.4,150.9,128],"draftedPct":16.0,"draftedCount":16},{"name":"Chris Oladokun","pos":"QB","team":"KC","fpts":13.1,"gp":3,"ppg":4.4,"weekly":[0,0,0,0,0,0,0,0,0,null,0,0,0,0,0,5.1,7.7,0.3],"posRank":"QB58","actualFinish":"QB58"},{"name":"David Martin-Robinson","pos":"TE","team":"TEN","fpts":13.0,"gp":11,"ppg":1.2,"weekly":[0.0,0,0,0,0,7.1,0,0.0,0.0,null,0.0,0,0.0,1.6,0.0,0.0,1.9,2.4],"posRank":"TE86","actualFinish":"TE86"},{"name":"Foster Moreau","pos":"TE","team":"NO","fpts":12.9,"gp":7,"ppg":1.8,"weekly":[0,0,0,0,0,1.9,0,0.0,0,3.6,null,0.0,3.3,2.6,0,1.5,0,0],"posRank":"TE87","actualFinish":"TE87"},{"name":"Charlie Woerner","pos":"TE","team":"ATL","fpts":12.8,"gp":7,"ppg":1.8,"weekly":[0,0,0.5,0,null,0,0.0,0,0,2.4,0,5.4,0,0,3.2,1.3,0.0,0],"posRank":"TE88","actualFinish":"TE88"},{"name":"Andrew Ogletree","pos":"TE","team":"IND","fpts":12.7,"gp":11,"ppg":1.2,"weekly":[0.0,0.0,0,0.0,0,0,0.0,0.0,0.0,0.0,null,8.8,1.8,0.0,0,2.1,0,0],"posRank":"TE89","actualFinish":"TE89"},{"name":"Andy Dalton","pos":"QB","team":"CAR","fpts":12.5,"gp":4,"ppg":3.1,"weekly":[0,0,-0.1,6.3,0,0,2.2,4.1,0,0,0,0,0,null,0,0,0,0],"posRank":"QB59","actualFinish":"QB59"},{"name":"James Proche","pos":"WR","team":"TEN","fpts":12.5,"gp":6,"ppg":2.1,"weekly":[0,0,0,0,0,0,0,0,0,null,0,7.2,2.3,0.0,0.0,0,1.5,1.5],"posRank":"WR174","actualFinish":"WR174"},{"name":"Stone Smartt","pos":"TE","team":"NYJ","fpts":12.2,"gp":6,"ppg":2.0,"weekly":[0,0,0,0,0,0.0,0,0,null,0.0,0,0,0,0.0,0.0,8.4,3.8,0],"posRank":"TE90","actualFinish":"TE90"},{"name":"Najee Harris","pos":"RB","team":"LAC","fpts":11.6,"gp":3,"ppg":3.9,"weekly":[2.0,6.8,2.8,0,0,0,0,0,0,0,0,null,0,0,0,0,0,0],"posRank":"RB101","adp":167.7,"round":14,"actualFinish":"RB101","beat":-46,"adpPosRank":"RB55","adpHistory":[101,105,108,106,105,107,108.9,119.4,132.4,142.2,151.5,159.3,162.5,167.7],"draftedPct":10.0,"draftedCount":10},{"name":"Ryan Miller","pos":"WR","team":"TB","fpts":11.4,"gp":9,"ppg":1.3,"weekly":[0.0,9.0,0.0,0,0,0.0,2.4,0,null,0.0,0.0,0,0.0,0.0,0,0,0,0],"posRank":"WR175","actualFinish":"WR175"},{"name":"Dylan Drummond","pos":"WR","team":"ATL","fpts":11.2,"gp":6,"ppg":1.9,"weekly":[0,0,0,0,null,0,0,0,0,0,0,4.8,1.3,5.1,0.0,0,0.0,0.0],"posRank":"WR176","actualFinish":"WR176"},{"name":"Josiah Deguara","pos":"TE","team":"ARI","fpts":11.1,"gp":7,"ppg":1.6,"weekly":[0,0.0,0,0,0,0,0,null,0,0,0.0,1.6,0,0.0,0,0.0,0.0,9.5],"posRank":"TE91","actualFinish":"TE91"},{"name":"Kylen Granson","pos":"TE","team":"PHI","fpts":11.0,"gp":12,"ppg":0.9,"weekly":[1.1,1.5,0.0,0.0,0.0,0,0,0,null,0.0,1.4,0,0,0.0,0.0,0.0,0.0,7.0],"posRank":"TE92","actualFinish":"TE92"},{"name":"Phil Mafah","pos":"RB","team":"DAL","fpts":10.9,"gp":1,"ppg":10.9,"weekly":[0,0,0,0,0,0,0,0,0,null,0,0,0,0,0,0,0,10.9],"posRank":"RB102","adp":225.8,"round":19,"actualFinish":"RB102","beat":-25,"adpPosRank":"RB77","adpHistory":[242,238,251,259,287,289,228.7,227.4,227.6,229.9,228.4,226.5,225.4,225.8]},{"name":"Kenny Pickett","pos":"QB","team":"LV","fpts":10.7,"gp":6,"ppg":1.8,"weekly":[0,0,0,0,0,0,-0.7,null,0,0.0,0,0,0,8.5,2.3,0,0.6,0.0],"posRank":"QB60","actualFinish":"QB60"},{"name":"Robbie Chosen","pos":"WR","team":"WAS","fpts":10.3,"gp":3,"ppg":3.4,"weekly":[0,0,0,0,0,0,7.6,0,0,2.7,0.0,null,0,0,0,0,0,0],"posRank":"WR177","actualFinish":"WR177"},{"name":"Ronnie Bell","pos":"WR","team":"NO","fpts":10.3,"gp":2,"ppg":5.2,"weekly":[0,0,0,0,0,0,0,0,0,0,null,0,0,0,0,0,0.0,10.3],"posRank":"WR178","actualFinish":"WR178"},{"name":"Dee Eskridge","pos":"WR","team":"MIA","fpts":10.2,"gp":11,"ppg":0.9,"weekly":[1.9,1.8,0.0,0,0.0,0.0,6.5,0.0,0.0,0,0,null,0,0.0,0.0,0.0,0,0],"posRank":"WR179","actualFinish":"WR179"},{"name":"AJ Dillon","pos":"RB","team":"PHI","fpts":10.1,"gp":6,"ppg":1.7,"weekly":[1.0,1.9,0,1.7,1.2,3.0,0,0,null,0,0,0,0,0,0,0,0,1.3],"posRank":"RB103","actualFinish":"RB103"},{"name":"Hassan Haskins","pos":"RB","team":"LAC","fpts":10.0,"gp":11,"ppg":0.9,"weekly":[0.0,0.0,0.0,0.0,2.5,3.3,2.5,0,0,0,0,null,0,0.0,0,1.4,0.0,0.3],"posRank":"RB104","actualFinish":"RB104"},{"name":"Brandon Aiyuk","pos":"WR","team":"SF","fpts":0,"gp":0,"ppg":0,"weekly":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"posRank":null,"adp":110.27,"round":10,"actualFinish":"DNP","beat":null,"adpPosRank":"WR52","adpHistory":[93,92,91,95,96,99,102.8,104.4,115.3,126.2,129.1,133.7,140.4,145.3],"draftedPct":11.0,"draftedCount":11},{"name":"Anthony Richardson","pos":"QB","team":"IND","fpts":0,"gp":0,"ppg":0,"weekly":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"posRank":null,"adp":187,"round":16,"actualFinish":"DNP","beat":null,"adpPosRank":"QB29","adpHistory":[162,164,164,190,191,194,193.7,194.9,191.4,177,163.9,172.8,179,211.4],"draftedPct":11.0,"draftedCount":11},{"name":"Isaac Guerendo","pos":"RB","team":"SF","fpts":0,"gp":0,"ppg":0,"weekly":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"posRank":null,"adp":159.4,"round":14,"actualFinish":"DNP","beat":null,"adpPosRank":"RB48","adpHistory":[147,147,149,149,149,149,146.7,145.3,146.3,145.5,151.1,167.3,169.6,190.5],"draftedPct":5.0,"draftedCount":5},{"name":"Marshawn Lloyd","pos":"RB","team":"GB","fpts":0,"gp":0,"ppg":0,"weekly":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"posRank":null,"adp":214.2,"round":18,"actualFinish":"DNP","beat":null,"adpPosRank":"RB66","adpHistory":[207,202,196,196,195,197,198.4,198.8,198.6,206.7,218.6,223.2,225.7,227.8],"draftedPct":5.0,"draftedCount":5},{"name":"Hollywood Brown","pos":"WR","team":"KC","fpts":0,"gp":0,"ppg":0,"weekly":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"posRank":null,"adp":160.67,"round":14,"actualFinish":"DNP","beat":null,"adpPosRank":"WR66","adpHistory":[150,148,145,147,146,146,147.7,148.8,140,142.1,153.2,164.5,168.8,167.6],"draftedPct":3.0,"draftedCount":3},{"name":"Roschon Johnson","pos":"RB","team":"CHI","fpts":0,"gp":0,"ppg":0,"weekly":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"posRank":null,"adp":173.3,"round":15,"actualFinish":"DNP","beat":null,"adpPosRank":"RB53","adpHistory":[202,185,180,175,174,174,174.1,176,176.3,175.7,180.2,189.1,197.7,211.8],"draftedPct":10.0,"draftedCount":10},{"name":"Kaleb Johnson","pos":"RB","team":"PIT","fpts":0,"gp":0,"ppg":0,"weekly":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"posRank":null,"adp":76.33,"round":7,"actualFinish":"DNP","beat":null,"adpPosRank":"RB23","adpHistory":[75,73,77,79,79,80,79,77.9,74.2,70.1,69.9,72.9,79.8,84.3],"draftedPct":3.0,"draftedCount":3},{"name":"Kalel Mullings","pos":"RB","team":"TEN","fpts":0,"gp":0,"ppg":0,"weekly":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"posRank":null,"adp":234,"round":20,"actualFinish":"DNP","beat":null,"adpPosRank":"RB79","adpHistory":[223,254,300,301,368,375,227,233.5,231.2,228.3,228,226.6,227.2,230.2],"draftedPct":1.0,"draftedCount":1},{"name":"Alexander Mattison","pos":"RB","team":"MIA","fpts":0,"gp":0,"ppg":0,"weekly":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"posRank":null,"adp":232,"round":20,"actualFinish":"DNP","beat":null,"adpPosRank":"RB77","adpHistory":[242,304,308,330,325,310,238,237,229,226.3,226.2,226.1,223.4,240],"draftedPct":1.0,"draftedCount":1},{"name":"Adam Theilan","pos":"WR","team":"PIT","fpts":0,"gp":0,"ppg":0,"weekly":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"posRank":null,"adp":159,"round":14,"actualFinish":"DNP","beat":null,"adpPosRank":"WR65","adpHistory":[146,143,143,146,143,144,142.6,141.8,143,148.3,149.5,150.2,146.4,143.8],"draftedPct":1.0,"draftedCount":1},{"name":"Jordan James","pos":"RB","team":"SF","fpts":0,"gp":0,"ppg":0,"weekly":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"posRank":null,"adp":223.18,"round":19,"actualFinish":"DNP","beat":null,"adpPosRank":"RB71","adpHistory":[231,234,269,272,299,321,228.2,229.2,229.3,229.7,227.3,228.1,228.6,227.6],"draftedPct":11.0,"draftedCount":11},{"name":"Zack Moss","pos":"RB","team":"CIN","fpts":0,"gp":0,"ppg":0,"weekly":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"posRank":null,"adp":235,"round":20,"actualFinish":"DNP","beat":null,"adpPosRank":"RB80","adpHistory":[238,265,276,266,292,280,226.7,226.2,226.7,229.1,225.5,226.6,224.5,226.9],"draftedPct":5.0,"draftedCount":5},{"name":"Dameon Pierce","pos":"RB","team":"HOU","fpts":0,"gp":0,"ppg":0,"weekly":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"posRank":null,"adp":237,"round":20,"actualFinish":"DNP","beat":null,"adpPosRank":"RB81","adpHistory":[242,null,null,null,null,null,null,null,null,null,null,240.1,225.5,224.4]},{"name":"Jarquez Hunter","pos":"RB","team":"LAR","fpts":0,"gp":0,"ppg":0,"weekly":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"posRank":null,"adp":205.22,"round":18,"actualFinish":"DNP","beat":null,"adpPosRank":"RB62","adpHistory":[246,217,201,201,205,205,205.1,206.3,204.7,207.7,212.3,221.5,225.2,225.6],"draftedPct":9.0,"draftedCount":9},{"name":"Jalen Milroe","pos":"QB","team":"SEA","fpts":0,"gp":0,"ppg":0,"weekly":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"posRank":null,"adp":229,"round":20,"actualFinish":"DNP","beat":null,"adpPosRank":"QB33","adpHistory":[254,230,237,291,265,305,227.9,227.3,229.1,228.4,227.8,227.6,229.2,228.8],"draftedPct":3.0,"draftedCount":3},{"name":"Joshua Palmer","pos":"WR","team":"BUF","fpts":0,"gp":0,"ppg":0,"weekly":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"posRank":null,"adp":157,"round":14,"actualFinish":"DNP","beat":null,"adpPosRank":"WR63","adpHistory":[182,177,176,178,178,178,177.4,178.8,178.4,168.1,164.8,163.8,153.8,148.7],"draftedPct":2.0,"draftedCount":2},{"name":"Tahj Brooks","pos":"RB","team":"CIN","fpts":0,"gp":0,"ppg":0,"weekly":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"posRank":null,"adp":210.25,"round":18,"actualFinish":"DNP","beat":null,"adpPosRank":"RB64","adpHistory":[239,296,276,261,232,228,221.5,221.5,220.2,214.7,201.1,202.1,207.5,204.8],"draftedPct":4.0,"draftedCount":4},{"name":"D.J. Giddens","pos":"RB","team":"IND","fpts":0,"gp":0,"ppg":0,"weekly":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"posRank":null,"adp":210.14,"round":18,"actualFinish":"DNP","beat":null,"adpPosRank":"RB63","adpHistory":[244,211,210,206,207,207,207,207.1,206.7,208.2,207.7,212.8,216,207.5],"draftedPct":14.0,"draftedCount":14},{"name":"Audric Estime","pos":"RB","team":"NO","fpts":0,"gp":0,"ppg":0,"weekly":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"posRank":null,"adp":218,"round":19,"actualFinish":"DNP","beat":null,"adpPosRank":"RB68","adpHistory":[268,333,222,260,245,298,228.1,227.6,227.4,228.1,226.3,226.1,225,225.6],"draftedPct":1.0,"draftedCount":1},{"name":"Cooper Rush","pos":"QB","team":"BAL","fpts":0,"gp":0,"ppg":0,"weekly":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"posRank":null,"adp":238,"round":20,"actualFinish":"DNP","beat":null,"adpPosRank":"QB36","adpHistory":[275,346,273,249,314,243,232.6,226.1,230.2,228.5,230.6,232.4,232.8,232.4],"draftedPct":1.0,"draftedCount":1}],"adpHistoryDates":["05/12","05/25","06/05","06/18","06/25","07/03","07/10","07/16","07/23","07/31","08/05","08/12","08/20","08/27"]};
+
+
+const POS={QB:{bg:'#c43b5c',accent:'#e8567a'},RB:{bg:'#2d9d5a',accent:'#4ade80'},WR:{bg:'#b89a22',accent:'#dbb42c'},TE:{bg:'#2d8db8',accent:'#5cc4ed'}};
+const S={bg:'#141b2d',s1:'#1a2237',s2:'#243049',s3:'#2e3d5b',bd:'#3d4f6e',tx:'#e8ecf4',mt:'#8899b4'};
+const FONT='"Barlow Condensed", "Barlow", system-ui, sans-serif';
+const Pill=({pos})=><span style={{display:'inline-block',background:POS[pos]?.bg||'#525252',color:'#fff',padding:'2px 7px',borderRadius:4,fontSize:11,fontWeight:700,fontFamily:FONT,letterSpacing:'0.5px'}}>{pos}</span>;
+
+// Sortable table header helper
+function SortTH({field,label,sortBy,sortDir,onSort,align}){
+  return <th onClick={()=>onSort(field)} style={{padding:'8px 10px',textAlign:align||'center',fontWeight:700,color:S.mt,borderBottom:`2px solid ${S.bd}`,fontSize:10,textTransform:'uppercase',cursor:'pointer',userSelect:'none'}}>{label}{sortBy===field?(sortDir==='desc'?' ↓':' ↑'):''}</th>;
 }
 
-// ─── TEAM METADATA ────────────────────────────────────────────────────────────
-const TEAM_NAMES = {
-  ANA:"Ducks",BOS:"Bruins",BUF:"Sabres",CAR:"Hurricanes",COL:"Avalanche",
-  DAL:"Stars",EDM:"Oilers",LAK:"Kings",MIN:"Wild",MTL:"Canadiens",
-  OTT:"Senators",PHI:"Flyers",PIT:"Penguins",TBL:"Lightning",UTA:"Mammoth",
-  VEG:"Golden Knights"
-};
-const PLAYOFF_TEAMS = Object.keys(TEAM_NAMES);
-const HOME_PATTERN = [null,1,1,0,0,1,0,1];
+/* ═══ ADP SYSTEM ═══ */
+function parseDKcsv(text){const lines=text.trim().split('\n');if(lines.length<2)return{};const hdr=lines[0].replace(/^\uFEFF/,'').split(',').map(h=>h.replace(/\r/g,'').trim());const isDK=hdr.length>=5&&hdr[3]==='ADP'&&hdr[4]==='Team';const map={};
+  for(let i=1;i<lines.length;i++){const c=lines[i].split(',').map(x=>x.replace(/\r/g,'').trim());if(c.length<4)continue;
+    if(isDK){const nm=c[1],ps=c[2],tm=c[4]||'FA';if(!nm||!ps)continue;const v=parseFloat(c[3]);map[nm+'|'+ps]={name:nm,pos:ps,team:tm,adp:isNaN(v)||!c[3]?240:v};}
+    else{const nm=c[1],ps=c[2],tm=c[3]||'FA';if(!nm||!ps)continue;const vals=hdr.slice(4).filter(Boolean).map((_,j)=>{const v=parseFloat(c[j+4]);return isNaN(v)?240:v;});map[nm+'|'+ps]={name:nm,pos:ps,team:tm,adp:vals[vals.length-1]||240,allAdps:vals,dates:hdr.slice(4).filter(Boolean)};}}return map;}
+function mergeAdpSnapshot(history,csvText,dateLabel){const snap=parseDKcsv(csvText);if(!Object.keys(snap).length)return history;const h={dates:[...(history?.dates||[])],players:{}};
+  if(history?.players)Object.entries(history.players).forEach(([k,v])=>{h.players[k]={...v,adps:[...v.adps]};});const first=Object.values(snap)[0];
+  if(!history?.dates?.length&&first?.allAdps){h.dates=(first.dates||[]).map(d=>d.replace(/\/2026|2026/g,'').trim()||'Opening');Object.entries(snap).forEach(([k,v])=>{h.players[k]={name:v.name,pos:v.pos,team:v.team,adps:v.allAdps||[v.adp]};});return h;}
+  if(h.dates.length>0){let hasChanges=false;for(const[k,v]of Object.entries(snap)){const ex=h.players[k];if(!ex||Math.abs((ex.adps[ex.adps.length-1]||240)-v.adp)>0.01){hasChanges=true;break;}}for(const k of Object.keys(snap)){if(!h.players[k]){hasChanges=true;break;}}if(!hasChanges)return null;}
+  let label=dateLabel;const ec=h.dates.filter(d=>d===dateLabel||d.startsWith(dateLabel+'.')).length;if(ec>0)label=dateLabel+'.'+(ec+1);h.dates.push(label);const nd=h.dates.length;
+  Object.entries(snap).forEach(([k,v])=>{if(!h.players[k])h.players[k]={name:v.name,pos:v.pos,team:v.team,adps:Array(nd-1).fill(240)};h.players[k].adps.push(v.adp);h.players[k].team=v.team;});
+  Object.values(h.players).forEach(p=>{while(p.adps.length<nd)p.adps.push(240);});return h;}
+function historyToAdpData(h){if(!h?.dates?.length)return{players:[],dates:[]};return{players:Object.values(h.players).map(p=>({name:p.name,pos:p.pos,team:p.team,adp:p.adps,latest:p.adps[p.adps.length-1],change:p.adps[0]-p.adps[p.adps.length-1]})).sort((a,b)=>a.latest-b.latest),dates:h.dates};}
 
-// v43: name normalization for cross-source matching (HR vs MoneyPuck vs box-score parser).
-// Strips diacritics, lowercases, removes punctuation/whitespace, and folds common first-name
-// nickname variants so "Josh Norris" and "Joshua Norris" hash to the same key.
-const NICKNAME_MAP = {
-  // Player canonical-form aliases. LEFT side is what we'll FOLD INTO right side.
-  // Scoring/popular aliases
-  "joshua": "josh",
-  "alexander": "alex",
-  "alexandre": "alex",
-  "alexandr": "alex",
-  "aleksander": "alex",
-  "aleksandr": "alex",
-  "mathew": "matt",
-  "matthew": "matt",
-  "mathieu": "matt",
-  "matthias": "matt",
-  "michael": "mike",
-  "nicholas": "nick",
-  "nicolas": "nick",
-  "nikolai": "nik",
-  "anthony": "tony",
-  "william": "will",
-  "robert": "rob",
-  "richard": "rick",
-  "thomas": "tom",
-  "andrew": "andy",
-  "patrick": "pat",
-  "joseph": "joe",
-  "samuel": "sam",
-  "benjamin": "ben",
-  "daniel": "dan",
-  "david": "dave",
-  "jonathan": "jon",
-  "christopher": "chris",
-  "kristoffer": "chris",
-  // v47: short↔long variants for NHL rosters
-  "cameron": "cam",
-  "zachary": "zach",
-  "zack": "zach",
-  "nathaniel": "nate",
-  "nathan": "nate",
-  "timothy": "tim",
-  "gregory": "greg",
-  // European/Scandinavian
-  "oskar": "oscar",
-  "eric": "erik",
-  "fredrik": "frederik",
-  "frederick": "frederik",
-  "niklas": "nicklas",
-  "mikko": "mike",
-  "mikael": "mike",
-  "mikkel": "mike",
-  "johan": "johannes",
-  "henri": "henry",
-  "henrik": "henry",
-  "vladimir": "vlad",
-  "aleksei": "alex",
-  "alexei": "alex",
-  "aliaksei": "alex",
-  "andreas": "andrew",
-  "andrei": "andrew",
-  "dmitry": "dmitri",
-  "sergei": "sergey",
-  // v49: fold Max/Maxwell/Maxim family to "max" (not "maxime" — NHL context prefers "Max")
-  "maxwell": "max",
-  "maxim": "max",
-  "maksim": "max",
-  "maxime": "max",
-  // v49: more diminutives
-  "tommy": "tom",
-  "thomas": "tom",
-  "mikey": "mike",
-  "jacob": "jake",
-  "jakob": "jake",
-  "rob": "robert",
-  "robby": "robert",
-  "bobby": "robert",
-  "willy": "will",
-  "billy": "will",
-  "charlie": "charles",
-  "chuck": "charles",
-  "danny": "dan",
-  "donny": "don",
-  "donnie": "don",
-  "donald": "don",
-  "jimmy": "jim",
-  "james": "jim",
-  "johnny": "john",
-  "jonny": "jon",
-  "jackson": "jack",
-  "jakson": "jack",
-  "zeke": "ezekiel",
-  "sammy": "sam",
-  "harry": "harold",
-  "larry": "lawrence",
-  "artyom": "artemi",
-  "artemiy": "artemi",
-  // v50: Russian transliteration variants
-  "daniil": "danil",
-  "danila": "danil",
-};
+/* ═══ NAME RESOLUTION ═══ */
+function stripSfx(n){return n.toLowerCase().replace(/\s+(jr\.?|sr\.?|iii|ii|iv)$/i,'').replace(/[.']/g,'').trim();}
+function getLN(n){return stripSfx(n).split(' ').pop();}function getFI(n){return n.toLowerCase().replace(/[.']/g,'').trim()[0];}
+function resolveToFull(a,pos,team,pick,pl){if(!pl?.length)return a;const ex=pl.find(x=>x.name.toLowerCase()===a.toLowerCase());if(ex)return ex.name;const ln=getLN(a),fi=getFI(a);let c=pl.filter(x=>getLN(x.name)===ln&&getFI(x.name)===fi);if(!c.length)return a;if(c.length===1)return c[0].name;let m=c.filter(x=>x.pos===pos);if(m.length===1)return m[0].name;if(m.length>0)c=m;m=c.filter(x=>x.team===team);if(m.length===1)return m[0].name;c.sort((a,b)=>Math.abs(a.latest-pick)-Math.abs(b.latest-pick));return c[0].name;}
+function resolveAllNames(drafts,pl){if(!pl?.length)return drafts;return drafts.map(d=>({...d,picks:d.picks.map(p=>({...p,name:resolveToFull(p.name,p.pos,p.team,p.pick,pl)})),field:d.field?.map(f=>({...f,picks:f.picks.map(p=>({...p,name:resolveToFull(p.name,p.pos,p.team,p.pick,pl)}))})),allPicks:d.allPicks?.map(p=>({...p,name:resolveToFull(p.name,p.pos,p.team,p.pick,pl)}))}));}
+function matchADP(name,pos,team,pick,pl){if(!pl?.length)return null;const ex=pl.find(a=>a.name.toLowerCase()===name.toLowerCase());if(ex)return ex;const ln=getLN(name),fi=getFI(name);let c=pl.filter(a=>getLN(a.name)===ln&&getFI(a.name)===fi);if(!c.length)return null;if(c.length===1)return c[0];let m=c.filter(x=>x.pos===pos);if(m.length===1)return m[0];if(m.length>0)c=m;c.sort((a,b)=>Math.abs(a.latest-pick)-Math.abs(b.latest-pick));return c[0];}
 
-// v49: explicit last-name alias map for known typos / variants that can't be handled by general rules.
-// LEFT side is what we FOLD INTO right side. Keys are the normalized (lowercased, diacritic-stripped) form.
-const LAST_NAME_MAP = {
-  "sttzle": "stutzle",   // Stützle typo
-};
-function normPlayerName(s) {
-  let n = (s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().replace(/[^a-z0-9 ]/g,"").trim();
-  // v50: collapse multi-word names to first + last, dropping middle names/hyphens.
-  //      Handles "Emil Martinsen Lilleber" ↔ "Emil Lilleber", "J.T. Compher" ↔ "JT Compher".
-  //      Fold first-name nicknames and last-name suffix/alias rules.
-  let parts = n.split(/\s+/);
-  if (parts.length >= 3) {
-    // Keep only first + last
-    parts = [parts[0], parts[parts.length - 1]];
-  }
-  if (parts.length > 0 && NICKNAME_MAP[parts[0]]) parts[0] = NICKNAME_MAP[parts[0]];
-  // v49: last-name suffix normalization — handles Slafkovsky/Slafkovsk, Malkin/Malkine, etc.
-  if (parts.length > 1) {
-    const lastIdx = parts.length - 1;
-    let last = parts[lastIdx];
-    // Trailing -sky / -ski / -skyi -> -sk
-    last = last.replace(/sk[yie]+$/, "sk");
-    // Explicit aliases (typos, known variants)
-    if (LAST_NAME_MAP[last]) last = LAST_NAME_MAP[last];
-    parts[lastIdx] = last;
-  }
-  return parts.join("").replace(/\s+/g,"");
-}
-// Deduplicate a player array by normalized name+team. Merges stat fields by summing,
-// keeps the longer name (more complete spelling), prefers HR team over MoneyPuck team.
-// v50: SCRATCHED role sticks — if ANY duplicate is SCRATCHED, the merged player is SCRATCHED.
-//      Prefer non-empty role over empty, otherwise longer-name record wins.
-function dedupePlayers(players) {
-  if (!Array.isArray(players)) return players;
-  const byKey = new Map();
-  const STAT_FIELDS = ["pGP","pG","pA","pPts","pSOG","pHIT","pBLK","pTK","pGV","pPIM","pTOI"];
-  for (const p of players) {
-    const key = normPlayerName(p.name) + "|" + (p.team||"");
-    const existing = byKey.get(key);
-    if (!existing) {
-      byKey.set(key, {...p});
-    } else {
-      // Merge: keep longer name spelling
-      if ((p.name||"").length > (existing.name||"").length) existing.name = p.name;
-      // Sum playoff stats
-      for (const f of STAT_FIELDS) {
-        if (p[f] != null) existing[f] = (existing[f] || 0) + (p[f] || 0);
-      }
-      // v50: SCRATCHED wins — user explicitly marked this player out
-      if (p.lineRole === "SCRATCHED" || existing.lineRole === "SCRATCHED") {
-        existing.lineRole = "SCRATCHED";
-      } else if (!existing.lineRole && p.lineRole) {
-        existing.lineRole = p.lineRole;
-      }
-      if (!existing.team && p.team) existing.team = p.team;
-    }
-  }
-  return Array.from(byKey.values());
-}
+function classifyBuild(picks){const tags=[];const erb=picks.slice(0,4).filter(p=>p.pos==='RB').length;
+  if(erb===0)tags.push('Zero RB');else if(erb===1)tags.push('Hero RB');if(picks.slice(0,3).filter(p=>p.pos==='RB').length>=2)tags.push('Rodoom RB');if(erb>=3)tags.push('Hyper RB');
+  if(picks.slice(0,3).some(p=>p.pos==='TE'))tags.push('Early TE');if(picks.slice(0,6).filter(p=>p.pos==='TE').length>=2)tags.push('Double TE');
+  const qr=picks.find(p=>p.pos==='QB')?.round;if(qr&&qr<=4)tags.push('Elite QB');else if(qr&&qr<=6)tags.push('Early QB');else if(qr&&qr>=9)tags.push('Late QB');else if(qr)tags.push('Mid QB');
+  if(picks.slice(0,6).filter(p=>p.pos==='WR').length>=4)tags.push('WR Heavy');return tags;}
 
-// ─── MATH ─────────────────────────────────────────────────────────────────────
-function poissonPMF(k, lam) {
-  if (lam <= 0) return k === 0 ? 1 : 0;
-  let log = -lam + k * Math.log(lam);
-  for (let i = 1; i <= k; i++) log -= Math.log(i);
-  return Math.exp(log);
-}
-function poissonCDF(k, lam) {
-  let s = 0; for (let i = 0; i <= k; i++) s += poissonPMF(i, lam); return Math.min(1, s);
-}
-function nbPMF(k, mu, r) {
-  // v46: r → ∞ is Poisson limit. Guard against bad inputs and use Poisson when dispersion is large.
-  if (mu <= 0) return k === 0 ? 1 : 0;
-  if (!isFinite(r) || r >= 100) return poissonPMF(k, mu);
-  if (r <= 0) return poissonPMF(k, mu); // safety
-  const p = r / (r + mu); let lp = 0;
-  for (let i = 0; i < k; i++) lp += Math.log(r + i) - Math.log(i + 1);
-  lp += r * Math.log(p) + k * Math.log(1 - p); return Math.exp(lp);
-}
-function nbCDF(k, mu, r) {
-  let s = 0; for (let i = 0; i <= k; i++) s += nbPMF(i, mu, r); return Math.min(1, s);
-}
-function computeLeaderProbs(lambdas, kMax = 20) {
-  const n = lambdas.length, probs = new Array(n).fill(0);
-  for (let k = 0; k <= kMax; k++) {
-    const cdfs = lambdas.map(l => poissonCDF(k, l));
-    const pmfs = lambdas.map(l => poissonPMF(k, l));
-    let prod = 1; for (let j = 0; j < n; j++) prod *= cdfs[j];
-    for (let i = 0; i < n; i++) { if (cdfs[i] > 1e-15) probs[i] += prod / cdfs[i] * pmfs[i]; }
-  }
-  return probs;
-}
-
-// v24: Monte Carlo leader market.
-// Samples each player's future production from NB(futureLam, r), adds realized `actual`,
-// finds the max across the pool, splits leader credit fractionally across ties.
-// Handles ties correctly (unlike the closed-form computeLeaderProbs which assumes no ties).
-// Independence assumption across players is retained for v1; correlation layer comes later.
-
-// Seeded PRNG (mulberry32) for reproducible sims across renders.
-function mulberry32(seed) {
-  let a = (seed|0) || 0x9e3779b9;
-  return function() {
-    a |= 0; a = (a + 0x6D2B79F5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-// Gamma sample (Marsaglia-Tsang) for shape >= 1; falls back to scaled-gamma for shape<1.
-// Used as the latent in NB = Poisson(Gamma).
-function sampleGamma(shape, rng) {
-  if (shape < 1) {
-    // Ahrens-Dieter via boost: sample gamma(shape+1) * U^(1/shape)
-    const g = sampleGamma(shape + 1, rng);
-    const u = rng();
-    return g * Math.pow(u, 1 / shape);
-  }
-  const d = shape - 1/3, c = 1 / Math.sqrt(9 * d);
-  while (true) {
-    let x, v;
-    do {
-      // Box-Muller for normal
-      const u1 = rng(), u2 = rng();
-      const z = Math.sqrt(-2 * Math.log(Math.max(u1, 1e-300))) * Math.cos(2 * Math.PI * u2);
-      x = z;
-      v = 1 + c * x;
-    } while (v <= 0);
-    v = v * v * v;
-    const u = rng();
-    if (u < 1 - 0.0331 * x * x * x * x) return d * v;
-    if (Math.log(u) < 0.5 * x * x + d * (1 - v + Math.log(v))) return d * v;
-  }
-}
-// Poisson sampler (Knuth for small lam, rejection for large)
-function samplePoisson(lam, rng) {
-  if (lam < 30) {
-    const L = Math.exp(-lam);
-    let k = 0, p = 1;
-    do { k++; p *= rng(); } while (p > L);
-    return k - 1;
-  } else {
-    // Normal approximation then round, then bump
-    const u1 = rng(), u2 = rng();
-    const z = Math.sqrt(-2 * Math.log(Math.max(u1, 1e-300))) * Math.cos(2 * Math.PI * u2);
-    return Math.max(0, Math.round(lam + Math.sqrt(lam) * z));
-  }
-}
-// NB sample: gamma-poisson mixture. NB(mu, r) with variance = mu + mu^2/r.
-// Fast path: when r is very large, NB degenerates to Poisson.
-function sampleNB(mu, r, rng) {
-  if (mu <= 0) return 0;
-  if (r >= 50) return samplePoisson(mu, rng);
-  const lam = (sampleGamma(r, rng) / r) * mu; // Gamma(shape=r, scale=mu/r) => mean mu
-  return samplePoisson(lam, rng);
-}
-
-// Core Monte Carlo leader sim.
-// Inputs: array of {futureLam, actual} per player; r = NB dispersion; trials.
-// Returns: array of winProb per player (sums to 1, split fractionally on ties).
-function simulateLeader(entries, r, trials = 20000, seed = 12345) {
-  const n = entries.length;
-  const rng = mulberry32(seed);
-  const wins = new Array(n).fill(0);
-  const sample = new Array(n);
-  for (let t = 0; t < trials; t++) {
-    let maxVal = -1;
-    for (let i = 0; i < n; i++) {
-      const draw = sampleNB(entries[i].futureLam, r, rng) + entries[i].actual;
-      sample[i] = draw;
-      if (draw > maxVal) maxVal = draw;
-    }
-    // Count tied leaders, split credit 1/K
-    let tiedCount = 0;
-    for (let i = 0; i < n; i++) if (sample[i] === maxVal) tiedCount++;
-    const credit = 1 / tiedCount;
-    for (let i = 0; i < n; i++) if (sample[i] === maxVal) wins[i] += credit;
-  }
-  return wins.map(w => w / trials);
-}
-
-// v24 Phase E Pt3: cross-series leader sim using per-player PMFs.
-// Use this when each player's distribution is already a full PMF (e.g., from simulateSeries),
-// which means teammate correlation is baked in. Players across different matchups are independent.
-// Pre-builds cumulative distributions for fast sampling.
-function samplePMFFromCDF(cdf, rng) {
-  const u = rng();
-  // Binary search over cdf
-  let lo = 0, hi = cdf.length - 1;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (cdf[mid] < u) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
-}
-function simulateLeaderFromPMFs(pmfs, trials = 20000, seed = 99991) {
-  const n = pmfs.length;
-  if (!n) return [];
-  const rng = mulberry32(seed);
-  // Build CDFs once
-  const cdfs = pmfs.map(pmf => {
-    const c = new Array(pmf.length);
-    let s = 0;
-    for (let i = 0; i < pmf.length; i++) { s += pmf[i]; c[i] = s; }
-    // Guard against probability sum < 1 (numerical); clamp last value to 1
-    if (c.length) c[c.length-1] = 1;
-    return c;
+/* ═══ COMPUTE ═══ */
+function compute(drafts,adpPl,contestFilter,phaseFilter){
+  let fd=contestFilter==='ALL'?drafts:drafts.filter(d=>d.tournament===contestFilter);
+  if(phaseFilter&&phaseFilter!=='ALL')fd=fd.filter(d=>(d.phase||'pre')===phaseFilter);
+  const tot=fd.length;
+  const base={players:[],allPlayers:[],pairs:{},fieldPairs:{},stacks:[],slots:[],bd:{QB:{},RB:{},WR:{},TE:{}},archetypes:[],movers:{up:[],down:[]},total:0,myBuilds:[],fieldBuilds:[],teamExp:{},fieldTeamExp:{},first3:{},first4:{},fieldFirst3:{},fieldFirst4:{},roundHeat:{}};
+  const movers={up:[],down:[]};
+  if(adpPl?.length){const rel=adpPl.filter(a=>a.adp.length>1&&a.latest<240&&(a.adp[0]<200||a.latest<200));movers.up=rel.filter(a=>a.change>1).sort((a,b)=>b.change-a.change).slice(0,40);movers.down=rel.filter(a=>a.change<-1).sort((a,b)=>a.change-b.change).slice(0,40);}
+  if(!tot)return{...base,movers};
+  const pm={},pairs={},fieldPairs={},draftedNames=new Set(),teamExp={},fieldTeamExp={},first3={},first4={},fieldFirst3={},fieldFirst4={};
+  // Round-by-round heatmap: what % of picks in each round are QB/RB/WR/TE — me vs field
+  const roundHeat={me:{},field:{}};
+  fd.forEach(d=>{
+    const ns=d.picks.map(p=>p.name);ns.forEach(n=>draftedNames.add(n));
+    for(let i=0;i<ns.length;i++)for(let j=i+1;j<ns.length;j++){const k=[ns[i],ns[j]].sort().join('~');pairs[k]=(pairs[k]||0)+1;}
+    d.picks.forEach(p=>{if(p.team&&p.team!=='FA')teamExp[p.team]=(teamExp[p.team]||0)+1;
+      if(!roundHeat.me[p.round])roundHeat.me[p.round]={QB:0,RB:0,WR:0,TE:0,total:0};roundHeat.me[p.round][p.pos]=(roundHeat.me[p.round][p.pos]||0)+1;roundHeat.me[p.round].total++;});
+    const f3=d.picks.slice(0,3).map(p=>p.pos).join('-');first3[f3]=(first3[f3]||0)+1;
+    const f4=d.picks.slice(0,4).map(p=>p.pos).join('-');first4[f4]=(first4[f4]||0)+1;
+    [{picks:d.picks},...(d.field||[])].forEach(f=>{const fns=f.picks.map(p=>p.name);fns.forEach(n=>draftedNames.add(n));
+      for(let i=0;i<fns.length;i++)for(let j=i+1;j<fns.length;j++){const k=[fns[i],fns[j]].sort().join('~');fieldPairs[k]=(fieldPairs[k]||0)+1;}});
+    if(d.field)d.field.forEach(f=>{f.picks.forEach(p=>{if(p.team&&p.team!=='FA')fieldTeamExp[p.team]=(fieldTeamExp[p.team]||0)+1;
+      if(!roundHeat.field[p.round])roundHeat.field[p.round]={QB:0,RB:0,WR:0,TE:0,total:0};roundHeat.field[p.round][p.pos]=(roundHeat.field[p.round][p.pos]||0)+1;roundHeat.field[p.round].total++;});
+      const ff3=f.picks.slice(0,3).map(p=>p.pos).join('-');fieldFirst3[ff3]=(fieldFirst3[ff3]||0)+1;
+      const ff4=f.picks.slice(0,4).map(p=>p.pos).join('-');fieldFirst4[ff4]=(fieldFirst4[ff4]||0)+1;});
+    d.picks.forEach(p=>{const k=p.name+'|'+p.pos;if(!pm[k])pm[k]={name:p.name,pos:p.pos,team:p.team,picks:[],rounds:[],draftIds:[]};pm[k].picks.push(p.pick);pm[k].rounds.push(p.round);pm[k].draftIds.push(d.id);});
   });
-  const wins = new Array(n).fill(0);
-  const sample = new Array(n);
-  for (let t = 0; t < trials; t++) {
-    let maxVal = -1;
-    for (let i = 0; i < n; i++) {
-      const draw = samplePMFFromCDF(cdfs[i], rng);
-      sample[i] = draw;
-      if (draw > maxVal) maxVal = draw;
-    }
-    let tiedCount = 0;
-    for (let i = 0; i < n; i++) if (sample[i] === maxVal) tiedCount++;
-    const credit = 1 / tiedCount;
-    for (let i = 0; i < n; i++) if (sample[i] === maxVal) wins[i] += credit;
-  }
-  return wins.map(w => w / trials);
-}
-
-// v24 Phase E: Unified series simulation with L1 (score-correlated) player production.
-// Returns a full SimResult with all aggregates needed for every market.
-// Single source of truth — every market panel reads from this.
-
-// Sample categorical from weights (sums not required to equal 1, uses cumulative)
-function sampleCategorical(weights, total, rng) {
-  if (total <= 0) return 0;
-  const u = rng() * total;
-  let cum = 0;
-  for (let i = 0; i < weights.length; i++) {
-    cum += weights[i];
-    if (u < cum) return i;
-  }
-  return weights.length - 1;
-}
-
-// Multinomial: distribute k trials across weights. Slow path would be k×cat-sample; we use that since k is small (typical game = 2-8 goals).
-function multinomialDraws(k, weights, total, rng) {
-  const out = new Array(weights.length).fill(0);
-  for (let i = 0; i < k; i++) {
-    const idx = sampleCategorical(weights, total, rng);
-    out[idx]++;
-  }
-  return out;
-}
-
-// Build simulation inputs once per (series, player, stat) call: future-lambda per player per stat per game.
-// Returns a SimInputs object capturing everything the sim needs.
-// NOTE: the caller must precompute effG (with winPct, expTotal, pOT, result applied) and the goalie multipliers per game.
-function buildSimInputs(effG, homeAbbr, awayAbbr, players, globals, goalieQualityFaced, pGamePlayed) {
-  const BASELINE = 5.82;
-  const STATS = ["g","a","sog","hit","blk","tk","pim","give"];
-  // Filter to active skaters on either team
-  const pool = (players||[]).filter(p => (p.team===homeAbbr || p.team===awayAbbr) && roleMultiplier(p.lineRole) > 0);
-  // For each player, precompute per-stat per-game future lambda.
-  // (If user has already entered per-game stats in pGames, those contribute to realized `actual`; the sim only models FUTURE games.)
-  const pgKey = (stat) => stat==="tk"?"take_pg":stat==="give"?"give_pg":stat==="pim"?"pim_pg":stat+"_pg";
-  const actKey = (stat) => stat==="tk"?"pTK":stat==="give"?"pGIVE":stat==="pim"?"pPIM":"p"+stat.toUpperCase();
-  const playerData = pool.map(p => {
-    const isHome = p.team === homeAbbr;
-    const perStat = {};
-    for (const stat of STATS) {
-      // v53: role multiplier is stat-aware now (TOP6 +bump for scoring, -penalty for hits)
-      const rm = roleMultiplier(p.lineRole, stat);
-      const shrunk = shrinkRate(p[pgKey(stat)], p.gp, stat);
-      const rr = shrunk * rm * globals.rateDiscount * statRateMultiplier(stat);
-      const actual = p[actKey(stat)] || 0;
-      // Per-game future lambda for game i (if game played already -> 0; else rr × scale × goalieMult)
-      const perGameFuture = [];
-      for (let i = 0; i < 7; i++) {
-        const g = effG[i];
-        if (g.result) { perGameFuture.push(0); continue; }
-        const pPlay = pGamePlayed[i+1] ?? 0;
-        if (pPlay <= 0) { perGameFuture.push(0); continue; }
-        const scale = SCORING_STATS.has(stat) ? ((g.expTotal||BASELINE)/BASELINE) : 1;
-        const goalieMult = SCORING_STATS.has(stat)
-          ? (isHome ? goalieQualityFaced[i].faceByHome : goalieQualityFaced[i].faceByAway)
-          : 1.0;
-        // expected pPlay-scaled lambda (pPlay < 1 means the game may not happen; we'll roll pPlay at sim time)
-        perGameFuture.push(rr * scale * goalieMult);
-      }
-      perStat[stat] = { actual, perGameFuture };
-    }
-    return { name: p.name, team: p.team, isHome, perStat };
-  });
-  return { pool: playerData, effG, homeAbbr, awayAbbr, pGamePlayed };
-}
-
-// Core series simulator.
-// For each sim: decide game-by-game using g.winPct (determines series length + winner).
-// For scoring-stats (g, a): draw team goals ~ Poisson(expTotal × side_winPct), distribute via multinomial
-//   across team's skater pool weighted by each player's per-game goal lambda. Assists: ~1.7 per goal,
-//   distributed among teammates similarly weighted by assist lambda.
-// For non-scoring stats (sog, hit, blk, tk, pim, give): each player draws independently from NB(futureLam_game, r).
-// Returns {trials, serieLengthCounts, winnerCounts[H,A], exactScoreCounts{"4-0"..}, gameGoalsHist, teamGoalsHist{home,away},
-//   shutoutCount, otCount, playerTotalsHist: {name,team: {stat: [counts per threshold]}}}
-function simulateSeries(inputs, r, trials = 20000, seed = 31337) {
-  const rng = mulberry32(seed);
-  const { pool, effG } = inputs;
-  const HOME_PATTERN_LOCAL = [false, true, true, false, false, true, false, true]; // 1-indexed like the app
-  // Games 1,2 home; 3,4 away; 5 home; 6 away; 7 home (2-2-1-1-1)
-  const N = pool.length;
-
-  // Indexes of home vs away skaters in the pool
-  const homeIdx = pool.map((p,i)=>p.isHome?i:-1).filter(i=>i>=0);
-  const awayIdx = pool.map((p,i)=>!p.isHome?i:-1).filter(i=>i>=0);
-
-  // Output accumulators
-  const seriesLenCounts = [0,0,0,0,0,0,0,0]; // index = games played (4..7)
-  const exactScoreCounts = {}; // "H-A" e.g. "4-1" means home 4 wins, away 1 win
-  const winnerCounts = {H:0, A:0};
-  let totalShutouts = 0;
-  let totalOT = 0;
-  // Game-by-game goal distribution across all games that happen in any sim
-  // We'll produce total goals PMF for the *series* (sum over games) and for total shutouts in series.
-  const seriesGoalsHist = new Array(120).fill(0); // 0..119 series total goals
-  const homeGoalsHist = new Array(60).fill(0);
-  const awayGoalsHist = new Array(60).fill(0);
-  const seriesShutoutsHist = new Array(8).fill(0);
-  const seriesOTHist = new Array(8).fill(0);
-  // Per-player series totals across trials. We keep a running sum and histogram by threshold for leader/OU queries.
-  // Histogram: for each player × stat, count how many sims produced exactly k. kMax = 60 (covers hit/blk edge cases).
-  const KMAX = 60;
-  const playerHist = pool.map(()=>({
-    g: new Array(KMAX+1).fill(0),
-    a: new Array(KMAX+1).fill(0),
-    sog: new Array(KMAX+1).fill(0),
-    hit: new Array(KMAX+1).fill(0),
-    blk: new Array(KMAX+1).fill(0),
-    tk: new Array(KMAX+1).fill(0),
-    pim: new Array(KMAX+1).fill(0),
-    give: new Array(KMAX+1).fill(0),
-  }));
-  // Leader-market support: per-sim max across pool, tie-split credit
-  const leaderWins = {
-    g: new Array(N).fill(0), a: new Array(N).fill(0), pts: new Array(N).fill(0),
-    sog: new Array(N).fill(0), hit: new Array(N).fill(0), blk: new Array(N).fill(0),
-    tk: new Array(N).fill(0), pim: new Array(N).fill(0), give: new Array(N).fill(0),
-  };
-
-  // Scratch buffers reused per sim
-  const trialTotals = pool.map(()=>({g:0,a:0,sog:0,hit:0,blk:0,tk:0,pim:0,give:0}));
-  // Seed totals with realized `actual`
-  const actuals = pool.map(p => ({
-    g: p.perStat.g.actual, a: p.perStat.a.actual, sog: p.perStat.sog.actual,
-    hit: p.perStat.hit.actual, blk: p.perStat.blk.actual, tk: p.perStat.tk.actual,
-    pim: p.perStat.pim.actual, give: p.perStat.give.actual,
-  }));
-
-  // Realized series state from effG (games already played)
-  let realizedHW = 0, realizedAW = 0;
-  let realizedGoalsH = 0, realizedGoalsA = 0;
-  let realizedShutouts = 0, realizedOT = 0;
-  for (const g of effG) {
-    if (!g.result) continue;
-    if (g.result === "home") realizedHW++; else if (g.result === "away") realizedAW++;
-    if (typeof g.homeScore === "number") realizedGoalsH += g.homeScore;
-    if (typeof g.awayScore === "number") realizedGoalsA += g.awayScore;
-    if (g.homeScore === 0 || g.awayScore === 0) realizedShutouts++;
-    if (g.wentOT || g.result === "ot") realizedOT++;
-  }
-
-  for (let t = 0; t < trials; t++) {
-    // Reset trial totals from actuals
-    for (let i = 0; i < N; i++) {
-      const a = actuals[i], tt = trialTotals[i];
-      tt.g = a.g; tt.a = a.a; tt.sog = a.sog; tt.hit = a.hit;
-      tt.blk = a.blk; tt.tk = a.tk; tt.pim = a.pim; tt.give = a.give;
-    }
-    let hw = realizedHW, aw = realizedAW;
-    let trialGoalsH = realizedGoalsH, trialGoalsA = realizedGoalsA;
-    let trialShutouts = realizedShutouts, trialOT = realizedOT;
-
-    // Play through remaining games until series ends (4 wins)
-    for (let gi = 0; gi < 7; gi++) {
-      if (hw >= 4 || aw >= 4) break;
-      const g = effG[gi];
-      if (g.result) continue; // already played; realized state seeded above
-      // Roll game outcome using winPct (perspective: series home team)
-      const homeWins = rng() < g.winPct;
-      if (homeWins) hw++; else aw++;
-      // Draw team goal counts
-      const total = g.expTotal || 5.82;
-      const lamH = Math.max(0.01, total * g.winPct);
-      const lamA = Math.max(0.01, total * (1 - g.winPct));
-      let goalsH = samplePoisson(lamH, rng);
-      let goalsA = samplePoisson(lamA, rng);
-      // Enforce winner >= loser+1 if game was close/OT-to-regulation-winner — we keep it simple: if winner has fewer goals, flip or bump.
-      // In an ice-hockey game the winner MUST have more goals. If sampled the wrong way, bump winner by 1 (OT-style tiebreaker).
-      let wentOT = false;
-      if (homeWins && goalsH <= goalsA) { goalsH = goalsA + 1; wentOT = true; }
-      else if (!homeWins && goalsA <= goalsH) { goalsA = goalsH + 1; wentOT = true; }
-      // Apply OT tag using the game's pOT as a probability on close games where goalsH===goalsA+1 or goalsA===goalsH+1
-      if (!wentOT && Math.abs(goalsH - goalsA) === 1) {
-        if (rng() < (g.pOT || 0.22)) wentOT = true;
-      }
-      trialGoalsH += goalsH;
-      trialGoalsA += goalsA;
-      if (goalsH === 0 || goalsA === 0) trialShutouts++;
-      if (wentOT) trialOT++;
-
-      // === L1: distribute team goals across home team skaters weighted by per-game goal lambda ===
-      // Home goals
-      if (goalsH > 0) {
-        const weights = new Array(homeIdx.length);
-        let wt = 0;
-        for (let j = 0; j < homeIdx.length; j++) {
-          const w = pool[homeIdx[j]].perStat.g.perGameFuture[gi];
-          weights[j] = w; wt += w;
-        }
-        if (wt > 0) {
-          const draws = multinomialDraws(goalsH, weights, wt, rng);
-          for (let j = 0; j < homeIdx.length; j++) trialTotals[homeIdx[j]].g += draws[j];
-        }
-      }
-      // Away goals
-      if (goalsA > 0) {
-        const weights = new Array(awayIdx.length);
-        let wt = 0;
-        for (let j = 0; j < awayIdx.length; j++) {
-          const w = pool[awayIdx[j]].perStat.g.perGameFuture[gi];
-          weights[j] = w; wt += w;
-        }
-        if (wt > 0) {
-          const draws = multinomialDraws(goalsA, weights, wt, rng);
-          for (let j = 0; j < awayIdx.length; j++) trialTotals[awayIdx[j]].g += draws[j];
-        }
-      }
-      // === Assists: NHL avg ~1.67 assists per goal at even strength, higher on PP. Use 1.7.
-      // For each goal, draw 0-2 assists (split ~15%/50%/35% for 0/1/2 assists).
-      // Each assist is a weighted draw among teammates using assist-lambda weights.
-      // Team pool for assists == same-team skaters (excluding the goal scorer would be ideal; we approximate by NOT excluding since pool is large enough it's negligible).
-      const assistPerGoalDist = [0.15, 0.50, 0.35]; // P(0 assists, 1 assist, 2 assists)
-      for (let side = 0; side < 2; side++) {
-        const teamGoals = side === 0 ? goalsH : goalsA;
-        if (teamGoals <= 0) continue;
-        const idxArr = side === 0 ? homeIdx : awayIdx;
-        const weightsA = new Array(idxArr.length);
-        let wtA = 0;
-        for (let j = 0; j < idxArr.length; j++) {
-          const w = pool[idxArr[j]].perStat.a.perGameFuture[gi];
-          weightsA[j] = w; wtA += w;
-        }
-        if (wtA <= 0) continue;
-        for (let goalK = 0; goalK < teamGoals; goalK++) {
-          const u = rng();
-          let numAssists = 0;
-          if (u < assistPerGoalDist[0]) numAssists = 0;
-          else if (u < assistPerGoalDist[0] + assistPerGoalDist[1]) numAssists = 1;
-          else numAssists = 2;
-          for (let an = 0; an < numAssists; an++) {
-            const pickJ = sampleCategorical(weightsA, wtA, rng);
-            trialTotals[idxArr[pickJ]].a += 1;
-          }
-        }
-      }
-
-      // === Non-scoring stats + individual SOG ===
-      // SOG is "scoring" (correlates with goals-for environment), but we sample it per-player as NB since per-game SOG variance is substantial and multinomial doesn't apply (total SOG not constrained).
-      for (let i = 0; i < N; i++) {
-        const p = pool[i];
-        // SOG
-        {
-          const mu = p.perStat.sog.perGameFuture[gi];
-          if (mu > 0) trialTotals[i].sog += sampleNB(mu, r, rng);
-        }
-        // Hit, Blk, Tk, Pim, Give
-        for (const stat of ["hit","blk","tk","pim","give"]) {
-          const mu = p.perStat[stat].perGameFuture[gi];
-          if (mu > 0) trialTotals[i][stat] += sampleNB(mu, r, rng);
-        }
-      }
-    }
-
-    // Tally series result
-    const winner = hw >= 4 ? "H" : (aw >= 4 ? "A" : null);
-    if (winner) {
-      winnerCounts[winner]++;
-      const gamesPlayed = hw + aw;
-      seriesLenCounts[gamesPlayed]++;
-      const key = `${hw}-${aw}`;
-      exactScoreCounts[key] = (exactScoreCounts[key] || 0) + 1;
-    }
-    // Aggregate goal/shutout/OT histograms
-    const seriesGoals = trialGoalsH + trialGoalsA;
-    if (seriesGoals < seriesGoalsHist.length) seriesGoalsHist[seriesGoals]++;
-    if (trialGoalsH < homeGoalsHist.length) homeGoalsHist[trialGoalsH]++;
-    if (trialGoalsA < awayGoalsHist.length) awayGoalsHist[trialGoalsA]++;
-    if (trialShutouts < seriesShutoutsHist.length) seriesShutoutsHist[trialShutouts]++;
-    if (trialOT < seriesOTHist.length) seriesOTHist[trialOT]++;
-    totalShutouts += trialShutouts;
-    totalOT += trialOT;
-
-    // Per-player totals into histograms
-    for (let i = 0; i < N; i++) {
-      const tt = trialTotals[i], ph = playerHist[i];
-      if (tt.g <= KMAX) ph.g[tt.g]++;
-      if (tt.a <= KMAX) ph.a[tt.a]++;
-      if (tt.sog <= KMAX) ph.sog[tt.sog]++;
-      if (tt.hit <= KMAX) ph.hit[tt.hit]++;
-      if (tt.blk <= KMAX) ph.blk[tt.blk]++;
-      if (tt.tk <= KMAX) ph.tk[tt.tk]++;
-      if (tt.pim <= KMAX) ph.pim[tt.pim]++;
-      if (tt.give <= KMAX) ph.give[tt.give]++;
-    }
-    // Leader market credits (fractional on ties)
-    for (const stat of ["g","a","pts","sog","hit","blk","tk","pim","give"]) {
-      let maxVal = -1, tiedCount = 0;
-      for (let i = 0; i < N; i++) {
-        const v = stat === "pts" ? (trialTotals[i].g + trialTotals[i].a) : trialTotals[i][stat];
-        if (v > maxVal) { maxVal = v; tiedCount = 1; }
-        else if (v === maxVal) tiedCount++;
-      }
-      const credit = 1 / tiedCount;
-      for (let i = 0; i < N; i++) {
-        const v = stat === "pts" ? (trialTotals[i].g + trialTotals[i].a) : trialTotals[i][stat];
-        if (v === maxVal) leaderWins[stat][i] += credit;
-      }
-    }
-  }
-
-  // Normalize
-  const norm = (arr) => arr.map(c => c / trials);
-  return {
-    trials,
-    pool: pool.map(p => ({name: p.name, team: p.team})),
-    // Series outcomes
-    winnerProb: { H: winnerCounts.H / trials, A: winnerCounts.A / trials },
-    seriesLengthProb: { 4: seriesLenCounts[4]/trials, 5: seriesLenCounts[5]/trials, 6: seriesLenCounts[6]/trials, 7: seriesLenCounts[7]/trials },
-    exactScoreProb: Object.fromEntries(Object.entries(exactScoreCounts).map(([k,v])=>[k,v/trials])),
-    // Goals / shutouts / OT
-    seriesGoalsPMF: norm(seriesGoalsHist),
-    homeGoalsPMF: norm(homeGoalsHist),
-    awayGoalsPMF: norm(awayGoalsHist),
-    seriesShutoutsPMF: norm(seriesShutoutsHist),
-    seriesOTPMF: norm(seriesOTHist),
-    avgShutouts: totalShutouts / trials,
-    avgOT: totalOT / trials,
-    // Per-player
-    playerPMF: pool.map((p,i) => ({
-      name: p.name, team: p.team,
-      g: norm(playerHist[i].g),
-      a: norm(playerHist[i].a),
-      sog: norm(playerHist[i].sog),
-      hit: norm(playerHist[i].hit),
-      blk: norm(playerHist[i].blk),
-      tk: norm(playerHist[i].tk),
-      pim: norm(playerHist[i].pim),
-      give: norm(playerHist[i].give),
-    })),
-    // Leader markets (true probs; caller applies margin)
-    leaderProb: Object.fromEntries(Object.entries(leaderWins).map(([stat,arr])=>[stat, arr.map(c => c/trials)])),
-  };
-}
-
-// Helpers to price O/U markets from a PMF
-function pAtLeastFromPMF(pmf, k) {
-  let s = 0;
-  for (let i = k; i < pmf.length; i++) s += pmf[i];
-  return s;
-}
-function pOverLineFromPMF(pmf, line) {
-  // line typically x.5; strict > line means >= ceil(line+0.001)
-  const k = Math.ceil(line - 0.001); // for 4.5 → 5, for 4.0 → 4
-  // "Over" convention: >= k+1 when line is a half-line; >= k when line is integer... we use >=k+1 to be Over for x.5 lines
-  // Actually: for line=4.5, Over = total>=5, k_ceil=5. pOver = P(X>=5) = pAtLeast(5).
-  // for line=4.0, "Over" usually means P(X>=5) not P(X>=4). So always >= floor(line)+1 when line is integer; >= ceil(line) when half.
-  const threshold = Math.floor(line) === line ? line + 1 : Math.ceil(line);
-  return pAtLeastFromPMF(pmf, threshold);
-}
-function toAmer(p) {
-  if (p <= 0.002) return 50000;
-  // v49: cap at 0.9999 so normalized-with-overround values >= 1 don't produce positive nonsense
-  const q = Math.min(0.9999, p);
-  if (q >= 0.5) return -Math.round((q / (1 - q)) * 100);
-  return Math.round(((1 - q) / q) * 100);
-}
-function toDec(p) {
-  if (p <= 0.002) return 501;
-  const q = Math.min(0.9999, p);
-  return Math.min(501, +(1 / q).toFixed(2));
-}
-
-// v49: read a player's realized playoff total for a given stat key.
-// Handles the "pts" case (not stored; derived from pG+pA) and normalizes field-name casing.
-function readActual(p, stat) {
-  if (!p) return 0;
-  if (stat === "pts") return (p.pG||0) + (p.pA||0);
-  if (stat === "tk")  return p.pTK  || 0;
-  if (stat === "give")return p.pGIVE|| p.pGV || 0;
-  if (stat === "tsa") return p.pTSA || 0;
-  if (stat === "pim") return p.pPIM || 0;
-  if (stat === "g")   return p.pG   || 0;
-  if (stat === "a")   return p.pA   || 0;
-  if (stat === "sog") return p.pSOG || 0;
-  if (stat === "hit") return p.pHIT || 0;
-  if (stat === "blk") return p.pBLK || 0;
-  return 0;
-}
-
-// Stats that scale with game total goals (offense-linked).
-// Defensive stats (hits/blk/tk/pim/give) don't scale with scoring environment.
-const SCORING_STATS = new Set(["g","a","pts","sog"]);
-// v21: stats that INCREASE in playoffs (more physical, tighter play)
-// We apply a DIFFERENT rate adjustment to these than scoring stats.
-const PHYSICAL_STATS = new Set(["hit","blk","pim"]);
-function goalScaleFor(stat, scale) {
-  return SCORING_STATS.has(stat) ? (scale || 1) : 1;
-}
-// v21: stat-specific rate discount. Scoring drops ~15% in playoffs; physical rises ~5-10%; takeaways/giveaways roughly steady.
-// Applied on top of user's global rateDiscount (which we interpret as the SCORING baseline now).
-function statRateMultiplier(stat) {
-  if (SCORING_STATS.has(stat)) return 1.0;   // user's rateDiscount applies as-is (typically 0.85)
-  if (PHYSICAL_STATS.has(stat)) return 1.25; // physical stats ~25% higher relative to the user's scoring discount (so 0.85 * 1.25 ≈ 1.06 of regular-season rate)
-  return 1.10; // takeaways/giveaways slightly up
-}
-
-// v46: stat-specific NB dispersion. Goals/assists/points over a 5-7 game window are very close to Poisson;
-// heavy overdispersion (low r) wrongly inflates P(0) and crushes 1+/3+/5+ markets.
-// Physical/discretionary stats (hits, blocks, PIM, give, take) have legitimate game-to-game variance and benefit from NB.
-// Returns r (dispersion shape). User's globals.dispersion is treated as the PHYSICAL baseline.
-function dispersionFor(stat, globalDispersion) {
-  // Scoring stats: very mild overdispersion only. Cap at 8 (essentially Poisson) regardless of global setting.
-  if (stat === "g" || stat === "a" || stat === "pts") return 12;
-  // SOG: nearly Poisson; small overdispersion
-  if (stat === "sog") return 10;
-  // Physical / discretionary: use global setting (default 1.2 → heavy overdispersion is realistic here)
-  return globalDispersion;
-}
-
-function applyMargin(trueProbs, or) {
-  const s = trueProbs.reduce((a, b) => a + b, 0);
-  return trueProbs.map(p => s > 0 ? (p / s) * or : 0);
-}
-
-// v49: leader market overround — preserves favorite's true prob and squeezes longshots.
-// Problem with naive (p/sum * or): if favorite has raw 0.7, OR=1.5 → 1.05 (impossible).
-// Solution: cap each player at MAX_PROB, redistribute any overflow proportionally to the remaining field.
-// This mimics how books actually juice leader markets: favorite moves a little, the tail pays the margin.
-function applyLeaderOverround(rawProbs, powerFactor, overround, MAX_PROB = 0.90) {
-  const pf = powerFactor || 1.0;
-  const or = overround || 1.0;
-  const powered = rawProbs.map(p => Math.pow(Math.max(0, p), pf));
-  const psum = powered.reduce((a, b) => a + b, 0) || 1;
-  // Initial allocation: (p/sum) * OR
-  let adj = powered.map(p => (p / psum) * or);
-  // Cap-and-redistribute: any player over MAX_PROB is clamped; overflow redistributes pro-rata across non-capped.
-  // Iterate (up to 5 passes) because each redistribution may push another player over cap.
-  for (let iter = 0; iter < 5; iter++) {
-    let overflow = 0;
-    const nonCappedSum = [];
-    for (let i = 0; i < adj.length; i++) {
-      if (adj[i] > MAX_PROB) {
-        overflow += (adj[i] - MAX_PROB);
-        adj[i] = MAX_PROB;
-      } else {
-        nonCappedSum.push(i);
-      }
-    }
-    if (overflow < 1e-9) break;
-    const nonSum = nonCappedSum.reduce((s, i) => s + adj[i], 0);
-    if (nonSum <= 0) break;
-    for (const i of nonCappedSum) adj[i] += (adj[i] / nonSum) * overflow;
-  }
-  return adj;
-}
-
-// v24: Team strength from on-ice xG. Sum across active (non-scratched) skaters.
-// Since every on-ice event has ~5 skaters recorded, the sums overcount by ~5x,
-// but since we take a ratio (xGF vs xGA) the scaling cancels.
-// Returns { xGF60, xGA60, diff60, sampleGP } — per-60-minutes rates.
-// If insufficient data, returns null.
-function computeTeamStrength(players, team) {
-  if (!players || !players.length) return null;
-  const pool = players.filter(p => p.team === team && p.lineRole !== "SCRATCHED" && p.toi > 0);
-  if (pool.length < 3) return null;
-  let totF = 0, totA = 0, totTOI = 0;
-  for (const p of pool) {
-    totF += p.onIceF || 0;
-    totA += p.onIceA || 0;
-    totTOI += p.toi || 0;
-  }
-  if (totTOI <= 0) return null;
-  // icetime is in seconds, convert to 60-min units
-  const hours60 = totTOI / 3600;
-  return {
-    xGF60: totF / hours60,
-    xGA60: totA / hours60,
-    diff60: (totF - totA) / hours60,
-    activeSkaters: pool.length,
-  };
-}
-
-// Win probability from team strength differential.
-// Calibration: NHL historical xG-diff vs win rate at 5v5 produces k ~= 0.15–0.22.
-// Since we're using all-situations, slightly lower spread, so k=0.18 default.
-// HFA applied as additive boost to home team's diff.
-function winProbFromStrength(homeStrength, awayStrength, hfa = 0.05, k = 1.0) {
-  if (!homeStrength || !awayStrength) return null;
-  // diff is in xGF-xGA per 60. Typical span: -0.5 to +0.5.
-  // hfa is expressed as a winPct bump: want a neutral-strength game with hfa=0.05 to give 0.55.
-  // So convert hfa (in win%) to logit space and add to base logit.
-  const edge = homeStrength.diff60 - awayStrength.diff60; // per-60 xG differential
-  // Empirical: at 5v5 per-60, 1.0 xG/60 diff ~= 70% win prob in a single NHL game.
-  // logit(0.70) = 0.847, so k_single_game ≈ 0.85 per unit of xG/60 diff.
-  // Using all-situations (noisier than 5v5), dial down to 0.65 to avoid overconfidence
-  // on the favorite. Calibrated so best-team vs worst-team (edge ~1.1 xG/60) gives ~67%,
-  // matching typical market prices on top-vs-bottom playoff matchups.
-  const baseLogit = 0.65 * edge * k;
-  const hfaLogit = Math.log(hfa > 0 ? (0.5 + hfa) / (0.5 - hfa) : 1);
-  const logit = baseLogit + hfaLogit;
-  const p = 1 / (1 + Math.exp(-logit));
-  return Math.max(0.05, Math.min(0.95, p));
-}
-
-// v21 distribution helpers
-// Build a Poisson PMF truncated at maxK as a Float64Array (index = k)
-function poissonPMFArray(lam, maxK) {
-  const arr = new Array(maxK+1).fill(0);
-  if (lam <= 0) { arr[0] = 1; return arr; }
-  // Start from k=0 and iterate to avoid numerical issues
-  let p = Math.exp(-lam);
-  arr[0] = p;
-  for (let k = 1; k <= maxK; k++) {
-    p = p * lam / k;
-    arr[k] = p;
-  }
-  return arr;
-}
-// Convolve two discrete distributions (arrays indexed by k), truncated at maxK.
-// Used for summing independent Poisson variables (e.g., total goals across games).
-function convolve(a, b, maxK) {
-  const out = new Array(maxK+1).fill(0);
-  const la = Math.min(a.length-1, maxK);
-  const lb = Math.min(b.length-1, maxK);
-  for (let i = 0; i <= la; i++) {
-    if (a[i] === 0) continue;
-    const cap = Math.min(lb, maxK-i);
-    for (let j = 0; j <= cap; j++) {
-      out[i+j] += a[i] * b[j];
-    }
-  }
-  return out;
-}
-// Mix two PMF arrays with weights wA, wB (wA+wB should =1)
-function mixPMF(a, b, wA, wB, maxK) {
-  const out = new Array(maxK+1).fill(0);
-  for (let k = 0; k <= maxK; k++) {
-    out[k] = (a[k]||0)*wA + (b[k]||0)*wB;
-  }
-  return out;
-}
-// Scale PMF by a scalar weight (for path mixing)
-function scalePMF(a, w, maxK) {
-  const out = new Array(maxK+1).fill(0);
-  const la = Math.min(a.length-1, maxK);
-  for (let k = 0; k <= la; k++) out[k] = a[k]*w;
-  return out;
-}
-// Add two PMF arrays (without renormalization — used as mixture accumulator)
-function addPMF(a, b, maxK) {
-  const out = new Array(maxK+1).fill(0);
-  for (let k = 0; k <= maxK; k++) out[k] = (a[k]||0) + (b[k]||0);
-  return out;
-}
-// P(X >= k) from a PMF array
-function pAtLeast(pmf, k) {
-  let s = 0; for (let i = k; i < pmf.length; i++) s += pmf[i]; return Math.min(1, s);
-}
-// O/U from arbitrary PMF (line is half-integer)
-function ouFromPMF(pmf, lines) {
-  return lines.map(line => {
-    const k = Math.ceil(line);
-    const pOver = pAtLeast(pmf, k);
-    return { line, pOver, pUnder: 1 - pOver };
-  });
-}
-
-// v13 Bayesian shrinkage for per-game rates — used by all prop/leader panels.
-// Prevents 1-GP call-ups (e.g., Booth, Rooney, Luneau) from showing λ≈5 in R1 goals leader.
-// Only applies to SMALL samples (gp < 20). Veterans with 20+ GP use their raw rate.
-// Scratched players are excluded upstream by roleMultiplier=0, so no need to check here.
-// shrunkRate = (gp*rawRate + k*prior) / (gp + k), with k=20 game-equivalent prior weight.
-// stat = "g"|"a"|"pts"|"sog"|"hit"|"blk"|"tk"|"pim"|"give"
-const PRIOR_RATES = {g:0.1, a:0.18, pts:0.28, sog:1.3, hit:1.0, blk:0.7, tk:0.4, pim:0.3, give:0.4};
-const SHRINK_K = 20;
-const SHRINK_THRESHOLD_GP = 20;
-function shrinkRate(rawRate, gp, stat) {
-  const prior = PRIOR_RATES[stat] ?? 0.1;
-  if (!gp || gp <= 0) return prior;
-  // Veterans (gp >= 20): use raw rate untouched
-  if (gp >= SHRINK_THRESHOLD_GP) return rawRate || 0;
-  // Small sample: shrink toward prior
-  return (gp * (rawRate||0) + SHRINK_K * prior) / (gp + SHRINK_K);
-}
-function fmt(p) { const a = toAmer(p); return a > 0 ? `+${a}` : `${a}`; }
-
-// v20: per-game stats history.
-// Each player has `pGames`: array of {round, game, g, a, sog, hit, blk, tk, pim, give}
-// Rollups pGP/pG/pA/pSOG/pHIT/pBLK/pTK/pPIM/pGIVE are derived from this array.
-// Migration: if player has pGP>0 but no pGames, synthesize a single R1-G1 entry lumping all stats.
-function rollupFromGames(pGames) {
-  const r = {pGP:0, pG:0, pA:0, pSOG:0, pHIT:0, pBLK:0, pTK:0, pPIM:0, pGIVE:0};
-  if (!Array.isArray(pGames)) return r;
-  for (const e of pGames) {
-    r.pGP++;
-    r.pG    += e.g||0;
-    r.pA    += e.a||0;
-    r.pSOG  += e.sog||0;
-    r.pHIT  += e.hit||0;
-    r.pBLK  += e.blk||0;
-    r.pTK   += e.tk||0;
-    r.pPIM  += e.pim||0;
-    r.pGIVE += e.give||0;
-  }
-  return r;
-}
-// Returns a player object with rollup fields recomputed from pGames
-function withRollups(p) {
-  if (!p.pGames) return p;
-  const r = rollupFromGames(p.pGames);
-  return {...p, ...r};
-}
-// Migrate legacy player (pGP > 0 but no pGames) to new structure
-function migratePlayer(p) {
-  if (p.pGames || !(p.pGP > 0)) return p;
-  // Collapse existing totals into a single synthetic R1-G1 entry
-  const synthetic = {
-    round:1, game:1,
-    g: p.pG||0, a: p.pA||0, sog: p.pSOG||0,
-    hit: p.pHIT||0, blk: p.pBLK||0, tk: p.pTK||0,
-    pim: p.pPIM||0, give: p.pGIVE||0,
-    _migrated: true,
-  };
-  // pGP > 1 means multiple games were rolled up; keep as one synthetic entry with extra note
-  return {...p, pGames:[synthetic]};
-}
-
-// v28: goalie playoff rollups. Each goalie has `pGames`: [{round, game, ga, sa, sv, so, toi, dec}]
-function rollupGoalie(pGames) {
-  const r = {pGP:0, pSaves:0, pSA:0, pGA:0, pSO:0, pTOI:0, pW:0, pL:0};
-  if (!Array.isArray(pGames)) return r;
-  for (const e of pGames) {
-    r.pGP++;
-    r.pSaves += e.sv||0;
-    r.pSA    += e.sa||0;
-    r.pGA    += e.ga||0;
-    r.pSO    += e.so||0;
-    r.pTOI   += e.toi||0;
-    if (e.dec === "W") r.pW++;
-    else if (e.dec === "L") r.pL++;
-  }
-  return r;
-}
-function withGoalieRollups(g) {
-  if (!g.pGames) return g;
-  return {...g, ...rollupGoalie(g.pGames)};
-}
-
-// v28: full-page Hockey Reference box-score parser.
-// Input: paste of the entire HR game page (header + scoring summary + both teams' skater tables
-// + goalie tables + advanced tables). Output: structured game with both teams' stats + goalies.
-//
-// Detection strategy:
-// - Find lines matching "<TeamName>" headers (e.g., "Pittsburgh Penguins")
-// - The TWO header lines at the top of the page are the score banner: each team appears with
-//   its score on the next non-empty line ("3", "1-0"). The team listed FIRST is the AWAY team
-//   (HR convention: away team appears in top banner, home team second).
-//   ↑ correction: actually HR shows away first, then home. We use arena/PPG Paints to confirm.
-// - For player tables, we look for blocks like "<TeamName>" followed by a "Rk\tPlayer\t..." header.
-// - Two skater tables (one per team), two goalie tables.
-// - "Advanced" tables (one per team) provide HIT/BLK columns.
-function parseHRFullPage(text) {
-  const NAME_TO_ABBR = {
-    "Anaheim Ducks":"ANA","Boston Bruins":"BOS","Buffalo Sabres":"BUF","Calgary Flames":"CGY",
-    "Carolina Hurricanes":"CAR","Chicago Blackhawks":"CHI","Colorado Avalanche":"COL",
-    "Columbus Blue Jackets":"CBJ","Dallas Stars":"DAL","Detroit Red Wings":"DET",
-    "Edmonton Oilers":"EDM","Florida Panthers":"FLA","Los Angeles Kings":"LAK",
-    "Minnesota Wild":"MIN","Montreal Canadiens":"MTL","Nashville Predators":"NSH",
-    "New Jersey Devils":"NJD","New York Islanders":"NYI","New York Rangers":"NYR",
-    "Ottawa Senators":"OTT","Philadelphia Flyers":"PHI","Pittsburgh Penguins":"PIT",
-    "San Jose Sharks":"SJS","Seattle Kraken":"SEA","St. Louis Blues":"STL","St Louis Blues":"STL",
-    "Tampa Bay Lightning":"TBL","Toronto Maple Leafs":"TOR","Utah Mammoth":"UTA","Utah Hockey Club":"UTA",
-    "Vancouver Canucks":"VAN","Vegas Golden Knights":"VEG","Washington Capitals":"WSH",
-    "Winnipeg Jets":"WPG"
-  };
-
-  const lines = text.split(/\r?\n/).map(l=>l.replace(/\s+$/,""));
-
-  // ── 1. SCORE BANNER ─────────────────────────────────────────────────────────
-  // First two team-name occurrences in the page = the score banner (away first, then home).
-  // Each is followed by their score on the next non-empty line.
-  const teamHits = []; // [{name, abbr, lineIdx}]
-  for (let i=0; i<lines.length; i++) {
-    const L = lines[i].trim();
-    if (NAME_TO_ABBR[L]) {
-      teamHits.push({name:L, abbr:NAME_TO_ABBR[L], lineIdx:i});
-    }
-  }
-  if (teamHits.length < 2) return {error:"Could not find two team names. Paste the full HR page including score header."};
-
-  // First two are score banner (away, home). Subsequent occurrences are section headers.
-  const awayHit = teamHits[0], homeHit = teamHits[1];
-
-  // Score = first numeric integer on a line shortly after the team name (within next 5 lines).
-  const findScore = (start) => {
-    for (let i=start+1; i<Math.min(start+6, lines.length); i++) {
-      const L = lines[i].trim();
-      if (/^\d+$/.test(L)) return parseInt(L);
-    }
-    return null;
-  };
-  const awayScore = findScore(awayHit.lineIdx);
-  const homeScore = findScore(homeHit.lineIdx);
-  if (awayScore == null || homeScore == null) return {error:"Could not parse final score from header banner."};
-
-  // ── 2. OT/SO DETECTION ──────────────────────────────────────────────────────
-  // Look for "OT" or "Overtime" or "SO"/"Shootout" or "1st OT", "2nd OT" mentions.
-  const fullText = text;
-  const ot = /\b(overtime|1st OT|2nd OT|3rd OT|4th OT)\b/i.test(fullText)
-          || /\bOT\b/.test(fullText.split("\n").slice(0,40).join(" ")); // OT mentioned in scoring summary
-  const so = /\b(shootout|^SO$)/im.test(fullText);
-
-  // ── 3. DATE ─────────────────────────────────────────────────────────────────
-  let dateISO = null;
-  const dm = fullText.match(/([A-Z][a-z]+\s+\d{1,2},\s+\d{4})/);
-  if (dm) {
-    const d = new Date(dm[1]);
-    if (!isNaN(d)) dateISO = d.toISOString().slice(0,10);
-  }
-
-  // ── 4. PER-TEAM SKATER + GOALIE TABLE EXTRACTION ────────────────────────────
-  // For each team (sections 3+, after the banner), parse the next skater table.
-  // A skater table starts with a header row containing "Player" and ends at "TOTAL" line.
-  // After the skater table comes the goalie table (header has "DEC" and "SV%").
-  function parseSkaterTable(startLine) {
-    // Find the next header row containing "Player"
-    let hi = -1, headers = [];
-    for (let i=startLine; i<lines.length; i++) {
-      const cells = lines[i].split("\t").map(s=>s.trim());
-      const cellsLow = cells.map(c=>c.toLowerCase());
-      if (cellsLow.includes("player") && cellsLow.includes("g") && cellsLow.includes("a")) {
-        hi = i; headers = cells; break;
-      }
-    }
-    if (hi === -1) return null;
-    const col = (alts)=>{for(const a of alts){const i=headers.findIndex(h=>h.toLowerCase()===a.toLowerCase());if(i!==-1)return i;}return -1;};
-    const cm = {
-      name:col(["Player","Skater"]),
-      g:col(["G"]), a:col(["A"]), pim:col(["PIM"]),
-      sog:col(["S","Shots","SOG"]),
-      toi:col(["TOI"]),
-    };
-    const players = [];
-    let endLine = hi;
-    for (let i=hi+1; i<lines.length; i++) {
-      const cells = lines[i].split("\t").map(s=>s.trim());
-      const name = cm.name>=0 ? cells[cm.name] : "";
-      if (!name) { endLine = i; break; }
-      // v28: TOTAL row may have empty Rk, so "TOTAL" lands in cells[0] not in name slot.
-      // Check the WHOLE line for "TOTAL" or "Team Totals" prefix.
-      const lineTrim = lines[i].trim();
-      if (/^TOTAL\b/i.test(lineTrim) || /Team Totals/i.test(lineTrim)) { endLine = i; break; }
-      if (NAME_TO_ABBR[lineTrim]) { endLine = i; break; }
-      // Also: if name slot is purely numeric (like "2" from a TOTAL row that shifted columns), skip
-      if (/^\d+$/.test(name)) continue;
-      // Skip rows that don't look like player rows (need at least a few numeric cells)
-      if (cells.length < 5) continue;
-      // Skip goalie rows that may sneak in (Vladař etc. appear in skater table on HR sometimes — but
-      // they'll show up here with TOI ~60:00 and 0/0 shots; we keep them since they don't contribute
-      // skater stats anyway, but mark with flag for filtering).
-      const g = cm.g>=0 ? parseInt(cells[cm.g])||0 : 0;
-      const a = cm.a>=0 ? parseInt(cells[cm.a])||0 : 0;
-      const sog = cm.sog>=0 ? parseInt(cells[cm.sog])||0 : 0;
-      const pim = cm.pim>=0 ? parseInt(cells[cm.pim])||0 : 0;
-      // TOI parse "MM:SS" → seconds
-      let toi = 0;
-      if (cm.toi>=0 && cells[cm.toi]) {
-        const m = cells[cm.toi].match(/(\d+):(\d+)/);
-        if (m) toi = parseInt(m[1])*60 + parseInt(m[2]);
-      }
-      players.push({name, g, a, sog, pim, toi, hit:0, blk:0, tk:0, give:0});
-    }
-    return {players, endLine};
-  }
-
-  function parseGoalieTable(startLine) {
-    // Goalie tables have headers including "DEC", "SV%", "SA"
-    let hi = -1, headers = [];
-    for (let i=startLine; i<Math.min(startLine+200, lines.length); i++) {
-      const cells = lines[i].split("\t").map(s=>s.trim());
-      const cellsLow = cells.map(c=>c.toLowerCase());
-      // Goalie header: must include DEC and SV% (and Player)
-      if (cellsLow.includes("player") && cellsLow.includes("dec") && cellsLow.some(c=>c==="sv%"||c==="sv")) {
-        hi = i; headers = cells; break;
-      }
-      // Stop searching if we hit another team name (next section)
-      const trimmed = lines[i].trim();
-      if (NAME_TO_ABBR[trimmed]) break;
-    }
-    if (hi === -1) return {goalies:[], endLine:startLine};
-    const col = (alts)=>{for(const a of alts){const i=headers.findIndex(h=>h.toLowerCase()===a.toLowerCase());if(i!==-1)return i;}return -1;};
-    const cm = {
-      name: col(["Player","Goalie"]),
-      dec:  col(["DEC"]),
-      ga:   col(["GA"]),
-      sa:   col(["SA"]),
-      sv:   col(["SV"]),
-      svp:  col(["SV%"]),
-      so:   col(["SO"]),
-      pim:  col(["PIM"]),
-      toi:  col(["TOI"]),
-    };
-    const goalies = [];
-    let endLine = hi;
-    for (let i=hi+1; i<lines.length; i++) {
-      const cells = lines[i].split("\t").map(s=>s.trim());
-      const name = cm.name>=0 ? cells[cm.name] : "";
-      if (!name) { endLine = i; break; }
-      if (/^TOTAL/i.test(name) || NAME_TO_ABBR[name.trim()]) { endLine = i; break; }
-      if (cells.length < 4) continue;
-      const dec = cm.dec>=0 ? cells[cm.dec] : "";
-      const ga = cm.ga>=0 ? parseInt(cells[cm.ga])||0 : 0;
-      const sa = cm.sa>=0 ? parseInt(cells[cm.sa])||0 : 0;
-      const sv = cm.sv>=0 ? parseInt(cells[cm.sv])||0 : Math.max(0,sa-ga);
-      const so = cm.so>=0 ? parseInt(cells[cm.so])||0 : 0;
-      let toi = 0;
-      if (cm.toi>=0 && cells[cm.toi]) {
-        const m = cells[cm.toi].match(/(\d+):(\d+)/);
-        if (m) toi = parseInt(m[1])*60 + parseInt(m[2]);
-      }
-      goalies.push({name, dec, ga, sa, sv, so, toi});
-    }
-    return {goalies, endLine};
-  }
-
-  function parseAdvancedTable(startLine) {
-    // Advanced has header: Player iCF SAT-F SAT-A CF% CRel% ZSO ZSD oZS% HIT BLK
-    let hi = -1, headers = [];
-    for (let i=startLine; i<Math.min(startLine+500, lines.length); i++) {
-      const cells = lines[i].split("\t").map(s=>s.trim());
-      const cellsLow = cells.map(c=>c.toLowerCase());
-      if (cellsLow.includes("player") && cellsLow.some(c=>c==="hit") && cellsLow.some(c=>c==="blk")) {
-        hi = i; headers = cells; break;
-      }
-      const trimmed = lines[i].trim();
-      if (NAME_TO_ABBR[trimmed] && i>startLine+1) break;
-    }
-    if (hi === -1) return {map:new Map(), endLine:startLine};
-    const col = (alts)=>{for(const a of alts){const i=headers.findIndex(h=>h.toLowerCase()===a.toLowerCase());if(i!==-1)return i;}return -1;};
-    const cm = {
-      name: col(["Player"]),
-      hit:  col(["HIT"]),
-      blk:  col(["BLK"]),
-    };
-    const map = new Map();
-    let endLine = hi;
-    for (let i=hi+1; i<lines.length; i++) {
-      const cells = lines[i].split("\t").map(s=>s.trim());
-      const name = cm.name>=0 ? cells[cm.name] : "";
-      if (!name) { endLine = i; break; }
-      if (/^TOTAL/i.test(name) || NAME_TO_ABBR[name.trim()]) { endLine = i; break; }
-      if (cells.length < 3) continue;
-      const hit = cm.hit>=0 ? parseInt(cells[cm.hit])||0 : 0;
-      const blk = cm.blk>=0 ? parseInt(cells[cm.blk])||0 : 0;
-      map.set(name, {hit, blk});
-    }
-    return {map, endLine};
-  }
-
-  // ── 5. PARSE TEAM SECTIONS ──────────────────────────────────────────────────
-  // After the banner, the page has team sections in a deterministic order.
-  // We search forward starting after homeHit.lineIdx for the FIRST team section header
-  // (which will be either away or home, depending on HR layout).
-  // Strategy: find ALL team-name occurrences after lineIdx of homeHit. They mark section starts.
-  // For each team, the next skater table belongs to that team.
-  const sectionStarts = [];
-  for (let i=homeHit.lineIdx+1; i<lines.length; i++) {
-    const L = lines[i].trim();
-    if (NAME_TO_ABBR[L]) sectionStarts.push({abbr:NAME_TO_ABBR[L], name:L, lineIdx:i});
-  }
-
-  // We expect 4 section headers per team (one for skater table, one for goalie table title region,
-  // one for advanced) but in practice HR repeats the team name multiple times. We just need to find
-  // the FIRST skater table after the FIRST occurrence of each team.
-  const firstAway = sectionStarts.find(s=>s.abbr===awayHit.abbr);
-  const firstHome = sectionStarts.find(s=>s.abbr===homeHit.abbr);
-  if (!firstAway || !firstHome) return {error:`Could not find skater section for both teams (away=${awayHit.abbr}, home=${homeHit.abbr})`};
-
-  // Parse in order: away first, then home (HR away usually appears first in body sections too).
-  // But to be robust, sort by lineIdx and parse each in order.
-  const order = [firstAway, firstHome].sort((a,b)=>a.lineIdx - b.lineIdx);
-
-  const teamData = {};
-  for (let k=0; k<order.length; k++) {
-    const sec = order[k];
-    const next = order[k+1] ? order[k+1].lineIdx : lines.length;
-    // Skater table within [sec.lineIdx, next)
-    const sk = parseSkaterTable(sec.lineIdx);
-    if (!sk) { teamData[sec.abbr] = {players:[], goalies:[]}; continue; }
-    const gl = parseGoalieTable(sk.endLine);
-    teamData[sec.abbr] = {players: sk.players, goalies: gl.goalies, _skaterEnd: sk.endLine, _goalieEnd: gl.endLine};
-  }
-
-  // Advanced section markers: "Pittsburgh Penguins Advanced" appears as a section header.
-  // Find these explicitly since they don't appear in NAME_TO_ABBR.
-  const advancedSections = []; // [{abbr, lineIdx}]
-  for (let i=0; i<lines.length; i++) {
-    const L = lines[i].trim();
-    for (const [name, abbr] of Object.entries(NAME_TO_ABBR)) {
-      if (L === name + " Advanced") {
-        advancedSections.push({abbr, lineIdx:i});
-        break;
-      }
-    }
-  }
-
-  // ── 6. ADVANCED TABLES (HIT/BLK) ────────────────────────────────────────────
-  for (const sec of advancedSections) {
-    const adv = parseAdvancedTable(sec.lineIdx);
-    if (adv.map.size === 0) continue;
-    for (const p of (teamData[sec.abbr]?.players || [])) {
-      const stats = adv.map.get(p.name);
-      if (stats) { p.hit = stats.hit; p.blk = stats.blk; }
-    }
-  }
-
-  return {
-    awayAbbr: awayHit.abbr, homeAbbr: homeHit.abbr,
-    awayName: awayHit.name, homeName: homeHit.name,
-    awayScore, homeScore,
-    ot, so, dateISO,
-    awayPlayers: teamData[awayHit.abbr]?.players || [],
-    homePlayers: teamData[homeHit.abbr]?.players || [],
-    awayGoalies: teamData[awayHit.abbr]?.goalies || [],
-    homeGoalies: teamData[homeHit.abbr]?.goalies || [],
-  };
-}
-
-
-// ─── SERIES MATH ──────────────────────────────────────────────────────────────
-function computeOutcomes(games) {
-  const agg = {};
-  function rec(gi, hw, aw, prob) {
-    if (hw === 4 || aw === 4 || gi >= 7) { const k=`${hw}-${aw}`; agg[k]=(agg[k]||0)+prob; return; }
-    const g = games[gi];
-    if (g.result === "home") rec(gi+1, hw+1, aw, prob);
-    else if (g.result === "away") rec(gi+1, hw, aw+1, prob);
-    else { rec(gi+1, hw+1, aw, prob*g.winPct); rec(gi+1, hw, aw+1, prob*(1-g.winPct)); }
-  }
-  rec(0, 0, 0, 1); return agg;
-}
-function computeWinOrders(games) {
-  const seqs = {};
-  function rec(gi, hw, aw, prob, seq) {
-    if (hw===4||aw===4) { seqs[seq]=(seqs[seq]||0)+prob; return; }
-    if (gi>=7) return;
-    const g = games[gi];
-    if (g.result==="home") rec(gi+1,hw+1,aw,prob,seq+"H");
-    else if (g.result==="away") rec(gi+1,hw,aw+1,prob,seq+"A");
-    else { rec(gi+1,hw+1,aw,prob*g.winPct,seq+"H"); rec(gi+1,hw,aw+1,prob*(1-g.winPct),seq+"A"); }
-  }
-  rec(0,0,0,1,""); return seqs;
-}
-// v22: P(game goes to OT) = P(regulation ends tied), derived from expTotal and winPct.
-// Pure Poisson underpredicts OT rate vs historical (real NHL playoff OT ~22%; naive model ~17%).
-// Empirical calibration factor of 1.28 brings the model in line with historical averages —
-// accounts for non-Poisson tie-clustering (teams play for the tie late in close games).
-// Cap at 0.40.
-function pOTGame(expTotal, winPct) {
-  const regFactor = 0.985;
-  const lh = expTotal*winPct*regFactor, la = expTotal*(1-winPct)*regFactor;
-  let pTied = 0; for (let k=0; k<=15; k++) pTied += poissonPMF(k,lh)*poissonPMF(k,la);
-  const calibrated = pTied * 1.28;
-  return Math.min(calibrated, 0.40);
-}
-
-// v21: Series total goals — returns FULL PMF, not just a mean lambda.
-// For each series path (enumerated by win probabilities), compute the Poisson
-// convolution of per-game goal distributions (actual score for played games,
-// Poisson(expTotal) for unplayed), then mix paths by their probability.
-function computeSeriesGoalsPMF(effG, maxK=80) {
-  // Cache per-game PMFs so we don't rebuild them every path
-  const gamePMFs = effG.map(g => {
-    if (g.result && g.homeScore!=null && g.awayScore!=null) {
-      // Played game with known score: a degenerate PMF at that exact total
-      const total = Number(g.homeScore) + Number(g.awayScore);
-      const arr = new Array(maxK+1).fill(0);
-      arr[Math.min(total, maxK)] = 1;
-      return arr;
-    }
-    return poissonPMFArray(g.expTotal || 5.5, maxK);
-  });
-  let acc = new Array(maxK+1).fill(0);
-  function rec(gi, hw, aw, prob, pathPMF) {
-    if (hw===4 || aw===4 || gi>=7) {
-      // Mix this path into accumulator
-      for (let k=0; k<=maxK; k++) acc[k] += pathPMF[k] * prob;
-      return;
-    }
-    const g = effG[gi];
-    const gp = gamePMFs[gi];
-    const nextPMF = convolve(pathPMF, gp, maxK);
-    if (g.result==="home") rec(gi+1, hw+1, aw, prob, nextPMF);
-    else if (g.result==="away") rec(gi+1, hw, aw+1, prob, nextPMF);
-    else {
-      rec(gi+1, hw+1, aw, prob*g.winPct, nextPMF);
-      rec(gi+1, hw, aw+1, prob*(1-g.winPct), nextPMF);
-    }
-  }
-  // Start with degenerate PMF at 0
-  const start = new Array(maxK+1).fill(0); start[0] = 1;
-  rec(0,0,0,1,start);
-  return acc;
-}
-
-// Legacy wrapper that just returns a mean — retained for places that only need lambda (OT series, etc.)
-function computeSeriesGoalsLambda(effG) {
-  const pmf = computeSeriesGoalsPMF(effG, 80);
-  let m = 0; for (let k=0; k<pmf.length; k++) m += k*pmf[k];
-  return Math.max(0.01, m);
-}
-
-// v21: Shutouts — full PMF, tied to each game's expTotal.
-// P(home shutout in game g) = P(homeScore=0) = exp(-expTotal × winPct) under Poisson.
-// P(away shutout) = exp(-expTotal × (1-winPct)). These are disjoint (both teams scoring 0 = scoreless tie, impossible in playoff since they go to OT).
-// Per-game shutout PMF: {0: 1-pH-pA, 1: pH+pA}. For played games: count actual shutouts.
-// Series shutout count PMF = convolution of game PMFs, mixed over paths.
-// User's shutoutRate input is now a residual "shutout multiplier" factor applied on top of the model.
-function computeShutoutPMF(effG, shutoutRateMultiplier=1.0, maxK=8) {
-  const gamePMFs = effG.map(g => {
-    if (g.result && g.homeScore!=null && g.awayScore!=null) {
-      const n = (Number(g.homeScore)===0 ? 1 : 0) + (Number(g.awayScore)===0 ? 1 : 0);
-      const arr = new Array(maxK+1).fill(0);
-      arr[Math.min(n, maxK)] = 1;
-      return arr;
-    }
-    const total = g.expTotal || 5.5;
-    const lamH = total * g.winPct;
-    const lamA = total * (1 - g.winPct);
-    // v49: P(shutout in game) = P(H=0 ∨ A=0) — inclusion-exclusion.
-    // In playoffs both-zero is impossible (OT forced), but the formula is correct as is.
-    const pH = Math.exp(-lamH);       // P(home scores 0)
-    const pA = Math.exp(-lamA);       // P(away scores 0)
-    const pBothZero = pH * pA;        // joint under independence (tiny in playoff range)
-    let pOneShutout = (pH + pA - pBothZero) * shutoutRateMultiplier;
-    pOneShutout = Math.max(0, Math.min(1, pOneShutout));
-    const arr = new Array(maxK+1).fill(0);
-    arr[0] = 1 - pOneShutout;
-    arr[1] = pOneShutout;
-    return arr;
-  });
-  let acc = new Array(maxK+1).fill(0);
-  function rec(gi, hw, aw, prob, pathPMF) {
-    if (hw===4 || aw===4 || gi>=7) {
-      for (let k=0; k<=maxK; k++) acc[k] += pathPMF[k] * prob;
-      return;
-    }
-    const g = effG[gi];
-    const gp = gamePMFs[gi];
-    const nextPMF = convolve(pathPMF, gp, maxK);
-    if (g.result==="home") rec(gi+1, hw+1, aw, prob, nextPMF);
-    else if (g.result==="away") rec(gi+1, hw, aw+1, prob, nextPMF);
-    else {
-      rec(gi+1, hw+1, aw, prob*g.winPct, nextPMF);
-      rec(gi+1, hw, aw+1, prob*(1-g.winPct), nextPMF);
-    }
-  }
-  const start = new Array(maxK+1).fill(0); start[0] = 1;
-  rec(0,0,0,1,start);
-  return acc;
-}
-// Legacy: return mean lambda (kept for any consumers that just want the expected count)
-function computeShutoutLambda(shutoutRate, expG, effG) {
-  // Treat user's shutoutRate input relative to historical baseline 0.08.
-  const multiplier = (shutoutRate || 0.08) / 0.08;
-  const pmf = computeShutoutPMF(effG || [], multiplier, 8);
-  let m = 0; for (let k=0; k<pmf.length; k++) m += k*pmf[k];
-  return Math.max(0.0001, m);
-}
-
-// OT games in series: enumerate paths, P(k OT games) using Poisson per game
-function computeOTSeriesDist(effG, outcomes, kMax=8) {
-  // Use Poisson with lambda = sum over paths of (sum of pOT[g]) * P(path)
-  let lambda = 0;
-  function rec(gi, hw, aw, prob, otAcc) {
-    if (hw===4||aw===4) { lambda += prob * otAcc; return; }
-    if (gi>=7) return;
-    const g = effG[gi];
-    const pot = g.pOT ?? 0.22;
-    if (g.result==="home") rec(gi+1, hw+1, aw, prob, otAcc+pot);
-    else if (g.result==="away") rec(gi+1, hw, aw+1, prob, otAcc+pot);
-    else { rec(gi+1, hw+1, aw, prob*g.winPct, otAcc+pot); rec(gi+1, hw, aw+1, prob*(1-g.winPct), otAcc+pot); }
-  }
-  rec(0,0,0,1,0);
-  return { lambda: Math.max(0.0001, lambda) };
-}
-
-// Spread: home wins - away wins differential.
-// Convention (half-lines only): "Home -N.5" means home wins series by at least N+1 games (diff >= N+1).
-//                                "Home +N.5" means home either wins or loses by at most N games (diff > -N-1, i.e. diff >= -N).
-// v49: drop 0.5 lines (equivalent to series winner market); keep 1.5, 2.5, 3.5 both sides.
-function computeSpread(outcomes, homeAbbr, awayAbbr) {
-  const rows = [];
-  // Home-favoured lines: home -1.5 / -2.5 / -3.5. Home covers iff (hw-aw) > |line| (strictly greater, so -1.5 requires diff >= 2).
-  for (const line of [-3.5, -2.5, -1.5]) {
-    const absL = Math.abs(line);
-    let pHome = 0, pAway = 0;
-    for (const [k, prob] of Object.entries(outcomes)) {
-      const [hw, aw] = k.split("-").map(Number);
-      if ((hw - aw) > absL) pHome += prob; else pAway += prob;
-    }
-    rows.push({
-      homeLabel: `${homeAbbr||"H"} ${line}`,
-      awayLabel: `${awayAbbr||"A"} +${absL}`,
-      pHome, pAway, line
-    });
-  }
-  // Away-favoured lines: away -1.5 / -2.5 / -3.5. Away covers iff (aw-hw) > |line|.
-  for (const line of [-1.5, -2.5, -3.5]) {
-    const absL = Math.abs(line);
-    let pHome = 0, pAway = 0;
-    for (const [k, prob] of Object.entries(outcomes)) {
-      const [hw, aw] = k.split("-").map(Number);
-      if ((aw - hw) > absL) pAway += prob; else pHome += prob;
-    }
-    rows.push({
-      homeLabel: `${homeAbbr||"H"} +${absL}`,
-      awayLabel: `${awayAbbr||"A"} ${line}`,
-      pHome, pAway, line: null, awayLine: line
-    });
-  }
-  return rows;
-}
-
-// Parlay: NEXT UNPLAYED game winner × series winner (4 combos — both sides of the game × both series outcomes)
-// Uses independence approximation between single-game result and series outcome (small correlation error in practice).
-// v49: finds next unplayed game rather than always G1. If all games played, returns empty.
-function computeParlays(effG, outcomes) {
-  // Find first game without a result
-  let nextIdx = -1;
-  for (let i = 0; i < effG.length; i++) {
-    if (!effG[i].result) { nextIdx = i; break; }
-  }
-  if (nextIdx < 0) return { gameNum: null, rows: [] };
-
-  const gwp = effG[nextIdx].winPct;
-  const gHome = gwp, gAway = 1 - gwp;
-  const seriesH = ["4-0","4-1","4-2","4-3"].reduce((s,k)=>s+(outcomes[k]||0),0);
-  const seriesA = 1 - seriesH;
-
-  return {
-    gameNum: nextIdx + 1,
-    rows: [
-      { label:`Home wins G${nextIdx+1} & wins series`,  tp: gHome * seriesH },
-      { label:`Home loses G${nextIdx+1} & wins series`, tp: gAway * seriesH },
-      { label:`Away wins G${nextIdx+1} & wins series`,  tp: gAway * seriesA },
-      { label:`Away loses G${nextIdx+1} & wins series`, tp: gHome * seriesA },
-    ]
-  };
-}
-
-// Team most goals: winner gets (0.5 + shift/2) share of total goals
-// P(home most goals) ≈ P(home wins series) * (0.5+shift) + P(away wins) * (0.5-shift) — approx
-function computeTeamMostGoals(hwp, awp, shift=0.15) {
-  const winnerShare = 0.5 + shift / 2;
-  const loserShare = 1 - winnerShare;
-  const pHomeMost = hwp * winnerShare + awp * loserShare;
-  const pAwayMost = awp * winnerShare + hwp * loserShare;
-  const pTied = 1 - pHomeMost - pAwayMost;
-  return { pHomeMost, pAwayMost, pTied: Math.max(0, pTied) };
-}
-
-// v21: Per-team goals — full PMF. Per-game team lambda = expTotal × (winPct or 1-winPct);
-// for played games with scores entered we use the actual team goal as a degenerate PMF.
-// NOTE: side="home"/"away" refers to SERIES-HOME/AWAY TEAM, not game host.
-function computeTeamGoalsPMF(effG, side, maxK=50) {
-  const gamePMFs = effG.map(g => {
-    const total = g.expTotal || 5.5;
-    const hasActual = g.result && g.homeScore!=null && g.awayScore!=null;
-    if (hasActual) {
-      const val = side==="home" ? Number(g.homeScore) : Number(g.awayScore);
-      const arr = new Array(maxK+1).fill(0);
-      arr[Math.min(val, maxK)] = 1;
-      return arr;
-    }
-    const lam = side==="home" ? total * g.winPct : total * (1 - g.winPct);
-    return poissonPMFArray(Math.max(0.01, lam), maxK);
-  });
-  let acc = new Array(maxK+1).fill(0);
-  function rec(gi, hw, aw, prob, pathPMF) {
-    if (hw===4 || aw===4 || gi>=7) {
-      for (let k=0; k<=maxK; k++) acc[k] += pathPMF[k] * prob;
-      return;
-    }
-    const g = effG[gi];
-    const gp = gamePMFs[gi];
-    const nextPMF = convolve(pathPMF, gp, maxK);
-    if (g.result==="home") rec(gi+1, hw+1, aw, prob, nextPMF);
-    else if (g.result==="away") rec(gi+1, hw, aw+1, prob, nextPMF);
-    else {
-      rec(gi+1, hw+1, aw, prob*g.winPct, nextPMF);
-      rec(gi+1, hw, aw+1, prob*(1-g.winPct), nextPMF);
-    }
-  }
-  const start = new Array(maxK+1).fill(0); start[0] = 1;
-  rec(0,0,0,1,start);
-  return acc;
-}
-// Legacy wrapper
-function computeTeamGoalsLambda(effG, side) {
-  const pmf = computeTeamGoalsPMF(effG, side, 50);
-  let m = 0; for (let k=0; k<pmf.length; k++) m += k*pmf[k];
-  return Math.max(0.01, m);
-}
-
-// O/U table from Poisson CDF
-function ouTable(lambda, lines, dispersion=1) {
-  return lines.map(line => {
-    const lineInt = Math.ceil(line - 0.001);
-    const pOver = 1 - nbCDF(lineInt-1, lambda, dispersion);
-    return { line, pOver, pUnder: 1-pOver };
-  });
-}
-
-// ─── DEFAULTS ─────────────────────────────────────────────────────────────────
-function defaultSeries(id) {
-  return { id, homeTeam:"", awayTeam:"", homeAbbr:"", awayAbbr:"",
-    shutoutRate:0.08, winnerGoalShift:0.15,
-    games: Array.from({length:7},(_,i)=>({gameNum:i+1,winPct:i===0?0.55:null,expTotal:i===0?5.5:null,pOT:i===0?0.22:null,result:null,homeGoalie:null,awayGoalie:null})) };
-}
-function defaultMatchup(id) {
-  return { id, homeTeam:"", awayTeam:"", homeAbbr:"", awayAbbr:"",
-    homeWinPct:0.55, expTotal:5.5, homeWins:0, awayWins:0, expGames:5.82 };
-}
-// v38: round-aware data structure. Each round holds its own series/matchup arrays.
-//   r1: 8 series, r2: 4 series, r3: 2 series, f: 1 series.
-// The `bracket` defines how R1 winners pair into R2 (and so on). Default = sequential pairs.
-const ROUND_IDS = ["r1", "r2", "r3", "f"];
-const ROUND_LABELS = { r1: "R1", r2: "R2", r3: "R3", f: "Final" };
-const ROUND_SERIES_COUNT = { r1: 8, r2: 4, r3: 2, f: 1 };
-const DEFAULT_BRACKET = {
-  // r2pairs[i] = [r1SeriesIdxA, r1SeriesIdxB] — winners of those two series face off in r2 series i
-  r2pairs: [[0, 1], [2, 3], [4, 5], [6, 7]],
-  r3pairs: [[0, 1], [2, 3]],   // r2 winners → r3 series
-  fpair:   [0, 1],             // r3 winners → final
-};
-function defaultRoundedSeries() {
-  const out = {};
-  for (const r of ROUND_IDS) out[r] = Array.from({length: ROUND_SERIES_COUNT[r]}, (_, i) => defaultSeries(i));
-  return out;
-}
-function defaultRoundedMatchups() {
-  const out = {};
-  for (const r of ROUND_IDS) out[r] = Array.from({length: ROUND_SERIES_COUNT[r]}, (_, i) => defaultMatchup(i));
-  return out;
-}
-// v38: migration — old localStorage stored a flat 8-series array under "nhl_s". If we encounter that
-// shape, wrap it as r1, fresh defaults for r2/r3/f. Detected by Array.isArray.
-function migrateSeries(loaded) {
-  if (!loaded) return defaultRoundedSeries();
-  if (Array.isArray(loaded)) {
-    const fresh = defaultRoundedSeries();
-    fresh.r1 = loaded.length === 8 ? loaded : fresh.r1;
-    return fresh;
-  }
-  // Already round-keyed — fill any missing rounds with defaults
-  const out = {};
-  for (const r of ROUND_IDS) out[r] = (loaded[r] && Array.isArray(loaded[r])) ? loaded[r] : Array.from({length: ROUND_SERIES_COUNT[r]}, (_, i) => defaultSeries(i));
-  return out;
-}
-function migrateMatchups(loaded) {
-  if (!loaded) return defaultRoundedMatchups();
-  if (Array.isArray(loaded)) {
-    const fresh = defaultRoundedMatchups();
-    fresh.r1 = loaded.length === 8 ? loaded : fresh.r1;
-    return fresh;
-  }
-  const out = {};
-  for (const r of ROUND_IDS) out[r] = (loaded[r] && Array.isArray(loaded[r])) ? loaded[r] : Array.from({length: ROUND_SERIES_COUNT[r]}, (_, i) => defaultMatchup(i));
-  return out;
-}
-const DEFAULT_MARGINS = {
-  eightWay:1.12, winner:1.04, length:1.08, spread:1.04,
-  totalGoals:1.05, winOrder:1.15, shutouts:1.05, correctScore:1.12,
-  parlay:1.08, ouGames:1.05, otGames:1.08, otExact:1.08, otScorer:1.20,
-  teamMostGoals:1.05, teamGoals:1.05,
-  propsGoals:1.08, propsAssists:1.05, propsPoints:1.05, propsSOG:1.05,
-  propsHits:1.05, propsBlocks:1.05, propsTakeaways:1.05,
-  propsGiveaways:1.05,
-  seriesLeader:1.5, leaderR1:1.5, leaderFull:1.5,
-};
-const DEFAULT_GLOBALS = { overroundR1:1.15, overroundFull:1.15, powerFactor:1.20, rateDiscount:0.95, dispersion:1.2, seriesLeaderPF:1.15 };
-
-// ─── PARSER ───────────────────────────────────────────────────────────────────
-
-// v29: HR season-long skaters CSV parser. Handles the Hockey Reference player stats CSV
-// (https://www.hockey-reference.com/leagues/NHL_2026_skaters.html → Get table as CSV).
-// Key edge cases:
-// - Header row may be preceded by comment lines starting with "---" or blank lines
-// - Players traded mid-season have an aggregate row (Team="2TM"/"3TM") followed by per-team rows;
-//   all share the same Rk number. We DROP the aggregate and KEEP the LAST team row per Rk
-//   (HR lists teams chronologically, so last = current team).
-// - VGK in HR maps to our internal VEG abbr.
-// - TOI is "MM:SS" or "HHHH:SS" → parsed to seconds.
-function parseHRSkaters(text) {
-  const lines = text.split(/\r?\n/).filter(l => l.trim() && !l.startsWith("---"));
-  let hi = -1, headers = [];
-  for (let i = 0; i < lines.length; i++) {
-    const c = lines[i].split(",");
-    if (c.includes("Player") && c.includes("Team") && c.includes("GP")) {
-      hi = i; headers = c; break;
-    }
-  }
-  if (hi === -1) return {error: "Could not find header row. Expected columns: Rk, Player, Team, GP, ..."};
-
-  const col = (name) => headers.indexOf(name);
-  const cm = {
-    rk: col("Rk"), name: col("Player"), pos: col("Pos"), team: col("Team"),
-    gp: col("GP"), g: col("G"), a: col("A"), pim: col("PIM"),
-    sog: col("SOG"), blk: col("BLK"), hit: col("HIT"),
-    take: col("TAKE"), give: col("GIVE"), toi: col("TOI"), atoi: col("ATOI"),
-  };
-  if (cm.name < 0 || cm.team < 0 || cm.gp < 0) {
-    return {error: "Required columns missing (Player, Team, GP)"};
-  }
-
-  const PLAYOFF_TEAMS_SET = new Set(["ANA","BOS","BUF","CAR","COL","DAL","EDM","LAK","MIN","MTL","OTT","PHI","PIT","TBL","UTA","VEG","VGK"]);
-
-  // Group rows by Rk; for trades (multiple rows per Rk), keep the LAST non-aggregate row.
-  const byRk = new Map();
-  for (let i = hi+1; i < lines.length; i++) {
-    const cells = lines[i].split(",");
-    if (cells.length < 5) continue;
-    const rk = cells[cm.rk]; const team = (cells[cm.team]||"").trim(); const name = (cells[cm.name]||"").trim();
-    if (!rk || !name) continue;
-    if (!byRk.has(rk)) byRk.set(rk, []);
-    byRk.get(rk).push({cells, team, name});
-  }
-
-  const parseToi = s => {
-    if (!s) return 0;
-    const m = String(s).match(/(\d+):(\d+)/);
-    return m ? parseInt(m[1])*60 + parseInt(m[2]) : 0;
-  };
-
-  const players = [];
-  for (const [, rows] of byRk) {
-    const teamRows = rows.length > 1 ? rows.filter(r => !/^\d+TM$/.test(r.team)) : rows;
-    if (!teamRows.length) continue;
-    const chosen = teamRows[teamRows.length - 1]; // last team = current
-    const c = chosen.cells;
-    let team = (c[cm.team]||"").trim();
-    if (team === "VGK") team = "VEG";
-    if (!PLAYOFF_TEAMS_SET.has(team)) continue; // skip non-playoff teams (CGY, NYR, etc.)
-    const gp = parseInt(c[cm.gp]) || 1;
-    const pos = ((cm.pos>=0 ? c[cm.pos] : "F")||"F").trim();
-    // HR uses F/D/G/C/RW/LW; we collapse forwards to F for our position model
-    const posSimple = pos === "G" ? "G" : pos === "D" ? "D" : "F";
-    const g   = parseInt(c[cm.g]) || 0;
-    const a   = parseInt(c[cm.a]) || 0;
-    const sog = parseInt(c[cm.sog]) || 0;
-    const blk = cm.blk>=0 ? (parseInt(c[cm.blk])||0) : 0;
-    const hit = cm.hit>=0 ? (parseInt(c[cm.hit])||0) : 0;
-    const tk  = cm.take>=0 ? (parseInt(c[cm.take])||0) : 0;
-    const give= cm.give>=0 ? (parseInt(c[cm.give])||0) : 0;
-    const pim = cm.pim>=0 ? (parseInt(c[cm.pim])||0) : 0;
-    const toi = cm.toi>=0 ? parseToi(c[cm.toi]) : 0;
-    const defRole = posSimple === "D" ? "D2" : posSimple === "G" ? "BACKUP" : "MID6";
-    players.push({
-      name: chosen.name, team, pos: posSimple,
-      gp, g, a, pts: g+a, sog, hit, blk, tk, pim, give,
-      tsa: 0, // not in HR CSV; left at 0
-      onIceF: 0, onIceA: 0, // not in HR CSV; xG-based features won't work for HR-only players
-      toi,
-      g_pg:   gp>0 ? +(g/gp).toFixed(4)   : 0,
-      a_pg:   gp>0 ? +(a/gp).toFixed(4)   : 0,
-      pts_pg: gp>0 ? +((g+a)/gp).toFixed(4): 0,
-      sog_pg: gp>0 ? +(sog/gp).toFixed(4) : 0,
-      hit_pg: gp>0 ? +(hit/gp).toFixed(4) : 0,
-      blk_pg: gp>0 ? +(blk/gp).toFixed(4) : 0,
-      take_pg:gp>0 ? +(tk/gp).toFixed(4)  : 0,
-      pim_pg: gp>0 ? +(pim/gp).toFixed(4) : 0,
-      tsa_pg: 0, give_pg: gp>0 ? +(give/gp).toFixed(4) : 0,
-      lineRole: defRole,
-      pGP:0, pG:0, pA:0, pSOG:0, pHIT:0, pBLK:0, pTK:0, pPIM:0, pTSA:0, pGIVE:0,
-      _hrSource: true,
-    });
-  }
-  return {players};
-}
-
-function parseHR(text) {
-  const lines = text.trim().split("\n");
-  let hi = -1, headers = [];
-  for (let i=0; i<lines.length; i++) {
-    const c = lines[i].split("\t").map(s=>s.trim());
-    if (c.some(h=>["Player","Skater","Name"].includes(h))) { hi=i; headers=c; break; }
-  }
-  if (hi===-1) return {error:"No header found — need Player column"};
-  const al = { Player:["Player","Skater","Name"], Team:["Team","Tm"], GP:["GP","GamesPlayed"],
-    G:["G","Goals"], A:["A","Assists"], SOG:["SOG","S","Shots"],
-    HIT:["HIT","H","Hits"], BLK:["BLK","B","Blocked","BS"],
-    TK:["TK","Takeaways","Take","TAKE"], PIM:["PIM","PenMin"],
-    GV:["GV","Give","Giveaways","GIVE"] };
-  const cm = {};
-  for (const [k,alts] of Object.entries(al)) {
-    for (const a of alts) { const idx=headers.findIndex(h=>h.toLowerCase()===a.toLowerCase()); if(idx!==-1){cm[k]=idx;break;} }
-  }
-  if (cm.Player===undefined) return {error:"Could not find Player column"};
-  const players = [];
-  for (let i=hi+1; i<lines.length; i++) {
-    const c = lines[i].split("\t").map(s=>s.trim());
-    if (!c[cm.Player]||["Player","Rk"].includes(c[cm.Player])) continue;
-    const g=cm.G!==undefined?parseInt(c[cm.G])||0:0, a=cm.A!==undefined?parseInt(c[cm.A])||0:0;
-    players.push({ name:c[cm.Player], team:cm.Team!==undefined?(c[cm.Team]||"").toUpperCase():"",
-      gp:cm.GP!==undefined?parseInt(c[cm.GP])||0:1, g, a, pts:g+a,
-      sog:cm.SOG!==undefined?parseInt(c[cm.SOG])||0:0, hit:cm.HIT!==undefined?parseInt(c[cm.HIT])||0:0,
-      blk:cm.BLK!==undefined?parseInt(c[cm.BLK])||0:0,
-      tk:cm.TK!==undefined?parseInt(c[cm.TK])||0:0,
-      pim:cm.PIM!==undefined?parseInt(c[cm.PIM])||0:0,
-      give:cm.GV!==undefined?parseInt(c[cm.GV])||0:0 });
-  }
-  return {players};
-}
-
-// ─── UI PRIMITIVES ────────────────────────────────────────────────────────────
-function Toggle({label,checked,onChange}) {
-  return (
-    <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12,userSelect:"none"}}>
-      <span style={{width:30,height:17,borderRadius:9,background:checked?"#3b82f6":"var(--color-border-primary)",
-        position:"relative",display:"inline-block",transition:"background 0.15s",flexShrink:0}}>
-        <span style={{position:"absolute",top:2,left:checked?15:2,width:13,height:13,borderRadius:"50%",
-          background:"white",transition:"left 0.15s",boxShadow:"0 1px 2px rgba(0,0,0,0.3)"}}/>
-      </span>
-      <span style={{color:"var(--color-text-secondary)"}}>{label}</span>
-      <input type="checkbox" checked={checked} onChange={e=>onChange(e.target.checked)} style={{display:"none"}}/>
-    </label>
-  );
-}
-function NI({value,onChange,min,max,step=0.01,style={}}) {
-  return <input type="number" value={value??""} onChange={e=>onChange(parseFloat(e.target.value)||0)}
-    min={min} max={max} step={step} style={{width:68,padding:"3px 6px",fontSize:12,fontFamily:"var(--font-mono)",
-      background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
-      borderRadius:"var(--border-radius-md)",color:"var(--color-text-primary)",...style}}/>;
-}
-function Card({children,style={}}) {
-  return <div style={{background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",
-    borderRadius:"var(--border-radius-lg)",padding:"1rem 1.25rem",...style}}>{children}</div>;
-}
-function SH({title,sub}) {
-  return <div style={{marginBottom:12}}>
-    <h2 style={{margin:0,fontSize:10,fontWeight:500,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--color-text-secondary)"}}>{title}</h2>
-    {sub&&<p style={{margin:"2px 0 0",fontSize:10,color:"var(--color-text-tertiary)"}}>{sub}</p>}
-  </div>;
-}
-function TH({cols}) {
-  return <thead><tr style={{borderBottom:"0.5px solid var(--color-border-secondary)"}}>
-    {cols.map((c,i)=><th key={i} style={{padding:"5px 8px",textAlign:i===0?"left":"right",
-      color:"var(--color-text-secondary)",fontWeight:500,fontSize:10,textTransform:"uppercase"}}>{c}</th>)}
-  </tr></thead>;
-}
-function OR({label,tp,ap,showTrue}) {
-  const zero = ap!=null && ap < 0.0001;
-  return <tr style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:zero?0.4:1}}>
-    <td style={{padding:"5px 8px"}}>{label}</td>
-    {showTrue&&<td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{tp!=null?(tp*100).toFixed(1)+"%":"—"}</td>}
-    <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11}}>{ap!=null?(ap*100).toFixed(1)+"%":"—"}</td>
-    <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:12,fontWeight:500,color:ap&&ap>=0.5?"#4ade80":"var(--color-text-primary)"}}>{zero?"—":ap!=null?fmt(ap):"—"}</td>
-    <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{zero?"—":ap!=null?toDec(ap).toFixed(2):"—"}</td>
-  </tr>;
-}
-function Seg({options,value,onChange,accent="#3b82f6"}) {
-  return <div style={{display:"flex",borderRadius:"var(--border-radius-md)",overflow:"hidden",border:"0.5px solid var(--color-border-secondary)"}}>
-    {options.map(o=><button key={o.id} onClick={()=>onChange(o.id)} style={{
-      padding:"5px 11px",fontSize:11,border:"none",borderRight:"0.5px solid var(--color-border-tertiary)",cursor:"pointer",
-      background:value===o.id?accent:"var(--color-background-secondary)",
-      color:value===o.id?"white":"var(--color-text-secondary)",whiteSpace:"nowrap"}}>{o.label}</button>)}
-  </div>;
-}
-const SEL = {padding:"4px 8px",fontSize:11,background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",color:"var(--color-text-primary)"};
-function roleColor(r) {
-  return {
-    TOP6:"#10b981", MID6:"#64748b", BOT6:"#f59e0b", ACTIVE:"#0ea5e9", SCRATCHED:"#ef4444",
-    D1:"#3b82f6", D2:"#60a5fa", D3:"#93c5fd",
-    STARTER:"#a78bfa", BACKUP:"#7c3aed",
-  }[r]||"#64748b";
-}
-// v13: All role multipliers temporarily set to 1.0 while bugs are shaken out.
-// SCRATCHED still forces 0 (player is removed from pool everywhere anyway).
-// STARTER/BACKUP stay 0 because goalies are excluded from skater markets by design.
-// Re-attach differential weights (TOP6 1.2, BOT6 0.75, etc.) after validating upload pipeline.
-// v53: Stat-aware role multiplier. Captures playoff-specific TOI compression:
-//      - Coaches shorten the bench → TOP6/D1 get MORE TOI in playoffs, BOT6/D3 get LESS.
-//      - Scoring stats (G/A/Pts/SOG) scale with TOI, so TOP6 forwards see a small bump.
-//      - Hits/Blocks ALSO scale with TOI but with opposite role bias — BOT6 grinders
-//        get proportionally more hits per game when they do play (physical role).
-//      - TK/GV are more skill-driven; roughly stable across roles.
-// Multipliers are modest (~5-15%) to avoid double-counting with per-player regular-season rates.
-function roleMultiplier(r, stat) {
-  if (!r) return 1.0;
-  const scoringStats = stat === "g" || stat === "a" || stat === "pts" || stat === "sog";
-  const physicalStats = stat === "hit" || stat === "blk";
-  // Base presence multipliers (0 = out of the lineup)
-  const BASE = {TOP6:1, MID6:1, BOT6:1, ACTIVE:1, SCRATCHED:0, D1:1, D2:1, D3:1, STARTER:0, BACKUP:0};
-  if (BASE[r] === 0) return 0;
-  // No stat context → return base 1.0 (backward compatible for callers that don't pass stat)
-  if (stat == null) return 1.0;
-  // Playoff TOI compression multipliers
-  if (scoringStats) {
-    return {TOP6:1.08, MID6:1.00, BOT6:0.90, ACTIVE:0.92, D1:1.03, D2:1.00, D3:0.85}[r] ?? 1.0;
-  }
-  if (physicalStats) {
-    // TOP6 sees fewer hits per game in playoffs; BOT6 role guys get more
-    return {TOP6:0.95, MID6:1.00, BOT6:1.10, ACTIVE:1.00, D1:1.00, D2:1.05, D3:1.08}[r] ?? 1.0;
-  }
-  // TK/GV and other stats — near-neutral
-  return 1.0;
-}
-function RoleBadge({role}) { const c=roleColor(role||"MID6"); return <span style={{fontSize:9,padding:"1px 5px",borderRadius:3,background:`${c}20`,color:c,fontWeight:500}}>{role||"—"}</span>; }
-function rolesForPos(pos) {
-  if(!pos) return ["TOP6","MID6","BOT6","ACTIVE","SCRATCHED"];
-  const p=pos.toUpperCase();
-  if(p==="G") return ["STARTER","BACKUP","SCRATCHED"];
-  if(p==="D") return ["D1","D2","D3","ACTIVE","SCRATCHED"];
-  return ["TOP6","MID6","BOT6","ACTIVE","SCRATCHED"];
-}
-function SyncBadge({status}) {
-  const m={idle:["#6b7280","Offline"],syncing:["#f59e0b","Syncing…"],ok:["#10b981","Synced"],err:["#ef4444","Sync Error"]};
-  const [color,label]= m[status]||m.idle;
-  return <span style={{fontSize:10,padding:"2px 8px",borderRadius:10,background:`${color}20`,color,fontWeight:500}}>{label}</span>;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// ROOT
-// ═══════════════════════════════════════════════════════════════════════════════
-
-// v25: error boundary so a render crash shows a visible error (not a blank page).
-class ErrorBoundary extends Component {
-  constructor(props) { super(props); this.state = { error: null, info: null }; }
-  static getDerivedStateFromError(error) { return { error }; }
-  componentDidCatch(error, info) { this.setState({ error, info }); console.error("ErrorBoundary caught:", error, info); }
-  render() {
-    if (this.state.error) {
-      return <div style={{padding:20,fontFamily:"monospace",color:"#ef4444",background:"#1a0a0a",minHeight:"100vh"}}>
-        <div style={{fontSize:16,fontWeight:600,marginBottom:10}}>⚠ Render error</div>
-        <div style={{fontSize:12,color:"#fca5a5",marginBottom:10}}>{String(this.state.error)}</div>
-        <pre style={{fontSize:11,color:"#f87171",background:"#000",padding:10,borderRadius:4,overflow:"auto",maxHeight:300}}>{this.state.error?.stack||""}</pre>
-        {this.state.info?.componentStack && <pre style={{fontSize:11,color:"#f87171",background:"#000",padding:10,borderRadius:4,overflow:"auto",maxHeight:300,marginTop:10}}>{this.state.info.componentStack}</pre>}
-        <div style={{marginTop:16,display:"flex",gap:8,flexWrap:"wrap"}}>
-          <button onClick={()=>this.setState({error:null,info:null})} style={{padding:"6px 12px",fontSize:12,background:"#3b82f6",color:"white",border:"none",borderRadius:4,cursor:"pointer"}}>Retry render</button>
-          <button onClick={()=>{try{localStorage.clear();location.reload();}catch(e){}}} style={{padding:"6px 12px",fontSize:12,background:"#ef4444",color:"white",border:"none",borderRadius:4,cursor:"pointer"}}>Clear all local data + reload</button>
+  const myPl=Object.values(pm).map(p=>{const avg=p.picks.reduce((a,b)=>a+b,0)/p.picks.length;const adp=matchADP(p.name,p.pos,p.team,avg,adpPl);const cur=adp?.latest??null;
+    return{...p,count:p.picks.length,exposure:(p.picks.length/tot)*100,avgPick:avg,avgRound:p.rounds.reduce((a,b)=>a+b,0)/p.rounds.length,currentADP:cur,value:cur!=null&&cur<240?avg-cur:null,adpData:adp};});
+  const allMap={};adpPl.forEach(a=>{if(draftedNames.has(a.name))allMap[a.name+'|'+a.pos]={name:a.name,pos:a.pos,team:a.team,picks:[],rounds:[],draftIds:[],count:0,exposure:0,avgPick:0,avgRound:0,currentADP:a.latest,value:null,adpData:a};});
+  draftedNames.forEach(n=>{const pick=drafts.flatMap(d=>[...d.picks,...(d.field||[]).flatMap(f=>f.picks)]).find(p=>p.name===n);if(pick){const k=n+'|'+pick.pos;if(!allMap[k])allMap[k]={name:n,pos:pick.pos,team:pick.team,picks:[],rounds:[],draftIds:[],count:0,exposure:0,avgPick:0,avgRound:0,currentADP:240,value:null,adpData:null};}});
+  myPl.forEach(p=>{allMap[p.name+'|'+p.pos]=p;});
+  const allPlayers=Object.values(allMap).sort((a,b)=>{if(b.exposure!==a.exposure)return b.exposure-a.exposure;return(a.currentADP||999)-(b.currentADP||999);});
+  const stkMap={};fd.forEach(d=>{const bt={};d.picks.forEach(p=>{if(p.team&&p.team!=='FA'){if(!bt[p.team])bt[p.team]=[];bt[p.team].push(p);}});
+    Object.entries(bt).forEach(([t,pls])=>{if(pls.length>=2){if(!stkMap[t])stkMap[t]={count:0,players:{},combos:{}};stkMap[t].count++;pls.forEach(p=>{stkMap[t].players[p.name]=(stkMap[t].players[p.name]||0)+1;});
+      const s=[...pls].sort((a,b)=>(({QB:0,RB:1,WR:2,TE:3})[a.pos]||9)-(({QB:0,RB:1,WR:2,TE:3})[b.pos]||9));stkMap[t].combos[s.map(p=>p.name).join(' + ')]=(stkMap[t].combos[s.map(p=>p.name).join(' + ')]||0)+1;}});});
+  const stacks=Object.entries(stkMap).map(([t,d])=>({team:t,count:d.count,pct:(d.count/tot)*100,topPl:Object.entries(d.players).sort((a,b)=>b[1]-a[1]).slice(0,6).map(([n,c])=>({name:n,count:c})),topCombos:Object.entries(d.combos).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([c,n])=>({combo:c,count:n}))})).sort((a,b)=>b.count-a.count);
+  const slotMap={};fd.forEach(d=>{slotMap[d.draftPosition]=(slotMap[d.draftPosition]||0)+1;});
+  const slots=Array.from({length:12},(_,i)=>({slot:i+1,count:slotMap[i+1]||0,pct:((slotMap[i+1]||0)/tot)*100}));
+  const bd={QB:{},RB:{},WR:{},TE:{}};const arch={};const myBuilds=[],fieldBuilds=[];
+  fd.forEach(d=>{const c={QB:0,RB:0,WR:0,TE:0};d.picks.forEach(p=>{if(c[p.pos]!=null)c[p.pos]++;});Object.entries(c).forEach(([pos,ct])=>{bd[pos][ct]=(bd[pos][ct]||0)+1;});
+    const tags=classifyBuild(d.picks);tags.forEach(t=>{arch[t]=(arch[t]||0)+1;});d._cls={counts:c,tags};myBuilds.push({name:d.name,seat:d.draftPosition,counts:{...c},tags:[...tags]});
+    if(d.field)d.field.forEach(f=>{const fc={QB:0,RB:0,WR:0,TE:0};f.picks.forEach(p=>{if(fc[p.pos]!=null)fc[p.pos]++;});fieldBuilds.push({counts:{...fc},tags:classifyBuild(f.picks)});});});
+  return{players:myPl,allPlayers,pairs,fieldPairs,stacks,slots,bd,archetypes:Object.entries(arch).sort((a,b)=>b[1]-a[1]),movers,total:tot,myBuilds,fieldBuilds,teamExp,fieldTeamExp,roundHeat,
+    first3:Object.entries(first3).sort((a,b)=>b[1]-a[1]),first4:Object.entries(first4).sort((a,b)=>b[1]-a[1]),fieldFirst3:Object.entries(fieldFirst3).sort((a,b)=>b[1]-a[1]),fieldFirst4:Object.entries(fieldFirst4).sort((a,b)=>b[1]-a[1])};
+}
+
+/* ═══ PLAYER MODAL ═══ */
+function PlayerModal({p,drafts,pairs,adpDates,onClose,onOpenDraft}){
+  const[pairQ,setPairQ]=useState('');const[showHistory,setShowHistory]=useState(false);
+  if(!p)return null;
+  const ins=[];drafts.forEach(d=>d.picks.forEach(x=>{if(x.name===p.name&&x.pos===p.pos)ins.push({dn:d.name,r:x.round,pk:x.pick,seat:d.draftPosition,date:d.date,draft:d});}));
+  const adpLine=p.adpData?.adp?adpDates.map((d,i)=>({date:d,adp:p.adpData.adp[i]<240?p.adpData.adp[i]:null})):[];
+  // Convert ADP dates to numeric positions for interpolation
+  const parseDateToNum=d=>{if(d.toLowerCase().includes('open'))return new Date('2026-02-01').getTime();const pts=d.split('/');if(pts.length===2)return new Date(`2026-${pts[0].padStart(2,'0')}-${pts[1].padStart(2,'0')}`).getTime();return 0;};
+  const adpPoints=adpDates.map((d,i)=>({x:parseDateToNum(d),date:d,adp:adpLine[i]?.adp||null})).filter(p=>p.adp!=null&&p.x>0);
+  // Each draft pick gets its own point at the exact draft date
+  const pickPoints=ins.map(inst=>{const dd=inst.date?new Date(inst.date).getTime():0;return{x:dd,pick:inst.pk,dn:inst.dn};}).filter(p=>p.x>0);
+  // Merge into one timeline — ADP points get adp value, pick points get pick value
+  const allPoints=[...adpPoints.map(p=>({x:p.x,date:p.date,adp:p.adp,pick:null})),...pickPoints.map(p=>({x:p.x,date:'',adp:null,pick:p.pick}))].sort((a,b)=>a.x-b.x);
+  // Build tick labels from ADP dates only
+  const ticks=adpPoints.map(p=>p.x);
+  const tickFormatter=v=>{const ap=adpPoints.find(p=>p.x===v);return ap?ap.date:'';};
+  const initADP=adpLine[0]?.adp;const curADP=adpLine[adpLine.length-1]?.adp;
+  const allPairs=Object.entries(pairs).filter(([k])=>k.includes(p.name)).map(([k,v])=>{const pr=k.split('~').find(n=>n!==p.name);const pp=drafts.flatMap(d=>d.picks).find(x=>x.name===pr);return{pr,ct:v,ps:pp?.pos,tm:pp?.team,same:pp?.team===p.team&&p.team!=='FA'};}).sort((a,b)=>b.ct-a.ct);
+  const sameTeam=allPairs.filter(x=>x.same);const filtered=pairQ?allPairs.filter(x=>x.pr.toLowerCase().includes(pairQ.toLowerCase())):allPairs.slice(0,16);
+  const shown=[...new Map([...sameTeam,...filtered].map(x=>[x.pr,x])).values()].sort((a,b)=>b.ct-a.ct).slice(0,20);
+  return(<div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.85)',zIndex:100,display:'flex',alignItems:'center',justifyContent:'center',padding:16}} onClick={onClose}>
+    <div onClick={e=>e.stopPropagation()} style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:16,padding:24,maxWidth:700,width:'100%',maxHeight:'92vh',overflow:'auto'}}>
+      <div style={{display:'flex',justifyContent:'space-between',marginBottom:16}}>
+        <div><h2 style={{fontFamily:FONT,fontSize:22,fontWeight:900,margin:'0 0 4px'}}>{p.name}</h2>
+          <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}><Pill pos={p.pos}/><span style={{fontSize:13,color:S.mt}}>{p.team}</span>
+            {initADP&&<span style={{fontSize:11,color:S.mt}}>Open: {initADP.toFixed(1)}</span>}{curADP&&<span style={{fontSize:11,color:S.mt}}>Now: {curADP.toFixed(1)}</span>}
+            {initADP&&curADP&&<span style={{fontSize:11,fontWeight:700,color:curADP<initADP?'#22c55e':'#ef4444'}}>{curADP<initADP?'↑':'↓'}{Math.abs(initADP-curADP).toFixed(1)}</span>}</div></div>
+        <button onClick={onClose} style={{background:'none',border:'none',color:S.mt,fontSize:24,cursor:'pointer'}}>×</button></div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8,marginBottom:16}}>
+        {[{l:'Exp%',v:(p.exposure||0)>0?`${(p.exposure||0).toFixed(0)}%`:'0%',c:POS[p.pos]?.accent},{l:'Avg Pk',v:p.avgPick?p.avgPick.toFixed(1):'—'},{l:'Count',v:`${p.count||0}x`},
+          {l:'Value',v:p.value!=null?`${p.value>0?'+':''}${p.value.toFixed(1)}`:'—',c:p.value!=null?(p.value>0?'#22c55e':'#ef4444'):S.mt}
+        ].map(s=><div key={s.l} style={{background:S.s2,borderRadius:10,padding:'10px 12px',textAlign:'center'}}>
+          <p style={{fontSize:9,color:S.mt,margin:0,textTransform:'uppercase',letterSpacing:1,fontWeight:600}}>{s.l}</p>
+          <p style={{fontFamily:FONT,fontSize:20,fontWeight:900,color:s.c||S.tx,margin:'3px 0 0'}}>{s.v}</p></div>)}</div>
+      {allPoints.length>0&&<div style={{background:S.s2,borderRadius:10,padding:'14px 10px',marginBottom:12}}>
+        <ResponsiveContainer width="100%" height={200}>
+          <ComposedChart data={allPoints} margin={{top:5,right:10,left:0,bottom:5}}><XAxis dataKey="x" type="number" domain={['dataMin','dataMax']} ticks={ticks} tickFormatter={tickFormatter} tick={{fontSize:10,fill:S.mt}} axisLine={false} tickLine={false}/>
+            <YAxis reversed domain={[d=>Math.max(1,Math.floor(d*0.8)),d=>Math.ceil(d*1.2)]} tick={{fontSize:11,fill:S.mt}} axisLine={false} tickLine={false} width={40}/><Tooltip contentStyle={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:8,fontSize:12}} labelFormatter={tickFormatter}/>
+            {p.avgPick&&<ReferenceLine y={p.avgPick} stroke="#f59e0b" strokeDasharray="3 3" label={{value:'Avg',fontSize:9,fill:'#f59e0b'}}/>}
+            <Line type="monotone" dataKey="adp" stroke={POS[p.pos]?.accent} strokeWidth={2.5} dot={{r:5,fill:POS[p.pos]?.accent,stroke:'#fff',strokeWidth:1}} connectNulls name="ADP"/>
+            <Scatter dataKey="pick" fill="#22c55e" name="Your Pick" shape="diamond" legendType="diamond"/></ComposedChart></ResponsiveContainer>
+        <div style={{display:'flex',gap:12,justifyContent:'center',marginTop:4}}><span style={{fontSize:9,color:POS[p.pos]?.accent}}>● ADP</span><span style={{fontSize:9,color:'#22c55e'}}>◆ Your picks</span><span style={{fontSize:9,color:'#d4a017'}}>--- Avg</span></div></div>}
+      {adpLine.some(d=>d.adp!=null)&&<div style={{background:S.s2,borderRadius:10,padding:'10px 14px',marginBottom:16,overflowX:'auto'}}>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:11}}><thead><tr>{adpDates.map(d=><th key={d} style={{padding:'4px 8px',color:S.mt,fontWeight:600,fontSize:9,textAlign:'center'}}>{d}</th>)}</tr></thead>
+          <tbody><tr>{p.adpData?.adp?.map((a,i)=><td key={i} style={{padding:'4px 8px',textAlign:'center',fontWeight:700,color:a<240?S.tx:S.mt}}>{a<240?a.toFixed(1):'—'}</td>)||null}</tr></tbody></table></div>}
+      {ins.length>0&&<div style={{marginBottom:16}}><button onClick={()=>setShowHistory(!showHistory)} style={{fontSize:11,color:S.mt,textTransform:'uppercase',letterSpacing:2,fontWeight:700,background:'none',border:'none',cursor:'pointer',padding:0,marginBottom:showHistory?8:0}}>Draft History ({ins.length}) {showHistory?'▼':'▶'}</button>
+        {showHistory&&<div style={{display:'flex',flexDirection:'column',gap:3}}>{ins.map((inst,i)=><div key={i} onClick={()=>{if(onOpenDraft&&inst.draft){onClose();onOpenDraft(inst.draft);}}} style={{background:S.s2,borderRadius:6,padding:'7px 12px',display:'flex',justifyContent:'space-between',fontSize:12,cursor:'pointer',transition:'background 0.15s','&:hover':{background:S.s3}}}>
+          <div><span style={{fontWeight:600,color:'#60a5fa'}}>{inst.dn}</span><span style={{fontSize:9,color:S.mt,marginLeft:6}}>{(inst.date||'').replace(/2026-?/g,'')}</span></div>
+          <div style={{display:'flex',gap:10}}><span style={{color:S.mt,fontSize:11}}>Seat {inst.seat}</span><span style={{color:S.mt,fontSize:11}}>Rd {inst.r}</span>
+            <span style={{color:curADP?(inst.pk>curADP?'#22c55e':'#ef4444'):POS[p.pos]?.accent,fontWeight:700}}>Pk {inst.pk}</span></div></div>)}</div>}</div>}
+      <p style={{fontSize:10,color:S.mt,textTransform:'uppercase',letterSpacing:2,fontWeight:700,margin:'0 0 8px'}}>Paired With</p>
+      <input value={pairQ} onChange={e=>setPairQ(e.target.value)} placeholder="Search pairs..." style={{fontSize:11,padding:'5px 8px',background:S.s2,border:`1px solid ${S.bd}`,borderRadius:6,color:S.tx,width:160,marginBottom:8}}/>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:4}}>
+        {shown.map((x,i)=><div key={i} style={{borderRadius:8,padding:'8px 12px',display:'flex',justifyContent:'space-between',alignItems:'center',fontSize:12,
+          background:x.same?'rgba(139,92,246,0.12)':S.s2,border:x.same?'1px solid rgba(139,92,246,0.4)':`1px solid ${S.s2}`}}>
+          <div style={{display:'flex',alignItems:'center',gap:5}}>{x.ps&&<Pill pos={x.ps}/>}<span style={{fontWeight:500,color:x.same?'#a78bfa':S.tx}}>{x.pr}</span>
+            {x.same&&<span style={{fontSize:9,background:'#f59e0b',color:'#fff',padding:'1px 5px',borderRadius:4,fontWeight:700}}>STACK</span>}</div>
+          <span style={{fontFamily:FONT,fontWeight:800,color:'#f59e0b',fontSize:13}}>{x.ct}×</span></div>)}</div>
+    </div></div>);
+}
+
+/* ═══ DRAFT MODAL — with position group view + full board ═══ */
+function DraftModal({d,adpPl,onClose}){const[view,setView]=useState('rounds');if(!d)return null;const c=d._cls||{counts:{QB:0,RB:0,WR:0,TE:0},tags:[]};
+  const pv=d.picks.map(p=>{const adp=matchADP(p.name,p.pos,p.team,p.pick,adpPl);return{...p,adpVal:adp?.latest,value:adp?p.pick-adp.latest:null};});const tv=pv.reduce((s,p)=>s+(p.value||0),0);
+  const byPos={QB:pv.filter(p=>p.pos==='QB'),RB:pv.filter(p=>p.pos==='RB'),WR:pv.filter(p=>p.pos==='WR'),TE:pv.filter(p=>p.pos==='TE')};
+  // Build full board from all teams
+  const allTeams=[{name:'You (Seat '+d.draftPosition+')',seat:d.draftPosition,picks:d.picks,mine:true},...(d.field||[]).map(f=>({name:f.name,seat:f.seat,picks:f.picks,mine:false}))].sort((a,b)=>a.seat-b.seat);
+  const board=Array.from({length:20},(_,r)=>allTeams.map(tm=>{const idx=r;return tm.picks[idx]||null;}));
+  return(<div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.85)',zIndex:100,display:'flex',alignItems:'center',justifyContent:'center',padding:16}} onClick={onClose}>
+    <div onClick={e=>e.stopPropagation()} style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:16,padding:24,maxWidth:view==='board'?1200:700,width:'100%',maxHeight:'88vh',overflow:'auto'}}>
+      <div style={{display:'flex',justifyContent:'space-between',marginBottom:12}}>
+        <div><h2 style={{fontFamily:FONT,fontSize:18,fontWeight:900,margin:0}}>{d.name}</h2><p style={{fontSize:11,color:S.mt,margin:'2px 0 0'}}>Seat {d.draftPosition} • {d.tournament||'—'} • {(d.date||'').replace(/2026-?/g,'')}</p></div>
+        <button onClick={onClose} style={{background:'none',border:'none',color:S.mt,fontSize:24,cursor:'pointer'}}>×</button></div>
+      <div style={{display:'flex',gap:5,flexWrap:'wrap',marginBottom:8}}>
+        {['QB','RB','WR','TE'].map(pos=><span key={pos} style={{background:POS[pos].bg,color:'#fff',padding:'3px 8px',borderRadius:5,fontSize:11,fontWeight:700}}>{pos} {c.counts[pos]}</span>)}
+        {c.tags.map(t=><span key={t} style={{background:'#f59e0b',color:'#fff',padding:'3px 8px',borderRadius:5,fontSize:10,fontWeight:700}}>{t}</span>)}
+        <span style={{background:S.s2,padding:'3px 8px',borderRadius:5,fontSize:10,fontWeight:700,color:tv>=0?'#22c55e':'#ef4444'}}>Net {tv>0?'+':''}{tv.toFixed(0)}</span></div>
+      <div style={{display:'flex',gap:2,background:S.s2,borderRadius:6,padding:2,marginBottom:12}}>
+        {[{id:'rounds',l:'By Round'},{id:'pos',l:'By Position'},{id:'board',l:'Full Board'}].map(v=><button key={v.id} onClick={()=>setView(v.id)} style={{fontSize:10,fontWeight:700,padding:'5px 12px',borderRadius:4,border:'none',cursor:'pointer',background:view===v.id?'#22c55e':'transparent',color:view===v.id?'#fff':S.mt}}>{v.l}</button>)}</div>
+      {view==='rounds'?<div style={{border:`1px solid ${S.bd}`,borderRadius:10,overflow:'hidden'}}>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+          <thead><tr style={{background:S.s2}}>{['Rd','Pk','Player','Pos','Tm','ADP','Val'].map(h=><th key={h} style={{padding:'7px 6px',textAlign:h==='Player'?'left':'center',fontWeight:700,color:S.mt,fontSize:10,borderBottom:`1px solid ${S.bd}`}}>{h}</th>)}</tr></thead>
+          <tbody>{pv.map((p,i)=><tr key={i} style={{borderBottom:'1px solid #334155'}}>
+            <td style={{padding:'5px 6px',textAlign:'center',fontWeight:700,color:S.mt}}>{p.round}</td><td style={{padding:'5px 6px',textAlign:'center',fontWeight:600}}>{p.pick}</td>
+            <td style={{padding:'5px 6px',fontWeight:600}}>{p.name}</td><td style={{padding:'5px 6px',textAlign:'center'}}><Pill pos={p.pos}/></td>
+            <td style={{padding:'5px 6px',textAlign:'center',color:S.mt,fontSize:11}}>{p.team}</td>
+            <td style={{padding:'5px 6px',textAlign:'center',color:S.mt,fontSize:11}}>{p.adpVal&&p.adpVal<240?p.adpVal.toFixed(0):'—'}</td>
+            <td style={{padding:'5px 6px',textAlign:'center',fontWeight:700,fontSize:11,color:p.value!=null?(p.value>0?'#22c55e':'#ef4444'):S.mt}}>{p.value!=null?`${p.value>0?'+':''}${p.value.toFixed(0)}`:'—'}</td>
+          </tr>)}</tbody></table></div>
+      :view==='pos'?<div style={{display:'grid',gridTemplateColumns:'repeat(2,1fr)',gap:8}}>
+        {['QB','RB','WR','TE'].map(pos=><div key={pos} style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,overflow:'hidden'}}>
+          <div style={{background:POS[pos].bg,padding:'6px 10px',fontSize:11,fontWeight:700,color:'#fff'}}>{pos} ({byPos[pos].length})</div>
+          {byPos[pos].map((p,i)=><div key={i} style={{padding:'5px 8px',borderBottom:'1px solid #334155',display:'flex',justifyContent:'space-between',fontSize:11}}>
+            <div><span style={{color:S.mt,fontSize:9}}>R{p.round} </span><span style={{fontWeight:600}}>{p.name}</span> <span style={{color:S.mt,fontSize:9}}>{p.team}</span></div>
+            <div style={{display:'flex',gap:4}}><span style={{color:S.mt}}>Pk{p.pick}</span>{p.value!=null&&<span style={{fontWeight:700,color:p.value>0?'#22c55e':'#ef4444'}}>{p.value>0?'+':''}{p.value.toFixed(0)}</span>}</div></div>)}
+        </div>)}</div>
+      :<div style={{overflowX:'auto'}}>
+        <div style={{display:'grid',gridTemplateColumns:`40px repeat(${allTeams.length},1fr)`,gap:2,minWidth:allTeams.length*90}}>
+          <div/>{allTeams.map((tm,i)=><div key={i} style={{textAlign:'center',fontSize:9,fontWeight:700,color:tm.mine?'#22c55e':S.mt,padding:4}}>Seat {tm.seat}{tm.mine?' (You)':''}</div>)}
+          {board.map((row,r)=><>{<div key={'r'+r} style={{display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,fontWeight:700,color:S.mt}}>R{r+1}</div>}
+            {row.map((pk,c)=>{if(!pk)return<div key={c} style={{background:S.s2,borderRadius:3,padding:3,minHeight:28}}/>;
+              return<div key={c} style={{background:allTeams[c]?.mine?'rgba(34,197,94,0.1)':S.s2,borderRadius:3,padding:'3px 4px',minHeight:28,border:allTeams[c]?.mine?'1px solid rgba(34,197,94,0.3)':`1px solid ${S.bd}`}}>
+                <p style={{fontSize:9,fontWeight:700,margin:0,lineHeight:1.2,color:allTeams[c]?.mine?S.tx:S.mt}}>{pk.name}</p>
+                <span style={{fontSize:7,color:POS[pk.pos]?.accent,fontWeight:700}}>{pk.pos}</span> <span style={{fontSize:7,color:S.mt}}>{pk.team}</span></div>;})}
+          </>)}</div></div>}
+    </div></div>);
+}
+
+/* ═══ FIELD TEAM MODAL — view any team's roster ═══ */
+function FieldTeamModal({team,adpPl,onClose}){if(!team)return null;
+  const pv=team.picks.map(p=>{const adp=matchADP(p.name,p.pos,p.team,p.pick,adpPl);return{...p,adpVal:adp?.latest,value:adp?p.pick-adp.latest:null};});
+  const tv=pv.reduce((s,p)=>s+(p.value||0),0);const counts={QB:0,RB:0,WR:0,TE:0};pv.forEach(p=>{if(counts[p.pos]!=null)counts[p.pos]++;});
+  return(<div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.85)',zIndex:100,display:'flex',alignItems:'center',justifyContent:'center',padding:16}} onClick={onClose}>
+    <div onClick={e=>e.stopPropagation()} style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:16,padding:24,maxWidth:520,width:'100%',maxHeight:'88vh',overflow:'auto'}}>
+      <div style={{display:'flex',justifyContent:'space-between',marginBottom:12}}>
+        <div><h2 style={{fontFamily:FONT,fontSize:18,fontWeight:900,margin:0}}>{team.name}</h2><p style={{fontSize:11,color:S.mt,margin:'2px 0 0'}}>Seat {team.seat}</p></div>
+        <button onClick={onClose} style={{background:'none',border:'none',color:S.mt,fontSize:24,cursor:'pointer'}}>×</button></div>
+      <div style={{display:'flex',gap:5,flexWrap:'wrap',marginBottom:8}}>
+        {['QB','RB','WR','TE'].map(pos=><span key={pos} style={{background:POS[pos].bg,color:'#fff',padding:'3px 8px',borderRadius:5,fontSize:11,fontWeight:700}}>{pos} {counts[pos]}</span>)}
+        <span style={{background:S.s2,padding:'3px 8px',borderRadius:5,fontSize:10,fontWeight:700,color:tv>=0?'#22c55e':'#ef4444'}}>Net {tv>0?'+':''}{tv.toFixed(0)}</span></div>
+      <div style={{border:`1px solid ${S.bd}`,borderRadius:10,overflow:'hidden'}}>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+          <thead><tr style={{background:S.s2}}>{['Rd','Pk','Player','Pos','Tm','Val'].map(h=><th key={h} style={{padding:'7px 6px',textAlign:h==='Player'?'left':'center',fontWeight:700,color:S.mt,fontSize:10,borderBottom:`1px solid ${S.bd}`}}>{h}</th>)}</tr></thead>
+          <tbody>{pv.map((p,i)=><tr key={i} style={{borderBottom:'1px solid #334155'}}>
+            <td style={{padding:'5px 6px',textAlign:'center',fontWeight:700,color:S.mt}}>{p.round}</td><td style={{padding:'5px 6px',textAlign:'center',fontWeight:600}}>{p.pick}</td>
+            <td style={{padding:'5px 6px',fontWeight:600}}>{p.name}</td><td style={{padding:'5px 6px',textAlign:'center'}}><Pill pos={p.pos}/></td>
+            <td style={{padding:'5px 6px',textAlign:'center',color:S.mt,fontSize:11}}>{p.team}</td>
+            <td style={{padding:'5px 6px',textAlign:'center',fontWeight:700,fontSize:11,color:p.value!=null?(p.value>0?'#22c55e':'#ef4444'):S.mt}}>{p.value!=null?`${p.value>0?'+':''}${p.value.toFixed(0)}`:'—'}</td>
+          </tr>)}</tbody></table></div></div></div>);
+}
+
+function EditModal({d,onSave,onDelete,onClose}){const[name,setName]=useState(d?.name||'');const[tourn,setTourn]=useState(d?.tournament||'');const[date,setDate]=useState(d?.date||'');const[fee,setFee]=useState(d?.fee||'');const[winnings,setWinnings]=useState(d?.winnings||'');const[phase,setPhase]=useState(d?.phase||'pre');if(!d)return null;
+  const inp={fontSize:12,padding:'8px 12px',background:S.s2,border:`1px solid ${S.bd}`,borderRadius:6,color:S.tx,width:'100%'};
+  return(<div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.85)',zIndex:100,display:'flex',alignItems:'center',justifyContent:'center',padding:16}} onClick={onClose}>
+    <div onClick={e=>e.stopPropagation()} style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:16,padding:24,maxWidth:420,width:'100%'}}>
+      <h2 style={{fontFamily:FONT,fontSize:16,fontWeight:900,marginBottom:16}}>Edit Draft</h2>
+      <div style={{display:'flex',flexDirection:'column',gap:10}}>
+        <input value={name} onChange={e=>setName(e.target.value)} placeholder="Name" style={inp}/>
+        <input value={tourn} onChange={e=>setTourn(e.target.value)} placeholder="Tournament" style={inp}/>
+        <input type="date" value={date} onChange={e=>setDate(e.target.value)} style={inp}/>
+        <div style={{display:'flex',gap:10}}>
+          <input value={fee} onChange={e=>setFee(e.target.value)} placeholder="Entry fee ($)" type="number" style={{...inp,flex:1}}/>
+          <input value={winnings} onChange={e=>setWinnings(e.target.value)} placeholder="Winnings ($)" type="number" style={{...inp,flex:1}}/>
         </div>
-      </div>;
-    }
-    return this.props.children;
-  }
+        <div>
+          <p style={{fontSize:10,color:S.mt,fontWeight:700,textTransform:'uppercase',letterSpacing:1,marginBottom:4}}>Contest Phase</p>
+          <div style={{display:'flex',gap:2,background:S.s2,borderRadius:6,padding:2}}>{[{id:'pre',l:'Pre-Draft'},{id:'post',l:'Post-Draft'},{id:'regular',l:'Regular'}].map(ph=><button key={ph.id} onClick={()=>setPhase(ph.id)} style={{flex:1,fontSize:11,fontWeight:700,padding:'6px 10px',borderRadius:4,border:'none',cursor:'pointer',background:phase===ph.id?'#22c55e':'transparent',color:phase===ph.id?'#fff':S.mt}}>{ph.l}</button>)}</div>
+        </div>
+      </div>
+      <div style={{display:'flex',gap:10,marginTop:20}}>
+        <button onClick={()=>onSave({...d,name,tournament:tourn,date,fee:parseFloat(fee)||0,winnings:parseFloat(winnings)||0,phase})} style={{fontSize:12,padding:'8px 18px',background:'#22c55e',color:'#fff',border:'none',borderRadius:6,fontWeight:700,cursor:'pointer'}}>Save</button>
+        <button onClick={()=>{if(window.confirm('Delete?'))onDelete(d.id);}} style={{fontSize:12,padding:'8px 18px',background:'#ef4444',color:'#fff',border:'none',borderRadius:6,fontWeight:700,cursor:'pointer'}}>Delete</button>
+        <button onClick={onClose} style={{fontSize:12,padding:'8px 18px',background:S.s2,color:S.mt,border:`1px solid ${S.bd}`,borderRadius:6,cursor:'pointer'}}>Cancel</button></div></div></div>);}
+
+/* ═══ LAST SEASON PLAYER CARD ═══ */
+function LastSeasonPlayerModal({p,onClose}){if(!p)return null;
+  const weekly=p.weekly||[];const hasWeekly=weekly.length>0;
+  const moneyWeeks=[15,16,17];const moneyPts=moneyWeeks.map(w=>weekly[w-1]).filter(v=>v!=null&&v>0);
+  const moneyTotal=moneyPts.reduce((s,v)=>s+v,0);const moneyAvg=moneyPts.length?moneyTotal/moneyPts.length:0;
+  const hit=p.fpts>0&&p.beat>=0;const boom=weekly.filter(v=>v!=null&&v>=20).length;const bust=weekly.filter(v=>v!=null&&v>0&&v<5).length;
+  const bestWeek=weekly.reduce((best,v,i)=>v!=null&&v>(best.v||0)?{v,w:i+1}:best,{v:0,w:0});
+  const worstWeek=weekly.reduce((worst,v,i)=>v!=null&&v>0&&(worst.v===null||v<worst.v)?{v,w:i+1}:worst,{v:null,w:0});
+  // Best ball key metrics: volatility (std dev) and ceiling score
+  const activeWeeks=weekly.filter(v=>v!=null&&v>0);
+  const mean=activeWeeks.length?activeWeeks.reduce((s,v)=>s+v,0)/activeWeeks.length:0;
+  const stdDev=activeWeeks.length>1?Math.sqrt(activeWeeks.reduce((s,v)=>s+Math.pow(v-mean,2),0)/(activeWeeks.length-1)):0;
+  const ceiling=activeWeeks.length?Math.max(...activeWeeks):0;
+  const floor=activeWeeks.length?Math.min(...activeWeeks):0;
+  return(<div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.85)',zIndex:100,display:'flex',alignItems:'center',justifyContent:'center',padding:16}} onClick={onClose}>
+    <div onClick={e=>e.stopPropagation()} style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:16,padding:24,maxWidth:600,width:'100%',maxHeight:'90vh',overflow:'auto'}}>
+      <div style={{display:'flex',justifyContent:'space-between',marginBottom:16}}>
+        <div><h2 style={{fontFamily:FONT,fontSize:22,fontWeight:900,margin:'0 0 4px'}}>{p.name}</h2>
+          <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}><Pill pos={p.pos}/><span style={{fontSize:13,color:S.mt}}>{p.team}</span>
+            {p.adp&&<span style={{fontSize:12,color:S.mt}}>ADP: {p.adp.toFixed(1)}</span>}
+            {p.adpPosRank&&<span style={{fontSize:12,color:S.mt}}>Drafted as: {p.adpPosRank}</span>}
+            {p.actualFinish&&<span style={{fontSize:12,fontWeight:700,color:hit?'#22c55e':'#ef4444'}}>Finished: {p.actualFinish}</span>}</div></div>
+        <button onClick={onClose} style={{background:'none',border:'none',color:S.mt,fontSize:24,cursor:'pointer'}}>×</button></div>
+      {/* Stat Cards */}
+      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:6,marginBottom:12}}>
+        {[{l:'Total Pts',v:p.fpts>0?p.fpts.toFixed(1):'DNP',c:p.fpts>=200?'#22c55e':p.fpts>0?S.tx:S.mt},
+          {l:'GP',v:p.gp||'—',c:p.gp>=14?S.tx:p.gp>0?'#d4a017':S.mt},
+          {l:'PPG',v:p.ppg>0?p.ppg.toFixed(1):'—',c:p.ppg>=15?'#22c55e':p.ppg>0?S.tx:S.mt},
+          {l:'ADP Beat',v:p.fpts>0&&p.beat!=null?(p.beat>0?'+':'')+p.beat:'—',c:p.beat>0?'#22c55e':p.beat<0?'#ef4444':S.mt}
+        ].map(s=><div key={s.l} style={{background:S.s2,borderRadius:8,padding:'8px 6px',textAlign:'center'}}>
+          <p style={{fontSize:9,color:S.mt,margin:0,textTransform:'uppercase',letterSpacing:1,fontWeight:600}}>{s.l}</p>
+          <p style={{fontFamily:FONT,fontSize:18,fontWeight:900,color:s.c,margin:'2px 0 0'}}>{s.v}</p></div>)}</div>
+      {hasWeekly&&activeWeeks.length>2&&<div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:6,marginBottom:12}}>
+        {[{l:'Ceiling',v:ceiling.toFixed(1),c:'#22c55e'},
+          {l:'Floor',v:floor.toFixed(1),c:'#ef4444'},
+          {l:'Volatility',v:stdDev.toFixed(1),c:stdDev>=10?'#f59e0b':stdDev>=7?S.tx:'#3b82f6'},
+          {l:'Money Avg',v:moneyAvg>0?moneyAvg.toFixed(1):'—',c:moneyAvg>=15?'#22c55e':moneyAvg>0?'#d4a017':S.mt}
+        ].map(s=><div key={s.l} style={{background:S.s2,borderRadius:8,padding:'8px 6px',textAlign:'center'}}>
+          <p style={{fontSize:9,color:S.mt,margin:0,textTransform:'uppercase',letterSpacing:1,fontWeight:600}}>{s.l}</p>
+          <p style={{fontFamily:FONT,fontSize:16,fontWeight:900,color:s.c,margin:'2px 0 0'}}>{s.v}</p></div>)}</div>}
+      {/* Money Weeks Highlight */}
+      {hasWeekly&&<div style={{background:'rgba(34,197,94,0.08)',border:'1px solid rgba(34,197,94,0.3)',borderRadius:10,padding:14,marginBottom:16}}>
+        <p style={{fontSize:10,color:'#22c55e',textTransform:'uppercase',letterSpacing:2,fontWeight:700,margin:'0 0 8px'}}>Money Weeks (15-16-17)</p>
+        <div style={{display:'flex',gap:10}}>
+          {moneyWeeks.map(w=>{const pts=weekly[w-1];return<div key={w} style={{flex:1,background:S.s2,borderRadius:8,padding:'10px 12px',textAlign:'center'}}>
+            <p style={{fontSize:9,color:S.mt,margin:0}}>Week {w}</p>
+            <p style={{fontFamily:FONT,fontSize:20,fontWeight:900,margin:'4px 0 0',color:pts==null?S.mt:pts>=20?'#22c55e':pts>=10?S.tx:'#d4a017'}}>{pts!=null?pts.toFixed(1):'BYE'}</p></div>;})}
+          <div style={{flex:1,background:S.s2,borderRadius:8,padding:'10px 12px',textAlign:'center',border:'1px solid rgba(34,197,94,0.3)'}}>
+            <p style={{fontSize:9,color:'#22c55e',margin:0,fontWeight:700}}>TOTAL</p>
+            <p style={{fontFamily:FONT,fontSize:20,fontWeight:900,margin:'4px 0 0',color:'#22c55e'}}>{moneyTotal>0?moneyTotal.toFixed(1):'—'}</p></div></div></div>}
+      {/* Boom/Doom + Best/Worst */}
+      {hasWeekly&&<div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8,marginBottom:16}}>
+        {[{l:'Booms (20+)',v:boom,c:'#22c55e'},{l:'Dooms (<5)',v:bust,c:'#ef4444'},
+          {l:'Best Week',v:bestWeek.v>0?`W${bestWeek.w}: ${bestWeek.v.toFixed(1)}`:'—',c:'#22c55e'},
+          {l:'Worst Week',v:worstWeek.v!=null?`W${worstWeek.w}: ${worstWeek.v.toFixed(1)}`:'—',c:'#ef4444'}
+        ].map(s=><div key={s.l} style={{background:S.s2,borderRadius:8,padding:'8px 6px',textAlign:'center'}}>
+          <p style={{fontSize:8,color:S.mt,margin:0,textTransform:'uppercase',fontWeight:600}}>{s.l}</p>
+          <p style={{fontSize:13,fontWeight:800,color:s.c,margin:'4px 0 0'}}>{s.v}</p></div>)}</div>}
+      {/* Game Log - Vertical */}
+      {hasWeekly&&<div><p style={{fontSize:10,color:S.mt,textTransform:'uppercase',letterSpacing:2,fontWeight:700,margin:'0 0 8px'}}>Game Log</p>
+        <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,overflow:'hidden'}}>
+          {weekly.map((pts,i)=>{const isMoney=moneyWeeks.includes(i+1);const isBye=pts===null;
+            return<div key={i} style={{display:'flex',alignItems:'center',padding:'6px 12px',borderBottom:`1px solid ${S.bd}`,
+              background:isMoney?'rgba(34,197,94,0.06)':isBye?'rgba(0,0,0,0.15)':'transparent'}}>
+              <span style={{width:40,fontSize:10,fontWeight:700,color:isMoney?'#22c55e':S.mt}}>W{i+1}</span>
+              {isBye?<span style={{fontSize:11,color:S.mt,fontStyle:'italic'}}>BYE</span>
+              :<><div style={{flex:1,height:6,background:S.s2,borderRadius:3,marginRight:10,overflow:'hidden'}}>
+                <div style={{height:'100%',borderRadius:3,width:`${Math.min(100,((pts||0)/30)*100)}%`,
+                  background:pts>=20?'#22c55e':pts>=10?S.tx:pts>=5?'#d4a017':'#ef4444'}}/></div>
+              <span style={{width:50,textAlign:'right',fontSize:12,fontWeight:pts>=20?800:500,
+                color:pts>=20?'#22c55e':pts>=10?S.tx:pts>=5?'#d4a017':'#ef4444'}}>{pts!=null?pts.toFixed(1):'0.0'}</span></>}
+            </div>;})}</div></div>}
+      {!hasWeekly&&p.fpts>0&&<p style={{fontSize:11,color:S.mt,textAlign:'center',padding:20}}>Weekly breakdown not available for this player.</p>}
+      {p.fpts===0&&<p style={{fontSize:12,color:S.mt,textAlign:'center',padding:20}}>This player did not record stats in the 2025 season.</p>}
+    </div></div>);
 }
 
-function AppRoot() {
-  return <ErrorBoundary><AppInner/></ErrorBoundary>;
+/* ═══ MILLY ENTRY MODAL — view full roster for a tournament entry ═══ */
+function MillyEntryModal({entry,onClose}){if(!entry||!entry.players)return null;
+  const starters=entry.players.filter(p=>p.slot!=='BN');const bench=entry.players.filter(p=>p.slot==='BN');
+  const counts={QB:0,RB:0,WR:0,TE:0};entry.players.forEach(p=>{if(counts[p.pos]!=null)counts[p.pos]++;});
+  const tags=[];const build=entry.build;if(build)tags.push(build);
+  return(<div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.85)',zIndex:100,display:'flex',alignItems:'center',justifyContent:'center',padding:16}} onClick={onClose}>
+    <div onClick={e=>e.stopPropagation()} style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:16,padding:24,maxWidth:520,width:'100%',maxHeight:'90vh',overflow:'auto'}}>
+      <div style={{display:'flex',justifyContent:'space-between',marginBottom:12}}>
+        <div><h2 style={{fontFamily:FONT,fontSize:18,fontWeight:900,margin:0}}>#{entry.rank} — {entry.name}</h2>
+          <p style={{fontSize:11,color:'#22c55e',fontWeight:800,margin:'2px 0 0'}}>{entry.pts.toFixed(1)} pts</p></div>
+        <button onClick={onClose} style={{background:'none',border:'none',color:S.mt,fontSize:24,cursor:'pointer'}}>×</button></div>
+      <div style={{display:'flex',gap:5,flexWrap:'wrap',marginBottom:14}}>
+        {['QB','RB','WR','TE'].map(pos=><span key={pos} style={{background:POS[pos].bg,color:'#fff',padding:'3px 8px',borderRadius:5,fontSize:11,fontWeight:700}}>{pos} {counts[pos]}</span>)}
+        {tags.map(t=><span key={t} style={{background:'#f59e0b',color:'#fff',padding:'3px 8px',borderRadius:5,fontSize:10,fontWeight:700}}>{t}</span>)}
+        <span style={{background:S.s2,padding:'3px 8px',borderRadius:5,fontSize:10,fontWeight:700,color:S.mt}}>QB: {entry.qb}</span></div>
+      <p style={{fontSize:10,color:'#d4a017',textTransform:'uppercase',letterSpacing:2,fontWeight:700,margin:'0 0 8px'}}>Starters</p>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(2,1fr)',gap:4,marginBottom:14}}>
+        {starters.map((p,i)=><div key={i} style={{background:'rgba(245,158,11,0.08)',border:'1px solid rgba(245,158,11,0.3)',borderRadius:6,padding:'8px 10px',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+          <div style={{display:'flex',alignItems:'center',gap:6}}><Pill pos={p.pos}/><span style={{fontSize:11,fontWeight:700}}>{p.name}</span></div>
+          <div style={{display:'flex',gap:4,alignItems:'center'}}><span style={{fontSize:9,color:S.mt}}>{p.team}</span><span style={{fontSize:8,color:'#d4a017',fontWeight:700,background:'rgba(245,158,11,0.2)',padding:'1px 5px',borderRadius:3}}>{p.slot}</span></div></div>)}</div>
+      <p style={{fontSize:10,color:S.mt,textTransform:'uppercase',letterSpacing:2,fontWeight:700,margin:'0 0 8px'}}>Bench</p>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(2,1fr)',gap:4}}>
+        {bench.map((p,i)=><div key={i} style={{background:S.s2,border:`1px solid ${S.bd}`,borderRadius:6,padding:'6px 10px',display:'flex',justifyContent:'space-between',alignItems:'center',opacity:0.7}}>
+          <div style={{display:'flex',alignItems:'center',gap:6}}><Pill pos={p.pos}/><span style={{fontSize:11,fontWeight:600}}>{p.name}</span></div>
+          <span style={{fontSize:9,color:S.mt}}>{p.team}</span></div>)}</div>
+    </div></div>);
 }
 
-function AppInner() {
-  const [dark,setDark] = useState(true);
-  const [tab,setTab] = useState("leaders");
-  const [globals,setGlobals] = useState(()=>{try{const s=localStorage.getItem("nhl_globals");return s?{...DEFAULT_GLOBALS,...JSON.parse(s)}:DEFAULT_GLOBALS;}catch{return DEFAULT_GLOBALS;}});
-  const [margins,setMargins] = useState(()=>{
-    try{
-      const s=localStorage.getItem("nhl_margins");
-      if(!s) return DEFAULT_MARGINS;
-      const parsed = JSON.parse(s);
-      // v49: remove deprecated keys
-      delete parsed.propsPIM;
-      return {...DEFAULT_MARGINS,...parsed};
-    }catch{return DEFAULT_MARGINS;}
-  });
-  const [showTrue,setShowTrue] = useState(false);
-  const [showDec,setShowDec] = useState(true);
-  const [syncStatus,setSyncStatus] = useState("idle");
-  const [players,setPlayers] = useState(()=>{
-    try{
-      const s=localStorage.getItem("nhl_p");
-      if(!s) return null;
-      const raw = JSON.parse(s);
-      // v20: auto-migrate legacy players (pGP>0 but no pGames array)
-      return Array.isArray(raw) ? raw.map(migratePlayer) : raw;
-    }catch{return null;}
-  });
-  const [goalies,setGoalies] = useState(()=>{try{const s=localStorage.getItem("nhl_g");return s?JSON.parse(s):null;}catch{return null;}});
-  const [matchups,setMatchups] = useState(()=>{
-    try{const s=localStorage.getItem("nhl_m");return migrateMatchups(s?JSON.parse(s):null);}
-    catch{return defaultRoundedMatchups();}
-  });
-  const [advancement,setAdvancement] = useState(()=>{try{const s=localStorage.getItem("nhl_adv");return s?JSON.parse(s):PLAYOFF_TEAMS.reduce((a,t)=>({...a,[t]:{winR1:0.5,winConf:0.25,winCup:0.1}}),{});}catch{return PLAYOFF_TEAMS.reduce((a,t)=>({...a,[t]:{winR1:0.5,winConf:0.25,winCup:0.1}}),{});}});
-  const [allSeries,setAllSeries] = useState(()=>{
-    try{const s=localStorage.getItem("nhl_s");return migrateSeries(s?JSON.parse(s):null);}
-    catch{return defaultRoundedSeries();}
-  });
-  // v38: bracket structure — defines how series in each round chain to the next.
-  const [bracket,setBracket] = useState(()=>{try{const s=localStorage.getItem("nhl_bracket");return s?{...DEFAULT_BRACKET,...JSON.parse(s)}:DEFAULT_BRACKET;}catch{return DEFAULT_BRACKET;}});
-  // v38: which round is currently being viewed in the Series Pricer / Leader Markets tabs.
-  const [currentRound,setCurrentRound] = useState(()=>{try{return localStorage.getItem("nhl_round")||"r1";}catch{return "r1";}});
-  // v31: cross-component signal — every time GameStatImporter commits a game upload, this bumps.
-  // SeriesTab watches it and auto-runs the unified sim so prices reflect the new state without a manual click.
-  const [gameUploadCounter, setGameUploadCounter] = useState(0);
-  const bumpGameUpload = useCallback(()=>setGameUploadCounter(n=>n+1), []);
-  // v34: sim results live at App level keyed by series so they SURVIVE tab/series navigation.
-  // Only cleared when user explicitly hits Run (which replaces) or when series teams change.
-  // Shape: { [seriesKey]: { result, key, ts } }
-  const [simResultsBySeries, setSimResultsBySeries] = useState(()=>{
-    try{const s=localStorage.getItem("nhl_sim_cache");return s?JSON.parse(s):{};}catch{return {};}
-  });
-  const setSimForSeries = useCallback((seriesKey, payload)=>{
-    setSimResultsBySeries(prev => ({...prev, [seriesKey]: payload}));
-  }, []);
-  const [lScope,setLScope] = useState("r1");
-  const [lStat,setLStat] = useState("g");
-  const [lTopN,setLTopN] = useState(25);
+/* ═══ MOCK DRAFT BOARD ═══ */
+function MockDraftBoard({adpPl,drafts,fieldPairs,onClose}){const[sel,setSel]=useState([]);const[locked,setLocked]=useState(null);
+  const top240=adpPl.filter(p=>p.latest<240).slice(0,240);const board=Array.from({length:20},(_,r)=>Array.from({length:12},(__,c)=>{const idx=r%2===0?r*12+c:r*12+(11-c);return top240[idx]||null;}));
+  const pairCount=(sel.length===2)?(()=>{const k=[sel[0].name,sel[1].name].sort().join('~');const mine=drafts.reduce((s,d)=>{const ns=d.picks.map(p=>p.name);return s+(ns.includes(sel[0].name)&&ns.includes(sel[1].name)?1:0);},0);return{field:fieldPairs[k]||0,mine};})():null;
+  const handleClick=p=>{if(!p)return;if(locked&&locked.name===p.name){setLocked(null);setSel([]);return;}if(locked){if(p.name===locked.name)return;setSel([locked,p]);return;}if(sel.length===0){setLocked(p);setSel([p]);return;}if(sel.length===1&&sel[0].name===p.name){setLocked(p);return;}setSel([sel[0],p]);};
+  return(<div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.92)',zIndex:100,display:'flex',flexDirection:'column',padding:16,overflow:'auto'}} onClick={onClose}>
+    <div onClick={e=>e.stopPropagation()} style={{maxWidth:1200,margin:'0 auto',width:'100%'}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+        <h2 style={{fontFamily:FONT,fontSize:18,fontWeight:900}}>Draft Board Pair Finder</h2>
+        <button onClick={onClose} style={{background:'none',border:'none',color:S.mt,fontSize:24,cursor:'pointer'}}>×</button></div>
+      {sel.length>0&&<div style={{display:'flex',gap:8,marginBottom:12,alignItems:'center',flexWrap:'wrap'}}>
+        {sel.map((p,i)=><div key={i} style={{background:i===0&&locked?'rgba(139,92,246,0.3)':S.s2,borderRadius:6,padding:'6px 12px',display:'flex',alignItems:'center',gap:6,border:i===0&&locked?'2px solid #f59e0b':'none'}}>
+          <Pill pos={p.pos}/><span style={{fontWeight:700,fontSize:12}}>{p.name}</span>{i===0&&locked&&<span style={{fontSize:8,color:'#f59e0b'}}>LOCKED</span>}</div>)}
+        {pairCount&&<div style={{background:S.s2,borderRadius:6,padding:'6px 12px',fontSize:12}}><span style={{color:'#22c55e',fontWeight:700}}>You: {pairCount.mine}×</span><span style={{color:S.mt,margin:'0 6px'}}>|</span><span style={{color:'#f59e0b',fontWeight:700}}>Room: {pairCount.field}×</span></div>}
+        <button onClick={()=>{setSel([]);setLocked(null);}} style={{fontSize:11,padding:'4px 10px',background:S.s3,color:S.mt,border:`1px solid ${S.bd}`,borderRadius:4,cursor:'pointer'}}>Clear</button></div>}
+      <div style={{display:'grid',gridTemplateColumns:'40px repeat(12,1fr)',gap:2,marginBottom:2}}><div/>{Array.from({length:12},(_,i)=><div key={i} style={{textAlign:'center',fontSize:10,fontWeight:700,color:S.mt,padding:4}}>Seat {i+1}</div>)}</div>
+      {board.map((row,r)=><div key={r} style={{display:'grid',gridTemplateColumns:'40px repeat(12,1fr)',gap:2,marginBottom:2}}>
+        <div style={{display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,fontWeight:700,color:S.mt}}>R{r+1}</div>
+        {row.map((p,c)=>{if(!p)return<div key={c} style={{background:S.s2,borderRadius:4,padding:4,minHeight:36}}/>;const isSel=sel.some(s=>s.name===p.name);const isLock=locked?.name===p.name;
+          return<div key={c} onClick={e=>{e.stopPropagation();handleClick(p);}} style={{background:isLock?'rgba(139,92,246,0.4)':isSel?'rgba(34,197,94,0.2)':S.s2,border:isLock?'2px solid #f59e0b':isSel?'2px solid #22c55e':`1px solid ${S.bd}`,borderRadius:4,padding:'4px 6px',cursor:'pointer',minHeight:36}}>
+            <p style={{fontSize:10,fontWeight:700,margin:0,lineHeight:1.2}}>{p.name}</p>
+            <div style={{display:'flex',gap:4,alignItems:'center',marginTop:2}}><span style={{fontSize:8,color:POS[p.pos]?.accent,fontWeight:700}}>{p.pos}</span><span style={{fontSize:8,color:S.mt}}>{p.team}</span><span style={{fontSize:8,color:S.mt}}>{p.latest.toFixed(0)}</span></div></div>;})}</div>)}
+    </div></div>);
+}
 
-  useEffect(()=>{document.body.style.background=dark?"#0d0f1a":"#f1f3f7";},[dark]);
-  useEffect(()=>{if(players)localStorage.setItem("nhl_p",JSON.stringify(players));},[players]);
-  useEffect(()=>{if(goalies)localStorage.setItem("nhl_g",JSON.stringify(goalies));},[goalies]);
-  useEffect(()=>{localStorage.setItem("nhl_m",JSON.stringify(matchups));},[matchups]);
-  useEffect(()=>{localStorage.setItem("nhl_adv",JSON.stringify(advancement));},[advancement]);
-  useEffect(()=>{localStorage.setItem("nhl_s",JSON.stringify(allSeries));},[allSeries]);
-  useEffect(()=>{localStorage.setItem("nhl_bracket",JSON.stringify(bracket));},[bracket]);
-  useEffect(()=>{localStorage.setItem("nhl_round",currentRound);},[currentRound]);
-  useEffect(()=>{localStorage.setItem("nhl_globals",JSON.stringify(globals));},[globals]);
-  useEffect(()=>{localStorage.setItem("nhl_margins",JSON.stringify(margins));},[margins]);
-  useEffect(()=>{
-    try { localStorage.setItem("nhl_sim_cache", JSON.stringify(simResultsBySeries)); }
-    catch (e) { /* may exceed quota; sim cache is recomputable so ignore */ }
-  }, [simResultsBySeries]);
+/* ═══ MAIN APP ═══ */
+export default function App(){
+  const[drafts,setDrafts]=useState([]);const[adpHistory,setAdpHistory]=useState(null);const[adpData,setAdpData]=useState({players:[],dates:[]});
+  const[tab,setTab]=useState('exposure');const[pf,setPf]=useState('ALL');const[q,setQ]=useState('');
+  const[selP,setSelP]=useState(null);const[selD,setSelD]=useState(null);const[editD,setEditD]=useState(null);const[selFieldTeam,setSelFieldTeam]=useState(null);
+  const[sBy,setSBy]=useState('currentADP');const[sDir,setSDir]=useState('asc');const[contest,setContest]=useState('ALL');const[phaseFilter,setPhaseFilter]=useState('ALL');
+  const[pasteText,setPasteText]=useState('');const[parseResult,setParseResult]=useState(null);
+  const[importName,setImportName]=useState('');const[importDate,setImportDate]=useState('');const[importTournament,setImportTournament]=useState('');const[importDraftType,setImportDraftType]=useState('fast');const[importFee,setImportFee]=useState('');const[importMaxEntries,setImportMaxEntries]=useState('');const[importPhase,setImportPhase]=useState('pre');
+  const[namesResolved,setNamesResolved]=useState(false);const[pairsView,setPairsView]=useState('mine');const[showBoard,setShowBoard]=useState(false);
+  const[moverFrom,setMoverFrom]=useState(0);const[moverTo,setMoverTo]=useState(-1);const[slotFilter,setSlotFilter]=useState(null);
+  const[lsData,setLsData]=useState(LS_DATA_2025);const[lsView,setLsView]=useState('board');const[lsPosFilter,setLsPosFilter]=useState('ALL');const[lsSort,setLsSort]=useState('adp');const[lsSortDir,setLsSortDir]=useState('asc');const[lsPlayer,setLsPlayer]=useState(null);const[lsHideZero,setLsHideZero]=useState(false);
+  const[teamSortBy,setTeamSortBy]=useState('mine');const[teamSortDir,setTeamSortDir]=useState('desc');const[expandTeam,setExpandTeam]=useState(null);
+  const[adpSortBy,setAdpSortBy]=useState('latest');const[adpSortDir,setAdpSortDir]=useState('asc');
+  const[millyEntry,setMillyEntry]=useState(null);const[showPnl,setShowPnl]=useState(false);
+  // Season state
+  const[scores,setScores]=useState({});// {playerName: {w1:pts, w2:pts, ...}}
+  const[seasonWeek,setSeasonWeek]=useState(1);const[scoresPaste,setScoresPaste]=useState('');const[seasonView,setSeasonView]=useState('scoreboard');
+  const[seasonContest,setSeasonContest]=useState('ALL');
+  const adpFileRef=useRef(null);
 
-  // v52: Explicit Push/Pull model — auto-sync disabled.
-  // scheduleSync() is now a no-op. Call doPush() / doPull() from Settings → Cloud Sync.
-  // This avoids silent data loss from race conditions and offline sync failures.
-  const [lastPushedAt, setLastPushedAt] = useState(() => {
-    try { return localStorage.getItem("nhl_last_pushed_at") || null; } catch { return null; }
-  });
-  const [lastPulledAt, setLastPulledAt] = useState(() => {
-    try { return localStorage.getItem("nhl_last_pulled_at") || null; } catch { return null; }
-  });
-  const [cloudInfo, setCloudInfo] = useState(null);    // {updated_at, device} of the cloud-side latest push we know about
-  function scheduleSync(){ /* disabled in v52 — explicit push/pull only */ }
-  function setP(v){
-    setPlayers(prev => typeof v === "function" ? v(prev) : v);
-  }
-  function setG(v){
-    setGoalies(prev => typeof v === "function" ? v(prev) : v);
-  }
-  function setM(v){setMatchups(v);}
-  function setAdv(v){
-    setAdvancement(prev => typeof v === "function" ? v(prev) : v);
-  }
-  function setSeries(v){
-    setAllSeries(prev => typeof v === "function" ? v(prev) : v);
-  }
-  // v38: per-round adapter — components see a flat array for the active round, but writes
-  // route into the round-keyed structure. Backward-compatible with all flat-array consumers.
-  const seriesForRound = (allSeries[currentRound] || []);
-  const setSeriesForRound = useCallback((v) => {
-    setAllSeries(prev => {
-      const cur = prev[currentRound] || [];
-      const next = typeof v === "function" ? v(cur) : v;
-      return {...prev, [currentRound]: next};
-    });
-  }, [currentRound]);
-  const matchupsForRound = (matchups[currentRound] || []);
-  const setMatchupsForRound = useCallback((v) => {
-    setMatchups(prev => {
-      const cur = prev[currentRound] || [];
-      const next = typeof v === "function" ? v(cur) : v;
-      return {...prev, [currentRound]: next};
-    });
-  }, [currentRound]);
-
-  // v52: On app load, check cloud for a fresher copy (but don't auto-pull).
-  // Shows a "cloud is newer than your local by X min" indicator so user can decide to Pull.
-  useEffect(()=>{
-    if(!isSbEnabled())return;
-    (async()=>{
-      // Ping a single representative key to get timestamp of latest cloud push
-      const rec = await sbLoad("_meta");
-      if (rec && rec.value) setCloudInfo({updated_at: rec.value.updated_at, device: rec.value.device});
-    })();
+  useEffect(()=>{const stored=localStorage.getItem('bb_v3');if(stored){try{setDrafts(JSON.parse(stored));}catch{}}
+    const sc=localStorage.getItem('bb_scores');if(sc){try{setScores(JSON.parse(sc));}catch{}}
+    fetch('/data/adp.csv').then(r=>r.text()).then(csv=>{let h=mergeAdpSnapshot(null,csv,'Initial');const extra=localStorage.getItem('bb_adp_extra');
+      if(extra){try{JSON.parse(extra).forEach(u=>{const merged=mergeAdpSnapshot(h,u.csv,u.date);if(merged)h=merged;});}catch{}}
+      setAdpHistory(h);setAdpData(historyToAdpData(h));}).catch(()=>{const s=localStorage.getItem('bb_adp_history');if(s){try{const h=JSON.parse(s);setAdpHistory(h);setAdpData(historyToAdpData(h));}catch{}}});
   },[]);
-
-  // v52: Push — snapshot all state to cloud under several keys + a _meta summary
-  // v54: Added safety checks to avoid pushing empty/suspicious data + per-key size logging.
-  async function doPush(){
-    if (!isSbEnabled()) return { ok:false, error: "Cloud Sync not configured" };
-    // v54: safety checks
-    const warnings = [];
-    if (!Array.isArray(players) || players.length < 50) warnings.push(`players array has only ${players?.length||0} entries — looks empty/incomplete`);
-    if (!Array.isArray(goalies) || goalies.length < 10) warnings.push(`goalies array has only ${goalies?.length||0} entries`);
-    const advKeys = Object.keys(advancement||{});
-    if (advKeys.length < 8) warnings.push(`advancement has only ${advKeys.length} teams — expected 16`);
-    if (warnings.length > 0) {
-      const proceed = window.confirm(`⚠ About to push state that looks incomplete:\n\n${warnings.join("\n")}\n\nContinue pushing anyway? (This will overwrite the cloud copy.)`);
-      if (!proceed) return { ok:false, error: "Cancelled by user" };
-    }
-    setSyncStatus("syncing");
-    const cfg = getSbConfig();
-    const device = cfg.device || "unknown";
-    const now = new Date().toISOString();
-    try {
-      // v54: log sizes so user can see what's being pushed
-      const payload = {
-        players, goalies, matchups, advancement,
-        series: allSeries, globals, margins, bracket,
-      };
-      const sizes = {};
-      for (const [k,v] of Object.entries(payload)) {
-        try { sizes[k] = JSON.stringify(v).length; } catch { sizes[k] = -1; }
-      }
-      console.log("[CloudPush] sizes (bytes):", sizes);
-      const results = await Promise.all([
-        sbSave("players", players, device),
-        sbSave("goalies", goalies, device),
-        sbSave("matchups", matchups, device),
-        sbSave("advancement", advancement, device),
-        sbSave("series", allSeries, device),
-        sbSave("globals", globals, device),
-        sbSave("margins", margins, device),
-        sbSave("bracket", bracket, device),
-        sbSave("_meta", {updated_at: now, device, sizes}, device),
-      ]);
-      const keyNames = ["players","goalies","matchups","advancement","series","globals","margins","bracket","_meta"];
-      const failedKeys = results.map((ok,i)=>ok?null:keyNames[i]).filter(Boolean);
-      const allOk = failedKeys.length === 0;
-      if (allOk) {
-        setLastPushedAt(now);
-        setCloudInfo({updated_at: now, device});
-        try { localStorage.setItem("nhl_last_pushed_at", now); } catch {}
-        setSyncStatus("ok");
-        return { ok:true, at: now, sizes };
-      } else {
-        setSyncStatus("err");
-        return { ok:false, error:`Failed keys: ${failedKeys.join(", ")}` };
-      }
-    } catch (e) {
-      setSyncStatus("err");
-      return { ok:false, error: e.message };
-    }
-  }
-
-  // v54: Verify — fetch all cloud keys and report sizes + sample content (no state overwrite).
-  // Lets user see exactly what's in cloud without risking local overwrite.
-  async function doVerify(){
-    if (!isSbEnabled()) return { ok:false, error: "Cloud Sync not configured" };
-    setSyncStatus("syncing");
-    try {
-      const keys = ["players","goalies","matchups","advancement","series","globals","margins","bracket","_meta"];
-      const recs = await Promise.all(keys.map(k => sbLoad(k)));
-      const report = {};
-      for (let i = 0; i < keys.length; i++) {
-        const k = keys[i];
-        const r = recs[i];
-        if (!r) { report[k] = "MISSING"; continue; }
-        const v = r.value;
-        let desc;
-        if (Array.isArray(v)) desc = `array len=${v.length}`;
-        else if (v && typeof v === "object") desc = `object keys=${Object.keys(v).length} [${Object.keys(v).slice(0,5).join(",")}${Object.keys(v).length>5?"...":""}]`;
-        else desc = `${typeof v}`;
-        const size = (()=>{try { return JSON.stringify(v).length; } catch { return -1; }})();
-        report[k] = `${desc}, ${size} bytes, pushed ${r.updated_at} from ${r.device||"?"}`;
-      }
-      setSyncStatus("ok");
-      return { ok:true, report };
-    } catch (e) {
-      setSyncStatus("err");
-      return { ok:false, error: e.message };
-    }
-  }
-
-  // v52: Pull — overwrite all local state with cloud copies
-  async function doPull(){
-    if (!isSbEnabled()) return { ok:false, error: "Cloud Sync not configured" };
-    setSyncStatus("syncing");
-    try {
-      const [pRec,gRec,mRec,aRec,sRec,glRec,mgRec,brRec,mtRec] = await Promise.all([
-        sbLoad("players"), sbLoad("goalies"), sbLoad("matchups"),
-        sbLoad("advancement"), sbLoad("series"),
-        sbLoad("globals"), sbLoad("margins"), sbLoad("bracket"),
-        sbLoad("_meta"),
-      ]);
-      // v54: diagnostic report — which keys populated, sizes
-      const diag = {};
-      const tag = (k, rec, v) => {
-        if (!rec) { diag[k] = "cloud row missing"; return; }
-        if (v == null) { diag[k] = "value null"; return; }
-        if (Array.isArray(v)) diag[k] = `array len=${v.length}`;
-        else if (typeof v === "object") diag[k] = `obj keys=${Object.keys(v).length}`;
-        else diag[k] = typeof v;
-      };
-      tag("players", pRec, pRec?.value);
-      tag("goalies", gRec, gRec?.value);
-      tag("matchups", mRec, mRec?.value);
-      tag("advancement", aRec, aRec?.value);
-      tag("series", sRec, sRec?.value);
-      tag("globals", glRec, glRec?.value);
-      tag("margins", mgRec, mgRec?.value);
-      tag("bracket", brRec, brRec?.value);
-      console.log("[CloudPull] payload:", diag);
-      if (pRec?.value) setPlayers(pRec.value);
-      if (gRec?.value) setGoalies(gRec.value);
-      if (mRec?.value) setMatchups(migrateMatchups(mRec.value));
-      if (aRec?.value) setAdvancement(aRec.value);
-      if (sRec?.value) setAllSeries(migrateSeries(sRec.value));
-      if (glRec?.value) setGlobals(glRec.value);
-      if (mgRec?.value) setMargins(mgRec.value);
-      if (brRec?.value) setBracket(brRec.value);
-      const now = new Date().toISOString();
-      setLastPulledAt(now);
-      try { localStorage.setItem("nhl_last_pulled_at", now); } catch {}
-      if (mtRec?.value) setCloudInfo({updated_at: mtRec.value.updated_at, device: mtRec.value.device});
-      setSyncStatus("ok");
-      return { ok:true, at: now, cloudAt: mtRec?.value?.updated_at, device: mtRec?.value?.device, diag };
-    } catch (e) {
-      setSyncStatus("err");
-      return { ok:false, error: e.message };
-    }
-  }
-
-  const teamExpGR1 = useMemo(()=>{
-    const m={};
-    for(const x of (matchups.r1||[])){if(x.homeAbbr)m[x.homeAbbr]=(m[x.homeAbbr]||0)+x.expGames;if(x.awayAbbr)m[x.awayAbbr]=(m[x.awayAbbr]||0)+x.expGames;}
-    return m;
-  },[matchups.r1]);
-
-  // v38: helper to compute one series' (hwp, awp) from sim cache or closed-form.
-  // Round-aware: sim cache key now includes round prefix.
-  // v39: clinch detection — if a team has 4 wins in realized results, return 1.0/0.0 immediately.
-  //      Also use closed-form (which always reflects current realized state) when sim cache is stale.
-  function seriesWinProbs(sr, roundId) {
-    if (!sr || !sr.homeAbbr || !sr.awayAbbr) return null;
-    // Clinch check first — overrides everything
-    if (sr.games && sr.games.length) {
-      let hw=0, aw=0;
-      for (const g of sr.games) {
-        if (g.result === "home") hw++;
-        else if (g.result === "away") aw++;
-      }
-      if (hw >= 4) return { hwp: 1, awp: 0 };
-      if (aw >= 4) return { hwp: 0, awp: 1 };
-    }
-    // Try sim cache. Check freshness against current effG: if cache key doesn't match the
-    // current games array, the sim is stale and closed-form is more trustworthy.
-    const seriesKey = roundId + "|" + sr.homeAbbr + "|" + sr.awayAbbr;
-    const cached = (simResultsBySeries||{})[seriesKey] || (roundId === "r1" ? (simResultsBySeries||{})[sr.homeAbbr + "|" + sr.awayAbbr] : null);
-    if (cached && cached.result && cached.result.winnerProb && cached.key) {
-      // Freshness: cached.key looks like "${effKeyAtSimTime}|${roundId}|${homeAbbr}|${awayAbbr}".
-      // We can build a current effKey-equivalent for comparison:
-      const currentEffKey = JSON.stringify(sr.games || []) + "|" + seriesKey;
-      // If cached key matches what we'd compute now, sim is current; use it.
-      // (Loose check — the effKey in SeriesTab includes more state, but for routing winner probs
-      // close enough since clinch already handled above.)
-      if (cached.key.includes(JSON.stringify(sr.games || []))) {
-        return { hwp: cached.result.winnerProb.H, awp: cached.result.winnerProb.A };
-      }
-    }
-    // Closed-form fallback (always reflects realized state)
-    if (sr.games && sr.games.length) {
-      const games = sr.games.map(g => ({...g, winPct: g.winPct ?? 0.5}));
-      try {
-        const outcomes = computeOutcomes(games);
-        const hwp = ["4-0","4-1","4-2","4-3"].reduce((a,k)=>a+(outcomes[k]||0), 0);
-        return { hwp, awp: 1 - hwp };
-      } catch { return null; }
-    }
-    return null;
-  }
-
-  // v38: P(team wins R1) — direct from R1 series.
-  const autoR1ByTeam = useMemo(()=>{
-    const out = {};
-    for (const sr of ((allSeries.r1)||[])) {
-      const wp = seriesWinProbs(sr, "r1");
-      if (wp != null) {
-        out[sr.homeAbbr] = wp.hwp;
-        out[sr.awayAbbr] = wp.awp;
-      }
-    }
-    return out;
-  }, [allSeries.r1, simResultsBySeries]);
-
-  // v38: For each team, compute P(team in R2 series i) and P(team wins R2 | in series i).
-  // Then sum: P(team wins R2) = Σ_i P(team in series i) × P(team wins series i | in it).
-  // For "in series i": team needs to win their R1 series. Series i in R2 is fed by bracket.r2pairs[i] = [r1A, r1B].
-  // P(team is in r2 series i) = P(team wins one of those R1 series).
-  // P(team wins r2 series i | in it) = avg over R1 opponents weighted by their R1 win prob.
-  // Opponent in r2 = winner of the OTHER r1 series in the pair.
-  const autoConfByTeam = useMemo(()=>{
-    // First, build R1 winner distributions per series: r1Winners[seriesIdx] = { teamAbbr: prob }
-    const r1Winners = (allSeries.r1||[]).map((sr, i) => {
-      const wp = seriesWinProbs(sr, "r1");
-      if (!wp || !sr.homeAbbr || !sr.awayAbbr) return {};
-      return { [sr.homeAbbr]: wp.hwp, [sr.awayAbbr]: wp.awp };
-    });
-    // Now build R2 series pairings: r2 series i is fed by r1 series indexes bracket.r2pairs[i]
-    // For each team, for each r2 series i, P(team is in it) and P(team wins it).
-    // P(team in r2 series i) = P(team wins their r1 series IF that series is in the r2 pair) summed over the two source series.
-    // P(team wins r2 series i | in it) — needs an estimate. Cleanest pre-matchup:
-    //   - If user has set up an r2 series (sr.homeAbbr/awayAbbr filled), use the actual sim/closed-form.
-    //   - Otherwise, fallback to xG-strength matchup vs each potential r2 opponent.
-    const out = {};
-    for (let r2Idx = 0; r2Idx < (bracket.r2pairs||[]).length; r2Idx++) {
-      const [r1IdxA, r1IdxB] = bracket.r2pairs[r2Idx];
-      const winnersA = r1Winners[r1IdxA] || {};
-      const winnersB = r1Winners[r1IdxB] || {};
-      const r2Series = (allSeries.r2||[])[r2Idx];
-      const r2WP = r2Series ? seriesWinProbs(r2Series, "r2") : null;
-      // For each candidate team (winner of A): they would face winner of B.
-      for (const [teamA, pA] of Object.entries(winnersA)) {
-        for (const [teamB, pB] of Object.entries(winnersB)) {
-          const pInR2 = pA * pB; // both must win to face each other
-          let pWinThisR2;
-          if (r2WP && r2Series.homeAbbr === teamA) pWinThisR2 = r2WP.hwp;
-          else if (r2WP && r2Series.awayAbbr === teamA) pWinThisR2 = r2WP.awp;
-          else if (r2WP && r2Series.homeAbbr === teamB) pWinThisR2 = r2WP.awp;
-          else if (r2WP && r2Series.awayAbbr === teamB) pWinThisR2 = r2WP.hwp;
-          else {
-            // Fall back to xG-strength matchup
-            const sA = computeTeamStrength(players, teamA);
-            const sB = computeTeamStrength(players, teamB);
-            pWinThisR2 = winProbFromStrength(sA, sB, 0, 1.0);
-            if (pWinThisR2 == null) pWinThisR2 = 0.5;
-          }
-          out[teamA] = (out[teamA] || 0) + pInR2 * pWinThisR2;
-          // And the inverse: team B winning vs team A
-          const pWinForB = 1 - pWinThisR2;
-          out[teamB] = (out[teamB] || 0) + pInR2 * pWinForB;
-        }
-      }
-    }
-    return out;
-  }, [allSeries.r1, allSeries.r2, simResultsBySeries, bracket, players]);
-
-  // v38: P(team wins Cup) = P(team wins Conf) × P(team wins F | in it).
-  // Conf final pairing = bracket.r3pairs / fpair chains. Cleanest approximation:
-  //   - For each team: P(in F) = P(wins R1) × P(wins R2 | in R1 winner pool) × P(wins R3 | in R2 winner pool)
-  //   - Build via convolution over bracket structure.
-  // For now we approximate Conf-winner = winning your conference (both r3 series), and Cup = winning both Conf and Final.
-  // Skip fully chained F sim — use xG-strength head-to-head once both conf champs are determined.
-  const autoCupByTeam = useMemo(()=>{
-    // P(team makes conference final) ≈ P(wins R2 chain) — already in autoConfByTeam IF we interpret it that way.
-    // But autoConfByTeam is "P(wins R2)" not "P(wins Conf)". To get Conf, need to chain R2 winners through R3.
-    // For each R3 series (= conference final): bracket.r3pairs[i] = [r2IdxA, r2IdxB].
-    // P(team wins R3 series i) = sum over (teamX from r2A, teamY from r2B) of P(both there) × P(team beats opponent).
-    // But P(team in r2A as winner) is not in autoConfByTeam directly — it's P(wins R2) summed across all R2 series.
-    // Need per-R2-series winner probabilities.
-    const r1Winners = (allSeries.r1||[]).map((sr) => {
-      const wp = seriesWinProbs(sr, "r1");
-      if (!wp || !sr.homeAbbr || !sr.awayAbbr) return {};
-      return { [sr.homeAbbr]: wp.hwp, [sr.awayAbbr]: wp.awp };
-    });
-    // r2WinnerByR2Series[i] = { team: prob_wins_r2_series_i }
-    const r2WinnerByR2Series = (bracket.r2pairs||[]).map((pair, r2Idx) => {
-      const [a, b] = pair;
-      const wA = r1Winners[a] || {}, wB = r1Winners[b] || {};
-      const r2Series = (allSeries.r2||[])[r2Idx];
-      const r2WP = r2Series ? seriesWinProbs(r2Series, "r2") : null;
-      const dist = {};
-      for (const [tA, pA] of Object.entries(wA)) {
-        for (const [tB, pB] of Object.entries(wB)) {
-          const pBothThere = pA * pB;
-          let pAWins;
-          if (r2WP && r2Series.homeAbbr === tA) pAWins = r2WP.hwp;
-          else if (r2WP && r2Series.awayAbbr === tA) pAWins = r2WP.awp;
-          else {
-            const sA = computeTeamStrength(players, tA);
-            const sB = computeTeamStrength(players, tB);
-            pAWins = winProbFromStrength(sA, sB, 0, 1.0);
-            if (pAWins == null) pAWins = 0.5;
-          }
-          dist[tA] = (dist[tA] || 0) + pBothThere * pAWins;
-          dist[tB] = (dist[tB] || 0) + pBothThere * (1 - pAWins);
-        }
-      }
-      return dist;
-    });
-    // r3WinnerByR3Series[i] = { team: prob } — conference champ
-    const r3WinnerByR3Series = (bracket.r3pairs||[]).map((pair, r3Idx) => {
-      const [a, b] = pair;
-      const wA = r2WinnerByR2Series[a] || {}, wB = r2WinnerByR2Series[b] || {};
-      const r3Series = (allSeries.r3||[])[r3Idx];
-      const r3WP = r3Series ? seriesWinProbs(r3Series, "r3") : null;
-      const dist = {};
-      for (const [tA, pA] of Object.entries(wA)) {
-        for (const [tB, pB] of Object.entries(wB)) {
-          const pBothThere = pA * pB;
-          let pAWins;
-          if (r3WP && r3Series.homeAbbr === tA) pAWins = r3WP.hwp;
-          else if (r3WP && r3Series.awayAbbr === tA) pAWins = r3WP.awp;
-          else {
-            const sA = computeTeamStrength(players, tA);
-            const sB = computeTeamStrength(players, tB);
-            pAWins = winProbFromStrength(sA, sB, 0, 1.0);
-            if (pAWins == null) pAWins = 0.5;
-          }
-          dist[tA] = (dist[tA] || 0) + pBothThere * pAWins;
-          dist[tB] = (dist[tB] || 0) + pBothThere * (1 - pAWins);
-        }
-      }
-      return dist;
-    });
-    // Final (Cup): bracket.fpair = [r3IdxA, r3IdxB]
-    const cupDist = {};
-    if (bracket.fpair && bracket.fpair.length === 2) {
-      const [a, b] = bracket.fpair;
-      const wA = r3WinnerByR3Series[a] || {}, wB = r3WinnerByR3Series[b] || {};
-      const fSeries = (allSeries.f||[])[0];
-      const fWP = fSeries ? seriesWinProbs(fSeries, "f") : null;
-      for (const [tA, pA] of Object.entries(wA)) {
-        for (const [tB, pB] of Object.entries(wB)) {
-          const pBothThere = pA * pB;
-          let pAWins;
-          if (fWP && fSeries.homeAbbr === tA) pAWins = fWP.hwp;
-          else if (fWP && fSeries.awayAbbr === tA) pAWins = fWP.awp;
-          else {
-            const sA = computeTeamStrength(players, tA);
-            const sB = computeTeamStrength(players, tB);
-            pAWins = winProbFromStrength(sA, sB, 0, 1.0);
-            if (pAWins == null) pAWins = 0.5;
-          }
-          cupDist[tA] = (cupDist[tA] || 0) + pBothThere * pAWins;
-          cupDist[tB] = (cupDist[tB] || 0) + pBothThere * (1 - pAWins);
-        }
-      }
-    }
-    // Conference winners = sum over r3 series (a team appears in only one)
-    const confDist = {};
-    for (const dist of r3WinnerByR3Series) {
-      for (const [t, p] of Object.entries(dist)) confDist[t] = (confDist[t] || 0) + p;
-    }
-    // v46: P(team wins R2) = P(makes R3) — needed for correct expected-games calc.
-    const r2Dist = {};
-    for (const dist of r2WinnerByR2Series) {
-      for (const [t, p] of Object.entries(dist)) r2Dist[t] = (r2Dist[t] || 0) + p;
-    }
-    return { conf: confDist, cup: cupDist, r2: r2Dist };
-  }, [allSeries, simResultsBySeries, bracket, players]);
-
-  const autoConfByTeamFinal = autoCupByTeam.conf;
-  const autoCupByTeamFinal = autoCupByTeam.cup;
-  const autoR2ByTeam = autoCupByTeam.r2;
-
-  const computeLambda = useCallback((p,stat,scope)=>{
-    const rm=roleMultiplier(p.lineRole, stat);
-    if(rm===0)return {actual:0,futureLam:0.0001,lam:0.0001};
-    // stat key mapping: tsa->tsa_pg, give->give_pg, tk->take_pg, else stat_pg
-    const pgKey=stat==="tk"?"take_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
-    // v13: shrink rate with Bayesian prior for <20 GP (shrinkRate handles threshold internally)
-    const shrunk = shrinkRate(p[pgKey], p.gp, stat);
-    // v21: stat-category rate adjustment (scoring = raw discount; physical stats go up; neutral stats mild up)
-    const rr = shrunk * rm * globals.rateDiscount * statRateMultiplier(stat);
-    let expTotal,actualGP;
-    if(scope==="r1"){expTotal=teamExpGR1[p.team]||5.82;actualGP=p.pGP||0;}
-    else{
-      const adv=advancement[p.team]||{winR1:0.5,winConf:0.25,winCup:0.1,manualR1:false,manualConf:false,manualCup:false};
-      // v40: respect per-field manual override flag — if set, use stored value; else use auto.
-      const r1 = (autoR1ByTeam[p.team] != null && !adv.manualR1) ? autoR1ByTeam[p.team] : adv.winR1;
-      const conf = ((autoConfByTeamFinal||{})[p.team] != null && !adv.manualConf) ? autoConfByTeamFinal[p.team] : adv.winConf;
-      const cup = ((autoCupByTeamFinal||{})[p.team] != null && !adv.manualCup) ? autoCupByTeamFinal[p.team] : adv.winCup;
-      // v46: E[games] = GPR × (P(plays R1) + P(plays R2) + P(plays R3) + P(plays F))
-      //              = GPR × (1 + P(wins R1) + P(wins R2) + P(wins R3))
-      // P(wins R1) = r1; P(wins R3) = conf (= P(makes F)); P(wins Cup) = cup.
-      // P(wins R2) = P(makes R3): use autoR2ByTeam if available, else interpolate between r1 and conf.
-      const autoR2 = (autoR2ByTeam||{})[p.team];
-      const r2 = (autoR2 != null && !adv.manualConf) ? autoR2 : Math.sqrt(Math.max(0, r1 * conf));
-      expTotal=5.82*(1 + r1 + r2 + conf);
-      actualGP=p.pGP||0;
-    }
-    const actual = readActual(p, stat);
-    const futureLam = Math.max(0.0001, rr * Math.max(0, expTotal - actualGP));
-    const lam = Math.max(0.0001, actual + futureLam);
-    return {actual, futureLam, lam};
-  },[globals.rateDiscount,teamExpGR1,advancement,autoR1ByTeam,autoConfByTeamFinal,autoCupByTeamFinal,autoR2ByTeam]);
-
-  // v24 Phase E Pt3: Per-matchup series sims. Cached by matchups + globals + players.
-  // Stat-independent — running all 9 stats per sim gives us PMFs for every leader market.
-  const r1MatchupSims = useMemo(()=>{
-    if (tab !== "leaders") return null;
-    if (lScope !== "r1") return null;
-    if (!players || !players.length) return null;
-    const activeMatchups = (matchups.r1 || []).filter(m => m.homeAbbr && m.awayAbbr);
-    if (!activeMatchups.length) return null;
-    const r = globals.dispersion;
-    const HOME_IS_MATCHUP_HOME = [true,true,true,false,false,true,false,true];
-    const pGamePlayedCache = [null,1,1,1,1,1,1,1];
-    return activeMatchups.map((m, mi) => {
-      const wp = m.homeWinPct ?? 0.55;
-      const tot = m.expTotal ?? 5.5;
-      const effG = [];
-      const hw = m.homeWins || 0;
-      const aw = m.awayWins || 0;
-      let homeWinsRemaining = hw, awayWinsRemaining = aw;
-      for (let gi = 0; gi < 7; gi++) {
-        const isHomeGame = HOME_IS_MATCHUP_HOME[gi+1];
-        const gameWinPct = isHomeGame ? wp : (1 - wp);
-        let result = null, homeScore = null, awayScore = null, wentOT = false;
-        if (homeWinsRemaining > 0) { result = "home"; homeScore = 3; awayScore = 2; homeWinsRemaining--; }
-        else if (awayWinsRemaining > 0) { result = "away"; homeScore = 2; awayScore = 3; awayWinsRemaining--; }
-        effG.push({gameNum:gi+1, winPct: gameWinPct, expTotal: tot, pOT: 0.22, result, homeScore, awayScore, wentOT, homeGoalie:null, awayGoalie:null});
-      }
-      const goalieQualityFaced = effG.map(()=>({faceByHome:1.0, faceByAway:1.0}));
-      const inputs = buildSimInputs(effG, m.homeAbbr, m.awayAbbr, players, globals, goalieQualityFaced, pGamePlayedCache);
-      if (!inputs.pool.length) return null;
-      return simulateSeries(inputs, r, 5000, 70001 + mi);
-    }).filter(x => x);
-  }, [tab, lScope, players, matchups, globals]);
-
-  // Aggregate across matchups for the currently-selected stat. Fast (5-200ms).
-  const r1LeaderMarket = useMemo(()=>{
-    if (!r1MatchupSims || !r1MatchupSims.length) return null;
-    const or = globals.overroundR1;
-    const pf = globals.powerFactor;
-    const flat = [];
-    for (const sim of r1MatchupSims) {
-      for (let i = 0; i < sim.pool.length; i++) {
-        const p = sim.pool[i];
-        let pmf;
-        if (lStat === "pts") {
-          const g = sim.playerPMF[i].g;
-          const a = sim.playerPMF[i].a;
-          const maxK = g.length + a.length - 2;
-          pmf = convolve(g, a, maxK);
-        } else {
-          pmf = sim.playerPMF[i][lStat];
-        }
-        if (!pmf) continue;
-        let mean = 0; for (let k = 0; k < pmf.length; k++) mean += k * pmf[k];
-        flat.push({name: p.name, team: p.team, pmf, lambda: mean});
-      }
-    }
-    const raw = flat.length ? simulateLeaderFromPMFs(flat.map(f=>f.pmf), 20000, 88001) : [];
-    const adj = applyLeaderOverround(raw, pf, or);
-    const pMap = new Map(players.map(p => [p.name+"|"+p.team, p]));
-    return flat.map((f,i) => {
-      const meta = pMap.get(f.name+"|"+f.team) || {};
-      return {...meta, name: f.name, team: f.team, lambda: f.lambda, futureLam: 0, actualStat: 0, trueProb: raw[i], adjProb: adj[i]};
-    }).sort((a,b)=>b.adjProb-a.adjProb).slice(0, lTopN);
-  }, [r1MatchupSims, lStat, lTopN, globals.overroundR1, globals.powerFactor, players]);
-
-  const leaderMarket = useMemo(()=>{
-    if(!players||!players.length)return[];
-    // v24 Phase E Pt3: prefer unified R1 market when in R1 scope and it's computable
-    if (lScope === "r1" && r1LeaderMarket) return r1LeaderMarket;
-    const or=lScope==="r1"?globals.overroundR1:globals.overroundFull;
-    const pf=globals.powerFactor;
-    const r = globals.dispersion;
-    let pool=players.filter(p=>roleMultiplier(p.lineRole)>0);
-    if(lScope==="r1"){const r1m=matchups.r1||[];const active=new Set([...r1m.filter(m=>m.homeAbbr).map(m=>m.homeAbbr),...r1m.filter(m=>m.awayAbbr).map(m=>m.awayAbbr)]);if(active.size>0)pool=pool.filter(p=>active.has(p.team));}
-    // v43: Full Playoff scope must also filter to playoff teams. Bug: previously included all players,
-    // so non-playoff teams (MTL, etc.) got default 50/25/10 advancement → ~10 expected playoff games each →
-    // Caufield-style false favourites. Build active set from any series in any round of allSeries.
-    if(lScope==="full"){
-      const active = new Set();
-      for (const r of ROUND_IDS) {
-        for (const sr of (allSeries[r]||[])) {
-          if (sr.homeAbbr) active.add(sr.homeAbbr);
-          if (sr.awayAbbr) active.add(sr.awayAbbr);
-        }
-      }
-      // Also fold in matchups.r1 in case user populated those instead of allSeries.r1
-      for (const m of (matchups.r1||[])) {
-        if (m.homeAbbr) active.add(m.homeAbbr);
-        if (m.awayAbbr) active.add(m.awayAbbr);
-      }
-      if (active.size > 0) pool = pool.filter(p=>active.has(p.team));
-    }
-    // v24: Monte Carlo leader probabilities. Handles ties correctly + uses NB dispersion consistent with props.
-    const computed = pool.map(p=>computeLambda(p,lStat,lScope));
-    const entries = computed.map(c=>({futureLam:c.futureLam, actual:c.actual}));
-    const raw = entries.length ? simulateLeader(entries, r, 10000, 12345) : [];
-    const adj = applyLeaderOverround(raw, pf, or);
-    return pool.map((p,i)=>({...p,lambda:computed[i].lam,futureLam:computed[i].futureLam,actualStat:computed[i].actual,trueProb:raw[i],adjProb:adj[i]})).sort((a,b)=>b.adjProb-a.adjProb).slice(0,lTopN);
-  },[players,lStat,lScope,globals,computeLambda,matchups,advancement,lTopN,r1LeaderMarket,allSeries]);
-
-  function exportState(){const s={players,goalies,matchups,allSeries,advancement,globals,margins,bracket};return JSON.stringify(s,null,2);}
-  function importState(text){try{const s=JSON.parse(text);if(s.players){setPlayers(s.players);scheduleSync("players",s.players);}if(s.goalies){setGoalies(s.goalies);scheduleSync("goalies",s.goalies);}if(s.matchups){setMatchups(migrateMatchups(s.matchups));}if(s.allSeries){setAllSeries(migrateSeries(s.allSeries));}if(s.advancement){setAdvancement(s.advancement);}if(s.globals)setGlobals(s.globals);if(s.margins)setMargins(s.margins);if(s.bracket)setBracket(s.bracket);return{ok:true};}catch(e){return{ok:false,error:e.message};}}
-
-  const STATS=[
-    {id:"g",label:"Goals"},{id:"a",label:"Assists"},{id:"pts",label:"Points"},
-    {id:"sog",label:"SOG"},{id:"hit",label:"Hits"},{id:"blk",label:"Blocks"},
-    {id:"tk",label:"TK"},{id:"give",label:"GV"},
-  ];
-  const NAV=[{id:"leaders",l:"Leader Markets"},{id:"series",l:"Series Pricer"},{id:"compare",l:"Line Compare"},{id:"upload",l:"Upload Stats"},{id:"stats",l:"Player Stats"},{id:"roles",l:"Roles"},{id:"settings",l:"Settings"}];
-  const [gameModal,setGameModal] = useState(null);
-
-  return (
-    <div style={{minHeight:"100vh",fontFamily:"var(--font-sans)",background:dark?"#0d0f1a":"#f1f3f7",color:dark?"#e2e8f0":"#1a202c"}}>
-      <div style={{position:"sticky",top:0,zIndex:100,background:dark?"#131625":"#fff",
-        borderBottom:`0.5px solid ${dark?"#1e2235":"#e2e8f0"}`,display:"flex",alignItems:"center",padding:"0 20px",height:50}}>
-        <span style={{fontWeight:500,fontSize:13,letterSpacing:"0.1em",marginRight:24,color:dark?"#60a5fa":"#1d4ed8",flexShrink:0}}>NHL PRICER</span>
-        {NAV.map(t=><button key={t.id} onClick={()=>setTab(t.id)} style={{
-          padding:"0 14px",height:50,fontSize:12,fontWeight:tab===t.id?500:400,background:"transparent",border:"none",cursor:"pointer",
-          borderBottom:tab===t.id?"2px solid #3b82f6":"2px solid transparent",
-          color:tab===t.id?(dark?"#93c5fd":"#2563eb"):(dark?"#64748b":"#6b7280"),whiteSpace:"nowrap"}}>{t.l}</button>)}
-        <div style={{marginLeft:"auto",display:"flex",gap:12,alignItems:"center",flexShrink:0}}>
-          <button onClick={()=>setGameModal({seriesIdx:0,gameIdx:0})} style={{
-            padding:"5px 12px",fontSize:11,borderRadius:"var(--border-radius-md)",cursor:"pointer",fontWeight:500,
-            background:"#10b981",color:"white",border:"none",letterSpacing:"0.02em"}}>+ Enter Game</button>
-          <SyncBadge status={syncStatus}/>
-          {players&&<span style={{fontSize:10,color:"var(--color-text-tertiary)"}}>{players.length}p</span>}
-          <Toggle label="Light" checked={!dark} onChange={v=>setDark(!v)}/>
-        </div>
-      </div>
-
-      <div style={{maxWidth:1440,margin:"0 auto",padding:"20px"}}>
-        {tab==="leaders"&&<LeadersTab players={players} setPlayers={setP} matchups={matchupsForRound} setMatchups={setMatchupsForRound}
-          advancement={advancement} setAdvancement={setAdv} globals={globals} setGlobals={setGlobals}
-          leaderMarket={leaderMarket} STATS={STATS} lStat={lStat} setLStat={setLStat}
-          lScope={lScope} setLScope={setLScope} lTopN={lTopN} setLTopN={setLTopN}
-          showTrue={showTrue} setShowTrue={setShowTrue} showDec={showDec} dark={dark}
-          allSeries={seriesForRound} simResultsBySeries={simResultsBySeries}
-          autoR1ByTeam={autoR1ByTeam} autoConfByTeam={autoConfByTeamFinal} autoCupByTeam={autoCupByTeamFinal}
-          currentRound={currentRound} setCurrentRound={setCurrentRound}/>}
-        {tab==="series"&&<SeriesTab allSeries={seriesForRound} setAllSeries={setSeriesForRound}
-          players={players} goalies={goalies} margins={margins} setMargins={setMargins}
-          globals={globals} showTrue={showTrue} dark={dark} onEnterGame={setGameModal}
-          gameUploadCounter={gameUploadCounter}
-          simResultsBySeries={simResultsBySeries} setSimForSeries={setSimForSeries}
-          currentRound={currentRound} setCurrentRound={setCurrentRound}/>}
-        {tab==="upload"&&<UploadTab players={players} setPlayers={setP} goalies={goalies} setGoalies={setG}
-          exportState={exportState} importState={importState} syncStatus={syncStatus}
-          allSeries={seriesForRound} setAllSeries={setSeriesForRound} dark={dark}
-          onGameUploaded={bumpGameUpload} currentRound={currentRound}/>}
-        {tab==="compare"&&<CompareTab leaderMarket={leaderMarket} STATS={STATS} lStat={lStat} setLStat={setLStat} lScope={lScope} setLScope={setLScope} dark={dark}/>}
-        {tab==="stats"&&<PlayerStatsTab players={players} setPlayers={setP} dark={dark}/>}
-        {tab==="roles"&&<RolesTab players={players} setPlayers={setP} dark={dark}/>}
-        {tab==="settings"&&<SettingsTab globals={globals} setGlobals={setGlobals}
-          margins={margins} setMargins={setMargins}
-          showTrue={showTrue} setShowTrue={setShowTrue} showDec={showDec} setShowDec={setShowDec}
-          doPush={doPush} doPull={doPull} doVerify={doVerify}
-          lastPushedAt={lastPushedAt} lastPulledAt={lastPulledAt}
-          cloudInfo={cloudInfo} syncStatus={syncStatus}
-          dark={dark}/>}
-      </div>
-
-      {gameModal!==null&&<GameEntryModal
-        dark={dark}
-        allSeries={seriesForRound}
-        players={players}
-        goalies={goalies}
-        initialSeriesIdx={gameModal.seriesIdx}
-        initialGameIdx={gameModal.gameIdx}
-        onClose={()=>setGameModal(null)}
-        onCommit={(seriesIdx,gameIdx,result,homeScore,awayScore,playerDeltas,goalieDeltas)=>{
-          // 1. Update series game result (round-aware)
-          setSeriesForRound(prev=>{
-            const u=[...prev];
-            const games=[...u[seriesIdx].games];
-            games[gameIdx]={...games[gameIdx],result,homeScore,awayScore};
-            u[seriesIdx]={...u[seriesIdx],games};
-            return u;
-          });
-          // 2. Update player cumulative playoff stats
-          if(playerDeltas.length&&players){
-            setP(prev=>prev.map(p=>{
-              const d=playerDeltas.find(x=>x.name===p.name&&x.team===p.team);
-              if(!d)return p;
-              return{...p,
-                pGP:(p.pGP||0)+1,
-                pG:(p.pG||0)+(d.g||0),
-                pA:(p.pA||0)+(d.a||0),
-                pSOG:(p.pSOG||0)+(d.sog||0),
-                pHIT:(p.pHIT||0)+(d.hit||0),
-                pBLK:(p.pBLK||0)+(d.blk||0),
-              };
-            }));
-          }
-          // 3. Update goalie cumulative saves
-          if(goalieDeltas.length&&goalies){
-            setG(prev=>prev.map(g=>{
-              const d=goalieDeltas.find(x=>x.name===g.name&&x.team===g.team);
-              if(!d)return g;
-              return{...g,pGP:(g.pGP||0)+1,pSaves:(g.pSaves||0)+(d.saves||0)};
-            }));
-          }
-          setGameModal(null);
-        }}
-      />}
-    </div>
-  );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// GAME ENTRY MODAL
-// ═══════════════════════════════════════════════════════════════════════════════
-function GameEntryModal({dark,allSeries,players,goalies,initialSeriesIdx,initialGameIdx,onClose,onCommit}) {
-  const [seriesIdx,setSeriesIdx] = useState(initialSeriesIdx);
-  const [gameIdx,setGameIdx] = useState(initialGameIdx);
-  const [winner,setWinner] = useState(""); // "home"|"away"
-  const [ot,setOt] = useState(false);
-  const [homeScore,setHomeScore] = useState("");
-  const [awayScore,setAwayScore] = useState("");
-  // playerDeltas: { name, team, g, a, sog, hit, blk }
-  const [playerDeltas,setPlayerDeltas] = useState({});
-  // goalieDeltas: { name, team, saves }
-  const [goalieDeltas,setGoalieDeltas] = useState({});
-  const [step,setStep] = useState("game"); // "game" | "skaters" | "goalies" | "review"
-  const [filterTeam,setFilterTeam] = useState("all"); // "all"|homeAbbr|awayAbbr
-  const [search,setSearch] = useState("");
-
-  const s = allSeries[seriesIdx];
-  const gameNum = gameIdx + 1;
-  const homeAbbr = s?.homeAbbr||"";
-  const awayAbbr = s?.awayAbbr||"";
-  const homeName = s?.homeTeam||homeAbbr||"Home";
-  const awayName = s?.awayTeam||awayAbbr||"Away";
-
-  // Pool: skaters from both series teams, not scratched
-  const pool = useMemo(()=>{
-    if(!players||!homeAbbr||!awayAbbr) return [];
-    const teams = new Set([homeAbbr,awayAbbr]);
-    return players.filter(p=>teams.has(p.team)&&p.lineRole!=="SCRATCHED")
-      .sort((a,b)=>a.team.localeCompare(b.team)||b.pts-a.pts);
-  },[players,homeAbbr,awayAbbr]);
-
-  // Goalie pool: both teams, starter share >= 5%
-  const goaliePool = useMemo(()=>{
-    if(!goalies||!homeAbbr||!awayAbbr) return [];
-    const teams = new Set([homeAbbr,awayAbbr]);
-    return goalies.filter(g=>teams.has(g.team)&&g.starter_share>=0.05)
-      .sort((a,b)=>a.team.localeCompare(b.team)||b.starter_share-a.starter_share);
-  },[goalies,homeAbbr,awayAbbr]);
-
-  const displayedPlayers = pool.filter(p=>
-    (filterTeam==="all"||p.team===filterTeam)&&
-    (!search||p.name.toLowerCase().includes(search.toLowerCase()))
-  );
-
-  function setDelta(name,team,field,val){
-    const key=`${name}__${team}`;
-    setPlayerDeltas(prev=>({...prev,[key]:{...(prev[key]||{name,team}),[field]:Math.max(0,parseInt(val)||0)}}));
-  }
-  function getDelta(name,team,field){
-    return playerDeltas[`${name}__${team}`]?.[field]??0;
-  }
-  function setGDelta(name,team,field,val){
-    const key=`${name}__${team}`;
-    setGoalieDeltas(prev=>({...prev,[key]:{...(prev[key]||{name,team}),[field]:Math.max(0,parseInt(val)||0)}}));
-  }
-  function getGDelta(name,team,field){
-    return goalieDeltas[`${name}__${team}`]?.[field]??0;
-  }
-
-  // Quick auto-fill pts from g+a
-  function autoFillPts(name,team){
-    const key=`${name}__${team}`;
-    const d=playerDeltas[key]||{};
-    setPlayerDeltas(prev=>({...prev,[key]:{...d,name,team}}));
-  }
-
-  function handleCommit(){
-    const pDeltas=Object.values(playerDeltas).filter(d=>d.g||d.a||d.sog||d.hit||d.blk);
-    const gDeltas=Object.values(goalieDeltas).filter(d=>d.saves);
-    onCommit(seriesIdx,gameIdx,winner,homeScore,awayScore,pDeltas,gDeltas);
-  }
-
-  const canCommit = winner && (homeScore!==""||awayScore!=="");
-  const totalGoals = Object.values(playerDeltas).reduce((s,d)=>s+(d.g||0),0);
-  const totalSaves = Object.values(goalieDeltas).reduce((s,d)=>s+(d.saves||0),0);
-
-  const STEPS=[{id:"game",l:"Game Result"},{id:"skaters",l:"Skater Stats"},{id:"goalies",l:"Goalie Saves"},{id:"review",l:"Review & Confirm"}];
-
-  const overlay={position:"fixed",inset:0,zIndex:9999,background:"rgba(0,0,0,0.7)",display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"40px 16px",overflowY:"auto"};
-  const modal={background:dark?"#131625":"#fff",border:`0.5px solid ${dark?"#2d3147":"#e2e8f0"}`,borderRadius:"var(--border-radius-lg)",width:"100%",maxWidth:820,padding:"24px",position:"relative"};
-  const inp={padding:"5px 8px",fontSize:12,fontFamily:"var(--font-mono)",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",color:"var(--color-text-primary)",width:"100%",boxSizing:"border-box"};
-  const sm={...inp,width:52,textAlign:"center"};
-
-  return (
-    <div style={overlay} onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
-      <div style={modal}>
-        {/* Header */}
-        <div style={{display:"flex",alignItems:"center",marginBottom:20}}>
-          <div>
-            <div style={{fontSize:14,fontWeight:500,marginBottom:2}}>Enter Game Result</div>
-            <div style={{fontSize:11,color:"var(--color-text-secondary)"}}>Updates series result and player playoff stat totals simultaneously</div>
-          </div>
-          <button onClick={onClose} style={{marginLeft:"auto",padding:"4px 10px",fontSize:12,borderRadius:"var(--border-radius-md)",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",color:"var(--color-text-secondary)",cursor:"pointer"}}>✕ Close</button>
-        </div>
-
-        {/* Step pills */}
-        <div style={{display:"flex",gap:0,borderRadius:"var(--border-radius-md)",overflow:"hidden",border:"0.5px solid var(--color-border-secondary)",marginBottom:20,width:"fit-content"}}>
-          {STEPS.map((st,i)=><button key={st.id} onClick={()=>setStep(st.id)} style={{
-            padding:"6px 14px",fontSize:11,border:"none",borderRight:"0.5px solid var(--color-border-tertiary)",cursor:"pointer",
-            background:step===st.id?"#3b82f6":"var(--color-background-secondary)",
-            color:step===st.id?"white":"var(--color-text-secondary)",fontWeight:step===st.id?500:400}}>
-            {i+1}. {st.l}
-          </button>)}
-        </div>
-
-        {/* ── STEP 1: Game Result ── */}
-        {step==="game"&&<div>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,marginBottom:16}}>
-            <div>
-              <div style={{fontSize:11,color:"var(--color-text-secondary)",marginBottom:6}}>Series</div>
-              <select value={seriesIdx} onChange={e=>{setSeriesIdx(+e.target.value);setGameIdx(0);}} style={{...inp}}>
-                {allSeries.map((sr,i)=><option key={i} value={i}>{sr.homeAbbr&&sr.awayAbbr?`${sr.homeAbbr} vs ${sr.awayAbbr}`:`Series ${i+1}`}</option>)}
-              </select>
-            </div>
-            <div>
-              <div style={{fontSize:11,color:"var(--color-text-secondary)",marginBottom:6}}>Game Number</div>
-              <select value={gameIdx} onChange={e=>setGameIdx(+e.target.value)} style={{...inp}}>
-                {s?.games.map((_,i)=><option key={i} value={i}>Game {i+1}{s.games[i].result?" ✓":""}</option>)}
-              </select>
-            </div>
-          </div>
-
-          <div style={{padding:"12px 14px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",marginBottom:16}}>
-            <div style={{fontSize:10,color:"var(--color-text-tertiary)",marginBottom:8,textTransform:"uppercase",letterSpacing:"0.08em"}}>
-              Game {gameNum} — {HOME_PATTERN[gameNum]?homeName:awayName} hosts
-            </div>
-            <div style={{display:"flex",gap:12,alignItems:"center",flexWrap:"wrap"}}>
-              {/* Winner */}
-              <div>
-                <div style={{fontSize:10,color:"var(--color-text-secondary)",marginBottom:4}}>Winner</div>
-                <div style={{display:"flex",gap:6}}>
-                  {[[homeName,"home"],[awayName,"away"]].map(([n,v])=>(
-                    <button key={v} onClick={()=>setWinner(v)} style={{
-                      padding:"6px 14px",fontSize:12,borderRadius:"var(--border-radius-md)",border:"0.5px solid",cursor:"pointer",fontWeight:winner===v?500:400,
-                      borderColor:winner===v?"#10b981":"var(--color-border-secondary)",
-                      background:winner===v?"rgba(16,185,129,0.15)":"var(--color-background-primary)",
-                      color:winner===v?"#10b981":"var(--color-text-secondary)"}}>
-                      {n}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              {/* Score */}
-              <div>
-                <div style={{fontSize:10,color:"var(--color-text-secondary)",marginBottom:4}}>{homeName} Score</div>
-                <input type="number" min={0} max={20} value={homeScore} onChange={e=>setHomeScore(e.target.value)} style={{...sm}}/>
-              </div>
-              <div style={{alignSelf:"flex-end",paddingBottom:2,color:"var(--color-text-tertiary)",fontSize:14}}>–</div>
-              <div>
-                <div style={{fontSize:10,color:"var(--color-text-secondary)",marginBottom:4}}>{awayName} Score</div>
-                <input type="number" min={0} max={20} value={awayScore} onChange={e=>setAwayScore(e.target.value)} style={{...sm}}/>
-              </div>
-              {/* OT */}
-              <div style={{alignSelf:"flex-end",paddingBottom:4}}>
-                <Toggle label="OT" checked={ot} onChange={setOt}/>
-              </div>
-            </div>
-          </div>
-
-          <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
-            <button onClick={()=>setStep("skaters")} disabled={!winner} style={{
-              padding:"7px 20px",fontSize:12,borderRadius:"var(--border-radius-md)",border:"none",cursor:winner?"pointer":"default",
-              background:winner?"#3b82f6":"var(--color-background-secondary)",color:winner?"white":"var(--color-text-tertiary)"}}>
-              Next: Skater Stats →
-            </button>
-          </div>
-        </div>}
-
-        {/* ── STEP 2: Skater Stats ── */}
-        {step==="skaters"&&<div>
-          <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap",alignItems:"center"}}>
-            <input placeholder="Search player…" value={search} onChange={e=>setSearch(e.target.value)}
-              style={{...inp,width:180}}/>
-            <div style={{display:"flex",borderRadius:"var(--border-radius-md)",overflow:"hidden",border:"0.5px solid var(--color-border-secondary)"}}>
-              {[["all","Both"],homeAbbr?[homeAbbr,homeName]:[null,null],awayAbbr?[awayAbbr,awayName]:[null,null]].filter(x=>x[0]).map(([v,l])=>(
-                <button key={v} onClick={()=>setFilterTeam(v)} style={{
-                  padding:"4px 10px",fontSize:11,border:"none",cursor:"pointer",
-                  background:filterTeam===v?"#1d4ed8":"var(--color-background-secondary)",
-                  color:filterTeam===v?"white":"var(--color-text-secondary)"}}>
-                  {l}
-                </button>
-              ))}
-            </div>
-            <span style={{fontSize:10,color:"var(--color-text-tertiary)",marginLeft:"auto"}}>
-              {Object.keys(playerDeltas).filter(k=>{const d=playerDeltas[k];return d.g||d.a||d.sog||d.hit||d.blk;}).length} players with stats · {totalGoals}G total
-            </span>
-          </div>
-          <div style={{fontSize:10,color:"var(--color-text-tertiary)",marginBottom:8}}>
-            Enter tonight's individual game stats — these are added to each player's cumulative playoff totals. Leave blank for players who didn't dress or had zeros.
-          </div>
-          <div style={{overflowX:"auto",maxHeight:380,overflowY:"auto"}}>
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-              <thead style={{position:"sticky",top:0,background:dark?"#131625":"#fff",zIndex:1}}>
-                <tr style={{borderBottom:"0.5px solid var(--color-border-secondary)"}}>
-                  {["Player","Team","G","A","SOG","HIT","BLK"].map((h,i)=>(
-                    <th key={h} style={{padding:"5px 6px",textAlign:i<2?"left":"center",color:"var(--color-text-secondary)",fontWeight:500,fontSize:10,textTransform:"uppercase"}}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>{displayedPlayers.map((p,i)=>{
-                const hasStats=getDelta(p.name,p.team,"g")||getDelta(p.name,p.team,"a")||getDelta(p.name,p.team,"sog")||getDelta(p.name,p.team,"hit")||getDelta(p.name,p.team,"blk");
-                return (
-                  <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:hasStats?(dark?"rgba(59,130,246,0.06)":"rgba(59,130,246,0.04)"):i%2===0?"transparent":(dark?"rgba(255,255,255,0.015)":"rgba(0,0,0,0.01)")}}>
-                    <td style={{padding:"3px 6px",fontWeight:hasStats?500:400,fontSize:11}}>{p.name}</td>
-                    <td style={{padding:"3px 6px"}}><span style={{fontSize:9,padding:"1px 4px",borderRadius:2,background:"rgba(59,130,246,0.12)",color:"#60a5fa"}}>{p.team}</span></td>
-                    {["g","a","sog","hit","blk"].map(f=>(
-                      <td key={f} style={{padding:"2px 4px",textAlign:"center"}}>
-                        <input type="number" min={0} max={f==="sog"?20:f==="hit"?15:f==="blk"?10:5}
-                          value={getDelta(p.name,p.team,f)||""}
-                          placeholder="0"
-                          onChange={e=>setDelta(p.name,p.team,f,e.target.value)}
-                          style={{width:36,fontSize:11,textAlign:"center",padding:"2px 3px",fontFamily:"var(--font-mono)",
-                            background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
-                            borderRadius:3,color:"var(--color-text-primary)"}}/>
-                      </td>
-                    ))}
-                  </tr>
-                );
-              })}</tbody>
-            </table>
-          </div>
-          <div style={{display:"flex",gap:10,justifyContent:"space-between",marginTop:12}}>
-            <button onClick={()=>setStep("game")} style={{padding:"6px 14px",fontSize:12,borderRadius:"var(--border-radius-md)",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",color:"var(--color-text-secondary)",cursor:"pointer"}}>← Back</button>
-            <button onClick={()=>setStep("goalies")} style={{padding:"7px 20px",fontSize:12,borderRadius:"var(--border-radius-md)",border:"none",cursor:"pointer",background:"#3b82f6",color:"white"}}>Next: Goalie Saves →</button>
-          </div>
-        </div>}
-
-        {/* ── STEP 3: Goalie Saves ── */}
-        {step==="goalies"&&<div>
-          <div style={{fontSize:11,color:"var(--color-text-tertiary)",marginBottom:12}}>
-            Enter saves for tonight's starting goalies. Added to each goalie's cumulative playoff save totals.
-          </div>
-          {!goaliePool.length&&<div style={{color:"var(--color-text-secondary)",fontSize:12,padding:"12px 0"}}>
-            No goalie data — load goalies.csv in the Upload tab to enable this step.
-          </div>}
-          {goaliePool.length>0&&<table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
-            <TH cols={["Goalie","Team","Reg Sv/G","Share","Saves Tonight"]}/>
-            <tbody>{goaliePool.map((g,i)=>(
-              <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.015)":"rgba(0,0,0,0.01)")}}>
-                <td style={{padding:"5px 8px",fontWeight:g.starter_share>0.4?500:400}}>{g.name}</td>
-                <td style={{padding:"5px 8px"}}><span style={{fontSize:9,padding:"1px 4px",borderRadius:2,background:"rgba(124,58,237,0.15)",color:"#a78bfa"}}>{g.team}</span></td>
-                <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{g.saves_pg.toFixed(1)}</td>
-                <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{(g.starter_share*100).toFixed(0)}%</td>
-                <td style={{padding:"3px 8px",textAlign:"center"}}>
-                  <input type="number" min={0} max={60}
-                    value={getGDelta(g.name,g.team,"saves")||""}
-                    placeholder="—"
-                    onChange={e=>setGDelta(g.name,g.team,"saves",e.target.value)}
-                    style={{width:52,fontSize:12,textAlign:"center",padding:"3px 4px",fontFamily:"var(--font-mono)",
-                      background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
-                      borderRadius:3,color:"var(--color-text-primary)"}}/>
-                </td>
-              </tr>
-            ))}</tbody>
-          </table>}
-          <div style={{display:"flex",gap:10,justifyContent:"space-between",marginTop:14}}>
-            <button onClick={()=>setStep("skaters")} style={{padding:"6px 14px",fontSize:12,borderRadius:"var(--border-radius-md)",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",color:"var(--color-text-secondary)",cursor:"pointer"}}>← Back</button>
-            <button onClick={()=>setStep("review")} style={{padding:"7px 20px",fontSize:12,borderRadius:"var(--border-radius-md)",border:"none",cursor:"pointer",background:"#3b82f6",color:"white"}}>Review →</button>
-          </div>
-        </div>}
-
-        {/* ── STEP 4: Review & Confirm ── */}
-        {step==="review"&&<div>
-          {/* Game summary */}
-          <div style={{padding:"10px 14px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",marginBottom:14}}>
-            <div style={{fontSize:10,textTransform:"uppercase",letterSpacing:"0.08em",color:"var(--color-text-tertiary)",marginBottom:6}}>Game Result</div>
-            <div style={{display:"flex",gap:20,alignItems:"center",flexWrap:"wrap"}}>
-              <div style={{fontSize:13,fontWeight:500}}>
-                {homeName} <span style={{fontFamily:"var(--font-mono)",color:"#60a5fa"}}>{homeScore}</span>
-                <span style={{color:"var(--color-text-tertiary)",margin:"0 6px"}}>–</span>
-                <span style={{fontFamily:"var(--font-mono)",color:"#60a5fa"}}>{awayScore}</span> {awayName}
-                {ot&&<span style={{fontSize:10,color:"#f59e0b",marginLeft:6}}>OT</span>}
-              </div>
-              <div style={{fontSize:11,color:"var(--color-text-secondary)"}}>
-                Winner: <strong style={{color:"#10b981"}}>{winner==="home"?homeName:awayName}</strong>
-              </div>
-              <div style={{fontSize:10,color:"var(--color-text-tertiary)"}}>Series G{gameNum} · {homeAbbr||"?"} vs {awayAbbr||"?"}</div>
-            </div>
-          </div>
-
-          {/* Skater summary */}
-          {Object.values(playerDeltas).filter(d=>d.g||d.a||d.sog||d.hit||d.blk).length>0&&<div style={{marginBottom:14}}>
-            <div style={{fontSize:10,textTransform:"uppercase",letterSpacing:"0.08em",color:"var(--color-text-tertiary)",marginBottom:6}}>
-              Skater Stats ({Object.values(playerDeltas).filter(d=>d.g||d.a||d.sog||d.hit||d.blk).length} players · {totalGoals}G)
-            </div>
-            <div style={{maxHeight:200,overflowY:"auto"}}>
-              <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-                <TH cols={["Player","Team","G","A","SOG","HIT","BLK"]}/>
-                <tbody>{Object.values(playerDeltas).filter(d=>d.g||d.a||d.sog||d.hit||d.blk).map((d,i)=>(
-                  <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
-                    <td style={{padding:"3px 8px",fontWeight:500}}>{d.name}</td>
-                    <td style={{padding:"3px 8px"}}><span style={{fontSize:9,padding:"1px 4px",borderRadius:2,background:"rgba(59,130,246,0.12)",color:"#60a5fa"}}>{d.team}</span></td>
-                    {["g","a","sog","hit","blk"].map(f=><td key={f} style={{padding:"3px 8px",textAlign:"center",fontFamily:"var(--font-mono)"}}>{d[f]||0}</td>)}
-                  </tr>
-                ))}</tbody>
-              </table>
-            </div>
-          </div>}
-
-          {/* Goalie summary */}
-          {Object.values(goalieDeltas).filter(d=>d.saves).length>0&&<div style={{marginBottom:14}}>
-            <div style={{fontSize:10,textTransform:"uppercase",letterSpacing:"0.08em",color:"var(--color-text-tertiary)",marginBottom:6}}>
-              Goalie Saves ({totalSaves} total)
-            </div>
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-              <TH cols={["Goalie","Team","Saves"]}/>
-              <tbody>{Object.values(goalieDeltas).filter(d=>d.saves).map((d,i)=>(
-                <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
-                  <td style={{padding:"3px 8px",fontWeight:500}}>{d.name}</td>
-                  <td style={{padding:"3px 8px"}}><span style={{fontSize:9,padding:"1px 4px",borderRadius:2,background:"rgba(124,58,237,0.15)",color:"#a78bfa"}}>{d.team}</span></td>
-                  <td style={{padding:"3px 8px",textAlign:"center",fontFamily:"var(--font-mono)",fontWeight:500}}>{d.saves}</td>
-                </tr>
-              ))}</tbody>
-            </table>
-          </div>}
-
-          <div style={{padding:"8px 12px",background:"rgba(16,185,129,0.08)",border:"0.5px solid rgba(16,185,129,0.25)",borderRadius:"var(--border-radius-md)",fontSize:11,color:"#10b981",marginBottom:14}}>
-            On confirm: series G{gameNum} result updated · {Object.values(playerDeltas).filter(d=>d.g||d.a||d.sog||d.hit||d.blk).length} players' playoff totals incremented · all market prices reprice instantly.
-          </div>
-
-          <div style={{display:"flex",gap:10,justifyContent:"space-between"}}>
-            <button onClick={()=>setStep("goalies")} style={{padding:"6px 14px",fontSize:12,borderRadius:"var(--border-radius-md)",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",color:"var(--color-text-secondary)",cursor:"pointer"}}>← Back</button>
-            <button onClick={handleCommit} disabled={!canCommit} style={{
-              padding:"8px 28px",fontSize:13,fontWeight:500,borderRadius:"var(--border-radius-md)",border:"none",
-              cursor:canCommit?"pointer":"default",
-              background:canCommit?"#10b981":"var(--color-background-secondary)",
-              color:canCommit?"white":"var(--color-text-tertiary)"}}>
-              ✓ Confirm & Update All Markets
-            </button>
-          </div>
-        </div>}
-      </div>
-    </div>
-  );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// LEADERS TAB
-// ═══════════════════════════════════════════════════════════════════════════════
-// v41: number input with local string state — only commits parent on blur or Enter.
-// Fixes the laggy/cursor-jumpy behavior on the advancement table where every keystroke
-// re-rendered the whole 16-team auto-chain.
-function LazyNI({value, onCommit, min, max, step=0.01, style={}, tabIndex, showSpinner=true}) {
-  const [draft, setDraft] = useState(String(value));
-  const [editing, setEditing] = useState(false);
-  // Sync from prop when not actively editing (e.g., AUTO recompute updated the prop)
-  useEffect(()=>{
-    if (!editing) setDraft(String(value));
-  }, [value, editing]);
-  const commit = () => {
-    setEditing(false);
-    const parsed = parseFloat(draft);
-    if (!isNaN(parsed)) {
-      let v = parsed;
-      if (min != null) v = Math.max(min, v);
-      if (max != null) v = Math.min(max, v);
-      onCommit(v);
-      setDraft(String(v));
-    } else {
-      // invalid input — revert
-      setDraft(String(value));
-    }
-  };
-  // v49: stepper increments the current (or draft) value and commits immediately
-  const stepBy = (delta) => {
-    const cur = parseFloat(draft);
-    const base = isNaN(cur) ? (value||0) : cur;
-    let v = base + delta;
-    // Round to step precision to avoid float drift (e.g., 0.1+0.1=0.200000001)
-    const precision = Math.max(0, -Math.floor(Math.log10(Math.abs(step) || 1e-6)));
-    v = +v.toFixed(precision);
-    if (min != null) v = Math.max(min, v);
-    if (max != null) v = Math.min(max, v);
-    setDraft(String(v));
-    setEditing(false);
-    onCommit(v);
-  };
-  const inputEl = <input type="text" inputMode="decimal" value={draft}
-    tabIndex={tabIndex}
-    onFocus={()=>setEditing(true)}
-    onChange={e=>setDraft(e.target.value)}
-    onBlur={commit}
-    onKeyDown={e=>{
-      if (e.key==="Enter") { e.target.blur(); }
-      else if (e.key==="Escape") { setDraft(String(value)); setEditing(false); e.target.blur(); }
-      else if (e.key==="ArrowUp") { e.preventDefault(); stepBy(step); }
-      else if (e.key==="ArrowDown") { e.preventDefault(); stepBy(-step); }
-    }}
-    style={{width:68,padding:"3px 6px",fontSize:12,fontFamily:"var(--font-mono)",
-      background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
-      borderRadius:"var(--border-radius-md)",color:"var(--color-text-primary)",...style}}/>;
-  if (!showSpinner) return inputEl;
-  // Spinner variant: input flanked by compact ↑/↓ buttons (visible toggling)
-  const btn = {padding:"0 5px",fontSize:10,lineHeight:1,cursor:"pointer",border:"0.5px solid var(--color-border-secondary)",background:"var(--color-background-secondary)",color:"var(--color-text-secondary)",height:24,display:"flex",alignItems:"center",justifyContent:"center"};
-  return <span style={{display:"inline-flex",alignItems:"center",gap:2}}>
-    {inputEl}
-    <span style={{display:"inline-flex",flexDirection:"column",gap:1}}>
-      <button type="button" tabIndex={-1} onClick={()=>stepBy(step)} style={{...btn,height:11,borderRadius:"3px 3px 0 0"}}>▲</button>
-      <button type="button" tabIndex={-1} onClick={()=>stepBy(-step)} style={{...btn,height:11,borderRadius:"0 0 3px 3px"}}>▼</button>
-    </span>
-  </span>;
-}
-
-function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdvancement,globals,setGlobals,leaderMarket,STATS,lStat,setLStat,lScope,setLScope,lTopN,setLTopN,showTrue,setShowTrue,showDec,dark,allSeries,simResultsBySeries,autoR1ByTeam,autoConfByTeam,autoCupByTeam,currentRound,setCurrentRound}) {
-  const [showR1,setShowR1]=useState(false);
-  const [showAdv,setShowAdv]=useState(false);
-  // v39: advancement table entry mode — "prob" (0..1) or "decimal" (decimal odds, 1.01..)
-  const [advEntryMode,setAdvEntryMode]=useState("prob");
-  const [filterTeam,setFilterTeam]=useState("ALL");
-  const teams=[...new Set(leaderMarket.map(p=>p.team))].sort();
-  const displayed=filterTeam==="ALL"?leaderMarket:leaderMarket.filter(p=>p.team===filterTeam);
-
-  function updM(idx,f,v){setMatchups(prev=>{const u=[...prev];u[idx]={...u[idx],[f]:v};
-    if(f==="homeWinPct"){const hw=v,aw=1-v;const p4=Math.pow(hw,4)+Math.pow(aw,4),p5=4*(Math.pow(hw,4)*aw+Math.pow(aw,4)*hw),p6=10*(Math.pow(hw,4)*aw*aw+Math.pow(aw,4)*hw*hw),p7=20*(Math.pow(hw,4)*aw*aw*aw+Math.pow(aw,4)*hw*hw*hw),tot=p4+p5+p6+p7;u[idx].expGames=tot>0?+((4*p4+5*p5+6*p6+7*p7)/tot).toFixed(2):5.82;}return u;});}
-
-  return (
-    <div>
-      {/* v38: Round selector — same as Series Pricer. Affects which series feed leader markets. */}
-      <div style={{display:"flex",gap:6,marginBottom:10,alignItems:"center"}}>
-        <span style={{fontSize:10,fontWeight:500,letterSpacing:"0.1em",color:"var(--color-text-tertiary)",marginRight:6}}>ROUND</span>
-        {ROUND_IDS.map(rid => (
-          <button key={rid} onClick={()=>setCurrentRound&&setCurrentRound(rid)}
-            style={{
-              padding:"5px 14px",fontSize:11,fontWeight:500,borderRadius:"var(--border-radius-md)",cursor:"pointer",
-              border:"0.5px solid",
-              borderColor: currentRound===rid ? "#7c3aed" : "var(--color-border-secondary)",
-              background: currentRound===rid ? "rgba(124,58,237,0.18)" : "var(--color-background-secondary)",
-              color: currentRound===rid ? "#a78bfa" : "var(--color-text-secondary)",
-            }}>
-            {ROUND_LABELS[rid]}
-          </button>
-        ))}
-      </div>
-      <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",marginBottom:14}}>
-        <Seg options={[{id:"r1",label:"Round 1"},{id:"full",label:"Full Playoff"}]} value={lScope} onChange={setLScope}/>
-        <Seg options={STATS} value={lStat} onChange={setLStat} accent="#1d4ed8"/>
-        <select value={filterTeam} onChange={e=>setFilterTeam(e.target.value)} style={SEL}>
-          <option value="ALL">All Teams</option>
-          {teams.map(t=><option key={t} value={t}>{t} – {TEAM_NAMES[t]||t}</option>)}
-        </select>
-        <label style={{fontSize:11,color:"var(--color-text-secondary)",display:"flex",gap:5,alignItems:"center"}}>
-          Top <select value={lTopN} onChange={e=>setLTopN(+e.target.value)} style={SEL}>{[10,25,50,100].map(n=><option key={n} value={n}>{n}</option>)}</select>
-        </label>
-        <div style={{marginLeft:"auto",display:"flex",gap:10,alignItems:"center"}}>
-          <span style={{fontSize:9,padding:"2px 6px",borderRadius:3,background:"rgba(124,58,237,0.15)",color:"#a78bfa",letterSpacing:0.4,fontWeight:500}} title={lScope==="r1"?"Per-matchup unified series sim (5k each) + cross-matchup leader sim (20k). Teammate correlation within matchup.":"Independent-player NB leader sim (10k)."}>{lScope==="r1"?"UNIFIED":"MC 10K"}</span>
-          <Toggle label="True %" checked={showTrue} onChange={setShowTrue}/>
-        </div>
-      </div>
-
-      <div style={{display:"flex",gap:14,marginBottom:12,flexWrap:"wrap",alignItems:"center",padding:"7px 12px",
-        background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-tertiary)"}}>
-        {[{k:lScope==="r1"?"overroundR1":"overroundFull",l:"Overround",min:1,max:1.5,step:0.01},{k:"powerFactor",l:"Power Factor",min:0.5,max:2,step:0.05},{k:"rateDiscount",l:"Rate Discount",min:0.5,max:1,step:0.01}].map(({k,l,min,max,step})=>(
-          <label key={k} style={{fontSize:11,color:"var(--color-text-secondary)",display:"flex",gap:5,alignItems:"center"}}>
-            {l}: <LazyNI value={globals[k]} onCommit={v=>setGlobals(g=>({...g,[k]:v}))} min={min} max={max} step={step} style={{width:56}}/>
-          </label>
-        ))}
-        {[["⚙ R1 Matchups",showR1,setShowR1],[lScope==="full"?"⚙ Advancement":null,showAdv,setShowAdv]].filter(x=>x[0]).map(([l,s,set])=>(
-          <button key={l} onClick={()=>set(v=>!v)} style={{padding:"4px 10px",fontSize:11,borderRadius:"var(--border-radius-md)",cursor:"pointer",
-            background:s?"#1d4ed820":"var(--color-background-secondary)",border:s?"0.5px solid #3b82f6":"0.5px solid var(--color-border-secondary)",
-            color:s?"#60a5fa":"var(--color-text-secondary)"}}>{l}</button>
-        ))}
-      </div>
-
-      {showR1&&<Card style={{marginBottom:14}}>
-        <SH title="Round 1 Matchups"/>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(300px,1fr))",gap:10}}>
-          {matchups.map((m,idx)=>(
-            <div key={idx} style={{padding:10,border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",background:"var(--color-background-secondary)"}}>
-              <div style={{fontSize:9,fontWeight:500,color:"var(--color-text-tertiary)",marginBottom:6,textTransform:"uppercase"}}>Series {idx+1}</div>
-              <div style={{display:"grid",gridTemplateColumns:"1fr 66px",gap:4,marginBottom:6}}>
-                {[["homeTeam","Home team"],["homeAbbr","Abbr"],["awayTeam","Away team"],["awayAbbr","Abbr"]].map(([f,ph])=>(
-                  <input key={f} placeholder={ph} value={m[f]||""} onChange={e=>updM(idx,f,f.includes("Abbr")?e.target.value.toUpperCase():e.target.value)}
-                    style={{padding:"3px 6px",fontSize:11,background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-primary)"}}/>
-                ))}
-              </div>
-              <div style={{display:"flex",gap:6,fontSize:11,alignItems:"center"}}>
-                <span style={{color:"var(--color-text-secondary)"}}>Win%</span>
-                <LazyNI value={m.homeWinPct} onCommit={v=>updM(idx,"homeWinPct",v)} min={0} max={1} step={0.01} style={{width:52}}/>
-                {(()=>{
-                  const hs=m.homeAbbr?computeTeamStrength(players,m.homeAbbr):null;
-                  const as=m.awayAbbr?computeTeamStrength(players,m.awayAbbr):null;
-                  const auto=(hs&&as)?winProbFromStrength(hs,as,0.05,1.0):null;
-                  if(auto==null) return null;
-                  return <button onClick={()=>updM(idx,"homeWinPct",+auto.toFixed(3))}
-                    style={{fontSize:9,padding:"2px 6px",background:"rgba(59,130,246,0.12)",border:"0.5px solid #3b82f6",borderRadius:3,color:"#60a5fa",cursor:"pointer"}}
-                    title={`${m.homeAbbr} Δ=${hs.diff60.toFixed(3)} vs ${m.awayAbbr} Δ=${as.diff60.toFixed(3)}`}>
-                    xG: {(auto*100).toFixed(0)}%
-                  </button>;
-                })()}
-                <span style={{color:"var(--color-text-secondary)"}}>Total</span>
-                <LazyNI value={m.expTotal} onCommit={v=>updM(idx,"expTotal",v)} min={3} max={12} step={0.1} style={{width:48}}/>
-                <span style={{fontSize:10,color:"var(--color-text-tertiary)",marginLeft:"auto"}}>Exp {m.expGames}g</span>
-              </div>
-              <div style={{display:"flex",gap:6,fontSize:11,alignItems:"center",marginTop:4}}>
-                <span style={{color:"var(--color-text-secondary)"}}>Live H/A:</span>
-                <LazyNI value={m.homeWins||0} onCommit={v=>updM(idx,"homeWins",Math.round(v))} min={0} max={4} step={1} style={{width:36}}/>
-                <span>–</span>
-                <LazyNI value={m.awayWins||0} onCommit={v=>updM(idx,"awayWins",Math.round(v))} min={0} max={4} step={1} style={{width:36}}/>
-              </div>
-            </div>
-          ))}
-        </div>
-      </Card>}
-
-      {showAdv&&lScope==="full"&&<Card style={{marginBottom:14}}>
-        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,marginBottom:8,flexWrap:"wrap"}}>
-          <SH title="Team Advancement" sub="P(Win R1) auto from Series Pricer; Conf/Cup chained through bracket (sim → xG fallback)."/>
-          <label style={{display:"flex",gap:6,alignItems:"center",fontSize:11,color:"var(--color-text-secondary)"}}>
-            Entry mode:
-            <select value={advEntryMode} onChange={e=>setAdvEntryMode(e.target.value)}
-              style={{padding:"4px 10px",fontSize:11,fontWeight:500,borderRadius:"var(--border-radius-md)",cursor:"pointer",
-                background:"var(--color-background-secondary)",border:"0.5px solid #3b82f6",color:"#60a5fa"}}>
-              <option value="prob">Probability</option>
-              <option value="decimal">Decimal Odds</option>
-            </select>
-          </label>
-        </div>
-        <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-          <TH cols={["Team", advEntryMode==="prob"?"P(Win R1)":"R1 Decimal", advEntryMode==="prob"?"P(Win Conf)":"Conf Decimal", advEntryMode==="prob"?"P(Win Cup)":"Cup Decimal"]}/>
-          <tbody>{PLAYOFF_TEAMS.map((t,rowIdx)=>{
-            const adv=advancement[t]||{winR1:0.5,winConf:0.25,winCup:0.1,manualR1:false,manualConf:false,manualCup:false};
-            const autoR1 = autoR1ByTeam[t];
-            const autoConf = (autoConfByTeam||{})[t];
-            const autoCup = (autoCupByTeam||{})[t];
-            // Manual flags — once user types, that field locks to stored value until unlocked
-            const useManR1 = !!adv.manualR1, useManConf = !!adv.manualConf, useManCup = !!adv.manualCup;
-            const r1Prob = (autoR1 != null && !useManR1) ? autoR1 : adv.winR1;
-            const confProb = (autoConf != null && !useManConf) ? autoConf : adv.winConf;
-            const cupProb = (autoCup != null && !useManCup) ? autoCup : adv.winCup;
-            const probToDec = (p) => p > 0.0001 ? +(1/p).toFixed(2) : 50000;
-            const decToProb = (d) => d > 1.001 ? Math.min(0.9999, 1/d) : 0.9999;
-            // v49: column-major Tab ordering — R1 col gets indexes 101..100+N, Conf 201..200+N, Cup 301..300+N.
-            //      Adding 100 base to avoid conflict with other tabbable elements on the page.
-            const N = PLAYOFF_TEAMS.length;
-            const tabR1 = 101 + rowIdx;
-            const tabConf = 201 + rowIdx;
-            const tabCup = 301 + rowIdx;
-            const renderCell = (probVal, autoAvail, useMan, fieldKey, manualKey, autoTitle, tabIdx) => {
-              const isAuto = autoAvail && !useMan;
-              const setProbAndLock = (newProb) => setAdvancement(p=>({
-                ...p,
-                [t]: {...(p[t]||{winR1:0.5,winConf:0.25,winCup:0.1,manualR1:false,manualConf:false,manualCup:false}),
-                  [fieldKey]: newProb, [manualKey]: true}
-              }));
-              const unlock = () => setAdvancement(p=>({
-                ...p,
-                [t]: {...(p[t]||{winR1:0.5,winConf:0.25,winCup:0.1,manualR1:false,manualConf:false,manualCup:false}),
-                  [manualKey]: false}
-              }));
-              return (
-                <div style={{display:"flex",gap:4,alignItems:"center",justifyContent:"flex-end"}}>
-                  {isAuto && <span style={{fontSize:9,padding:"1px 5px",background:"rgba(59,130,246,0.15)",color:"#60a5fa",borderRadius:3,letterSpacing:0.3}} title={autoTitle}>AUTO</span>}
-                  {useMan && <span style={{fontSize:9,padding:"1px 5px",background:"rgba(245,158,11,0.15)",color:"#f59e0b",borderRadius:3,letterSpacing:0.3}} title="manual override">MANUAL</span>}
-                  {advEntryMode==="decimal"
-                    ? <LazyNI value={probToDec(probVal)} onCommit={d=>setProbAndLock(decToProb(d))} min={1.01} max={1000} step={0.01} style={{width:64}} tabIndex={tabIdx} showSpinner={true}/>
-                    : <LazyNI value={+probVal.toFixed(3)} onCommit={v=>setProbAndLock(v)} min={0} max={1} step={0.01} style={{width:58}} tabIndex={tabIdx} showSpinner={true}/>}
-                  {useMan && autoAvail && (
-                    <button type="button" onClick={unlock} title="Revert to AUTO" tabIndex={-1}
-                      style={{padding:"2px 5px",fontSize:10,lineHeight:1,borderRadius:3,cursor:"pointer",
-                        background:"rgba(100,116,139,0.10)",border:"0.5px solid var(--color-border-secondary)",color:"var(--color-text-secondary)"}}>↻</button>
-                  )}
-                </div>
-              );
-            };
-            return (
-            <tr key={t} style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
-              <td style={{padding:"4px 8px",fontWeight:500}}>{t} <span style={{color:"var(--color-text-secondary)",fontWeight:400}}>{TEAM_NAMES[t]}</span></td>
-              <td style={{padding:"3px 6px",textAlign:"right"}}>{renderCell(r1Prob, autoR1!=null, useManR1, "winR1", "manualR1", "auto from Series Pricer", tabR1)}</td>
-              <td style={{padding:"3px 6px",textAlign:"right"}}>{renderCell(confProb, autoConf!=null, useManConf, "winConf", "manualConf", "chained R1 → R2 → R3 (sim or xG)", tabConf)}</td>
-              <td style={{padding:"3px 6px",textAlign:"right"}}>{renderCell(cupProb, autoCup!=null, useManCup, "winCup", "manualCup", "chained R1 → R2 → R3 → F (sim or xG)", tabCup)}</td>
-            </tr>);})}</tbody>
-        </table>
-      </Card>}
-
-      {!players?<Card style={{textAlign:"center",padding:"40px"}}>
-        <div style={{fontSize:13,color:"var(--color-text-secondary)",marginBottom:6}}>No player data</div>
-        <div style={{fontSize:11,color:"var(--color-text-tertiary)"}}>Upload tab → Load skaters.csv</div>
-      </Card>:<Card>
-        <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:10}}>
-          <span style={{fontSize:10,fontWeight:500,textTransform:"uppercase",letterSpacing:"0.08em",color:"var(--color-text-secondary)"}}>
-            {lScope==="r1"?"R1":"Playoff"} {STATS.find(s=>s.id===lStat)?.label} Leader
-          </span>
-          <span style={{fontSize:10,color:"var(--color-text-tertiary)"}}>{displayed.length} shown</span>
-        </div>
-        <div style={{overflowX:"auto"}}>
-          <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
-            <TH cols={["#","Player","Team","Role","Now","λ",...(showTrue?["True%"]:[]),"Adj%","American",...(showDec?["Dec"]:[])]}/>
-            <tbody>{displayed.map((p,i)=>{
-              const rank=leaderMarket.indexOf(p)+1,a=toAmer(p.adjProb);
-              const now=readActual(p, lStat);
-              return <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)")}}>
-                <td style={{padding:"4px 8px",color:"var(--color-text-tertiary)",fontSize:10,width:28}}>{rank}</td>
-                <td style={{padding:"4px 8px",fontWeight:rank<=3?500:400}}>{p.name}</td>
-                <td style={{padding:"4px 8px",textAlign:"right"}}><span style={{fontSize:9,padding:"1px 5px",borderRadius:3,background:"rgba(59,130,246,0.12)",color:"#60a5fa",fontWeight:500}}>{p.team}</span></td>
-                <td style={{padding:"4px 8px",textAlign:"right"}}><RoleBadge role={p.lineRole}/></td>
-                <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:now>0?500:400,color:now>0?"#4ade80":"var(--color-text-tertiary)"}}>{now>0?now:"—"}</td>
-                <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{p.lambda.toFixed(2)}</td>
-                {showTrue&&<td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(p.trueProb*100).toFixed(2)}%</td>}
-                <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11}}>{(p.adjProb*100).toFixed(2)}%</td>
-                <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:12,fontWeight:500,color:a<0?"#4ade80":"var(--color-text-primary)"}}>{a>0?`+${a}`:a}</td>
-                {showDec&&<td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{toDec(p.adjProb).toFixed(2)}</td>}
-              </tr>;
-            })}</tbody>
-          </table>
-        </div>
-      </Card>}
-    </div>
-  );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// SERIES TAB
-// ═══════════════════════════════════════════════════════════════════════════════
-function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,globals,showTrue,dark,onEnterGame,gameUploadCounter,simResultsBySeries,setSimForSeries,currentRound,setCurrentRound}) {
-  const [si,setSi]=useState(0);
-  // v38: reset to series 0 when round changes (different rounds have different series counts)
-  useEffect(()=>{
-    setSi(0);
-  }, [currentRound]);
-  // Defensive: clamp si if it exceeds available series
-  const safeSi = Math.min(si, Math.max(0, (allSeries.length||1) - 1));
-  const [mkt,setMkt]=useState("winner");
-  const [showMgn,setShowMgn]=useState(false);
-  const s=allSeries[safeSi] || defaultSeries(0);
-
-  // v24: compute team strengths from on-ice xG for auto win% generation
-  const homeStrength = useMemo(()=>s.homeAbbr?computeTeamStrength(players,s.homeAbbr):null, [players,s.homeAbbr]);
-  const awayStrength = useMemo(()=>s.awayAbbr?computeTeamStrength(players,s.awayAbbr):null, [players,s.awayAbbr]);
-  const autoWinPct = useMemo(()=>{
-    if(!homeStrength||!awayStrength) return null;
-    return winProbFromStrength(homeStrength,awayStrength,0.05,1.0);
-  },[homeStrength,awayStrength]);
-
-  function updS(f,v){setAllSeries(p=>{const u=[...p];u[safeSi]={...u[safeSi],[f]:v};return u;});}
-  function updG(gi,f,v){setAllSeries(p=>{const u=[...p],games=[...u[safeSi].games];
-    // v22: setting pOT directly flags it as manual
-    if(f==="pOT") games[gi]={...games[gi],pOT:v,pOT_manual:true};
-    else games[gi]={...games[gi],[f]:v};
-    if(gi===0&&f==="winPct")for(let i=1;i<7;i++)if(games[i].winPct===null)games[i]={...games[i],winPct:HOME_PATTERN[i+1]?v:1-v};
-    if(gi===0&&f==="expTotal")for(let i=1;i<7;i++)if(games[i].expTotal===null)games[i]={...games[i],expTotal:v};
-    if(gi===0&&f==="pOT")for(let i=1;i<7;i++)if(!games[i].pOT_manual)games[i]={...games[i],pOT:v,pOT_manual:true};
-    u[safeSi]={...u[safeSi],games};return u;});}
-
-  const effG=s.games.map((g,i)=>{
-    const winPct = g.winPct??(HOME_PATTERN[i+1]?(s.games[0].winPct||0.55):1-(s.games[0].winPct||0.55));
-    const expTotal = g.expTotal??(s.games[0].expTotal||5.5);
-    // v22: auto-compute pOT from expTotal+winPct unless user has manually overridden (pOT_manual flag set)
-    const pOT = g.pOT_manual ? (g.pOT??0.22) : pOTGame(expTotal, winPct);
-    return {...g, winPct, expTotal, pOT};
-  });
-  const effKey=JSON.stringify(effG)+JSON.stringify({sr:s.shutoutRate,wgs:s.winnerGoalShift});
-
-  const outcomes=useMemo(()=>computeOutcomes(effG),[effKey]);
-  const hwp=["4-0","4-1","4-2","4-3"].reduce((acc,k)=>acc+(outcomes[k]||0),0);
-  const awp=1-hwp;
-  const [adjH,adjA]=applyMargin([hwp,awp],margins.winner);
-
-  const len4=(outcomes["4-0"]||0)+(outcomes["0-4"]||0);
-  const len5=(outcomes["4-1"]||0)+(outcomes["1-4"]||0);
-  const len6=(outcomes["4-2"]||0)+(outcomes["2-4"]||0);
-  const len7=(outcomes["4-3"]||0)+(outcomes["3-4"]||0);
-  const tot=len4+len5+len6+len7;
-  const expG=tot>0?(4*len4+5*len5+6*len6+7*len7)/tot:5.82;
-
-  // v31 (hoisted): realized state of this series — used to mark settled outcomes across all market panels.
-  // MUST be declared before any market useMemo that references it (TDZ).
-  const realized = useMemo(()=>{
-    let hw=0, aw=0, gH=0, gA=0, sh=0, ot=0, played=0;
-    for (const g of effG) {
-      if (g.result === "home") { hw++; played++; }
-      else if (g.result === "away") { aw++; played++; }
-      if (typeof g.homeScore === "number" && typeof g.awayScore === "number") {
-        gH += g.homeScore; gA += g.awayScore;
-        if (g.homeScore === 0 || g.awayScore === 0) sh++;
-      }
-      if (g.wentOT || g.ot || g.result === "ot") ot++;
-    }
-    return {hw, aw, goalsH:gH, goalsA:gA, shutouts:sh, otGames:ot, gamesPlayed:played, gamesRemaining:Math.max(0, 7-played), seriesOver: hw>=4 || aw>=4};
-  }, [effKey]);
-
-  // v31 (hoisted): helper — derive O/U rows from a sim PMF, with settled detection.
-  function ouFromSimPMF(pmf, lines, marginVal, realizedCount=0, maxAdditional=Infinity) {
-    return lines.map(line => {
-      const lineCeil = Math.ceil(line - 0.001);
-      const settledOver = realizedCount > line;
-      const settledUnder = (realizedCount + maxAdditional) < lineCeil;
-      let pOver, pUnder;
-      if (settledOver) { pOver = 1; pUnder = 0; }
-      else if (settledUnder) { pOver = 0; pUnder = 1; }
-      else { pOver = pAtLeast(pmf, lineCeil); pUnder = 1 - pOver; }
-      let [ao, au] = (settledOver || settledUnder)
-        ? [pOver, pUnder]
-        : applyMargin([pOver, pUnder], marginVal);
-      // v34: if margin pushes either side >= 100%, the line is effectively dead — treat as settled.
-      let extraSettledOver = false, extraSettledUnder = false;
-      if (!settledOver && !settledUnder) {
-        if (ao >= 1.0) { extraSettledOver = true; ao = 1; au = 0; }
-        else if (au >= 1.0) { extraSettledUnder = true; au = 1; ao = 0; }
-      }
-      const settled = settledOver || settledUnder || extraSettledOver || extraSettledUnder;
-      const settledSide = (settledOver || extraSettledOver) ? "over" : (settledUnder || extraSettledUnder) ? "under" : null;
-      return {line, pOver, pUnder, ao, au, _settled: settled, _settledSide: settledSide};
-    });
-  }
-  function sortSettled(rows) {
-    return [...rows].sort((a,b) => {
-      if (!!a._settled !== !!b._settled) return a._settled ? 1 : -1;
-      return (a.line ?? 0) - (b.line ?? 0);
-    });
-  }
-
-  // v16 fix: per-game effective weight.
-  // v23: extended with goalie-faced multiplier for scoring stats.
-  // For scoring stats, the opposing goalie's quality scales the game's contribution.
-  // For defensive stats (hits/blk/pim/tk/give), no goalie adjustment — those are independent of who's in net.
-  const BASELINE_GAME_GOALS = 5.8;
-  const pGamePlayed = [null,1,1,1,1, 1-len4, len6+len7, len7];
-
-  // v23: helper to resolve which goalie is in net for a team in a given game.
-  // Preference: (1) game's manual override, (2) team's starter (highest starter_share among non-BACKUP/SCRATCHED)
-  const goalieFor = (teamAbbr, game) => {
-    if (!goalies || !teamAbbr) return null;
-    const manualName = game.homeGoalie && teamAbbr===s.homeAbbr ? game.homeGoalie
-                     : game.awayGoalie && teamAbbr===s.awayAbbr ? game.awayGoalie
-                     : null;
-    if (manualName) {
-      const g = goalies.find(x=>x.name===manualName && x.team===teamAbbr);
-      if (g) return g;
-    }
-    const teamGoalies = goalies.filter(g=>g.team===teamAbbr);
-    if (!teamGoalies.length) return null;
-    return teamGoalies.reduce((best,g)=>(!best||g.starter_share>best.starter_share)?g:best, null);
-  };
-
-  // Build a per-game scalar of goalie quality FACED BY each team.
-  // homeTeam faces awayTeam's goalie, awayTeam faces homeTeam's goalie.
-  const goalieQualityFaced = effG.map(g => {
-    const hGoalie = goalieFor(s.awayAbbr, g); // home players face this goalie
-    const aGoalie = goalieFor(s.homeAbbr, g); // away players face this goalie
-    // goalie.quality: >1.0 means saves more than expected → DECREASE opposing scoring.
-    // Invert to multiplier on opposing skater rate: lower goalie quality means higher skater rate.
-    return {
-      // v28 fix: defensive ?? 1 guards against goalie records loaded without `quality` field
-      // (e.g., from older JSON backup or before goalies.csv was loaded). Bare 1/undefined = NaN
-      // poisons gameEquivalentsFor → λ → every player on that team prices as +50000.
-      faceByHome: hGoalie ? 1/(hGoalie.quality ?? 1) : 1.0,
-      faceByAway: aGoalie ? 1/(aGoalie.quality ?? 1) : 1.0,
-    };
-  });
-
-  // Scalar gameEquivalents (no goalie adjustment) — kept for legacy callers and non-scoring stats
-  let gameEquivalents = 0;
-  for(let i=0;i<7;i++){
-    const g = effG[i];
-    if(g.result) continue;
-    const p = pGamePlayed[i+1] ?? 0;
-    const scale = (g.expTotal || BASELINE_GAME_GOALS) / BASELINE_GAME_GOALS;
-    gameEquivalents += p * scale;
-  }
-
-  // v23: player-team-aware gameEquivalents function.
-  // For scoring stats, applies the per-game goalie-quality-faced multiplier.
-  // For non-scoring, returns the scalar gameEquivalents.
-  const gameEquivalentsFor = (playerTeam, stat) => {
-    if (!SCORING_STATS.has(stat)) return gameEquivalents;
-    let total = 0;
-    for (let i=0; i<7; i++) {
-      const g = effG[i];
-      if (g.result) continue;
-      const p = pGamePlayed[i+1] ?? 0;
-      const scale = (g.expTotal || BASELINE_GAME_GOALS) / BASELINE_GAME_GOALS;
-      const goalieMult = playerTeam===s.homeAbbr ? goalieQualityFaced[i].faceByHome
-                       : playerTeam===s.awayAbbr ? goalieQualityFaced[i].faceByAway
-                       : 1.0;
-      total += p * scale * goalieMult;
-    }
-    return total;
-  };
-
-  // v38: sim cache key now includes round prefix so PIT in R1 vs PIT in R2 don't collide.
-  const seriesKey = (currentRound||"r1") + "|" + (s.homeAbbr||"") + "|" + (s.awayAbbr||"");
-  const cached = simResultsBySeries[seriesKey];
-  const simResult = cached ? cached.result : null;
-  const simKey = cached ? cached.key : null;
-  const [simRunning, setSimRunning] = useState(false);
-  const simStale = simResult && simKey !== effKey+"|"+seriesKey;
-  const runSim = useCallback(()=>{
-    if (!players || !s.homeAbbr || !s.awayAbbr) return;
-    setSimRunning(true);
-    setTimeout(()=>{
-      try {
-        const inputs = buildSimInputs(effG, s.homeAbbr, s.awayAbbr, players, globals, goalieQualityFaced, pGamePlayed);
-        if (!inputs.pool.length) { setSimForSeries(seriesKey, null); setSimRunning(false); return; }
-        const t0 = (typeof performance!=="undefined"?performance.now():Date.now());
-        const result = simulateSeries(inputs, globals.dispersion, 20000, 31337);
-        const t1 = (typeof performance!=="undefined"?performance.now():Date.now());
-        setSimForSeries(seriesKey, {
-          result: { ...result, simMs: Math.round(t1-t0) },
-          key: effKey+"|"+seriesKey,
-          ts: Date.now(),
-        });
-      } finally {
-        setSimRunning(false);
-      }
-    }, 30);
-  }, [effKey, s.homeAbbr, s.awayAbbr, players, goalies, globals, seriesKey, setSimForSeries, currentRound]);
-
-  // v34: NO LONGER clear sim on series switch. The per-series cache means each series
-  // keeps its own sim result. Switching back retrieves it. Only re-run on explicit click.
-  // (Previous behaviour: setSimResult(null) on s.homeAbbr/s.awayAbbr/si change — REMOVED.)
-
-  // v43: "Run All Sims" — sequentially sims every series in the current round. Simple
-  // implementation: switch si, wait for runSim to settle, advance. ~5s per series.
-  const [runAllProgress, setRunAllProgress] = useState(null); // {current, total} or null
-  const runAllSims = useCallback(()=>{
-    if (!players || runAllProgress) return;
-    const eligible = (allSeries||[]).map((sr,i)=>({sr,i})).filter(x=>x.sr.homeAbbr && x.sr.awayAbbr);
-    if (!eligible.length) return;
-    setRunAllProgress({current:0, total:eligible.length});
-    let stepIdx = 0;
-    const stepNext = () => {
-      if (stepIdx >= eligible.length) {
-        setRunAllProgress(null);
-        return;
-      }
-      const targetSi = eligible[stepIdx].i;
-      setSi(targetSi);
-      setRunAllProgress({current: stepIdx+1, total: eligible.length});
-      stepIdx++;
-      // Wait for the si change to propagate + runSim to fire (auto-run effect already exists for upload counter
-      // but not for si change — explicit trigger needed). Defer past the React commit + the runSim 30ms internal delay.
-      setTimeout(()=>{
-        // Trigger sim for the now-current series
-        try { runSim(); } catch(e) { /* swallow */ }
-        // Wait for sim to complete (default ~5s) before next series
-        setTimeout(stepNext, 6000);
-      }, 100);
-    };
-    stepNext();
-  }, [players, allSeries, runAllProgress, runSim]);
-
-  // v31: auto-run sim after a game upload commit. Watches the App-level counter that
-  // GameStatImporter bumps. Only fires if we have everything we need (players + both teams set).
-  // Skipped on initial mount (counter starts at 0 and we use a ref to detect changes).
-  const lastUploadSeen = useRef(0);
-  useEffect(()=>{
-    if (gameUploadCounter == null) return;
-    if (gameUploadCounter === lastUploadSeen.current) return;
-    lastUploadSeen.current = gameUploadCounter;
-    if (gameUploadCounter === 0) return;
-    if (!players || !s.homeAbbr || !s.awayAbbr) return;
-    runSim();
-  }, [gameUploadCounter, players, s.homeAbbr, s.awayAbbr, runSim]);
-
-  // Legacy single-number scale kept for rollbackability, but real weight is gameEquivalents
-  const seriesGameGoalMean = (() => {
-    const unplayed = effG.filter(g=>!g.result);
-    return unplayed.length>0 ? unplayed.reduce((a,g)=>a+(g.expTotal||BASELINE_GAME_GOALS),0)/unplayed.length : BASELINE_GAME_GOALS;
-  })();
-  const gameGoalScale = seriesGameGoalMean / BASELINE_GAME_GOALS;
-
-  // Series Length — v31: sim probs when available; settled-impossibility per length.
-  // A length L is impossible if: realized.gamesPlayed > L, OR if both teams' wins make L unreachable
-  // (e.g., 5g requires 4-1 or 1-4 final; if hw=2 and aw=2 already, only 6g/7g possible).
-  const lengthMkt = useMemo(()=>{
-    const cf = [len4, len5, len6, len7];
-    const sim = simResult && simResult.seriesLengthProb;
-    const probs = [4,5,6,7].map((L,i) => sim ? (sim[L]||0) : cf[i]);
-    // settled detection: a length L is impossible if realized.gamesPlayed > L OR
-    // if winner needs more wins than possible at length L given current (hw, aw)
-    const settled = [4,5,6,7].map(L => {
-      if (realized.gamesPlayed > L) return "no";
-      // To finish in L games: winner has 4 wins after exactly L games.
-      // The winner needs (4 - currentWins) more wins; loser at end has L-4 wins.
-      // Both teams must satisfy: (4 - theirCurrentWins) games needed, and loser ends with (L-4).
-      const homeNeedW = 4 - realized.hw, awayNeedW = 4 - realized.aw;
-      const loserEndW = L - 4;
-      // Home wins in L games: home wins (4-hw) of remaining, away ends with loserEndW (already at aw, can win loserEndW-aw more)
-      const homeOK = homeNeedW >= 0 && homeNeedW <= realized.gamesRemaining && (loserEndW - realized.aw) >= 0 && (loserEndW - realized.aw) <= realized.gamesRemaining && (homeNeedW + (loserEndW - realized.aw)) === realized.gamesRemaining - (7 - L);
-      const awayOK = awayNeedW >= 0 && awayNeedW <= realized.gamesRemaining && (loserEndW - realized.hw) >= 0 && (loserEndW - realized.hw) <= realized.gamesRemaining && (awayNeedW + (loserEndW - realized.hw)) === realized.gamesRemaining - (7 - L);
-      // Simpler: just check if hw <= 4 && aw <= 4 && hw+aw <= L && (L-hw <= R OR L-aw <= R)
-      // Even simpler heuristic: probs[i] from sim is 0 if impossible — trust it.
-      return null;
-    });
-    // Use sim probs as authoritative impossibility signal: if sim prob == 0 AND we have realized games, it's settled NO.
-    const lenAdj = probs.map((p, i) => {
-      if (sim && p === 0 && realized.gamesPlayed > 0) return 0;
-      return p;
-    });
-    const adjusted = applyMargin(lenAdj, margins.length);
-    return {probs, lenAdj: adjusted, settled: lenAdj.map(p => p === 0 && realized.gamesPlayed > 0)};
-  }, [effKey, margins.length, simResult, realized, len4, len5, len6, len7]);
-  // Keep old lenAdj symbol for backward compat with the Length panel
-  const lenAdjEffective = lengthMkt.lenAdj;
-
-  const e8=useMemo(()=>{
-    const src = (simResult && simResult.exactScoreProb) ? simResult.exactScoreProb : outcomes;
-    const rows=[{l:`${s.homeTeam||"Home"} 4-0`,k:"4-0"},{l:`${s.homeTeam||"Home"} 4-1`,k:"4-1"},{l:`${s.homeTeam||"Home"} 4-2`,k:"4-2"},{l:`${s.homeTeam||"Home"} 4-3`,k:"4-3"},{l:`${s.awayTeam||"Away"} 4-0`,k:"0-4"},{l:`${s.awayTeam||"Away"} 4-1`,k:"1-4"},{l:`${s.awayTeam||"Away"} 4-2`,k:"2-4"},{l:`${s.awayTeam||"Away"} 4-3`,k:"3-4"}].map(o=>({...o,tp:src[o.k]||0}));
-    const sum=rows.reduce((acc,o)=>acc+o.tp,0);
-    const norm=rows.map(o=>({...o,tp:sum>0?o.tp/sum:0}));
-    // Settled: this exact (HW,AW) ending is impossible if hw/aw already exceeds, OR another team already clinched
-    const annotated = norm.map(o => {
-      const [hw, aw] = o.k.split("-").map(Number);
-      // hw/aw represent FINAL wins. Impossible if realized.hw > hw OR realized.aw > aw.
-      const impossible = realized.hw > hw || realized.aw > aw;
-      return {...o, _settled: impossible, tp: impossible ? 0 : o.tp};
-    });
-    const adj=applyMargin(annotated.map(o=>o.tp),margins.eightWay);
-    // v49: fixed display order (home 4-0, 4-1, 4-2, 4-3, away 4-0, 4-1, 4-2, 4-3) — not sorted by prob.
-    return annotated.map((o,i)=>({...o, ap: o._settled ? 0 : adj[i]}));
-  },[effKey,outcomes,margins.eightWay,s.homeTeam,s.awayTeam,simResult,realized]);
-
-  const winOrders=useMemo(()=>{
-    const seqs=computeWinOrders(effG);
-    const entries=Object.entries(seqs).map(([seq,tp])=>({seq,tp,hw:seq.split("").filter(c=>c==="H").length,aw:seq.split("").filter(c=>c==="A").length}));
-    const adj=applyMargin(entries.map(e=>e.tp),margins.winOrder);
-    return entries.map((e,i)=>({...e,ap:adj[i]})).sort((a,b)=>b.ap-a.ap);
-  },[effKey,margins.winOrder]);
-
-  // Score @ G3 — v31: relabel ("0-3" → "PHI 3-0"); detect settled when ≥3 games played.
-  const cs3=useMemo(()=>{
-    const st={};
-    function rec(gi,hw,aw,prob){
-      if(gi===3||hw===4||aw===4){const k=`${hw}-${aw}`;st[k]=(st[k]||0)+prob;return;}
-      const g=effG[gi];
-      if(g.result==="home")rec(gi+1,hw+1,aw,prob);
-      else if(g.result==="away")rec(gi+1,hw,aw+1,prob);
-      else{rec(gi+1,hw+1,aw,prob*g.winPct);rec(gi+1,hw,aw+1,prob*(1-g.winPct));}
-    }
-    rec(0,0,0,1);
-    const homeAbbr = s.homeAbbr || "H";
-    const awayAbbr = s.awayAbbr || "A";
-    const labelFor = (k) => {
-      const [hw, aw] = k.split("-").map(Number);
-      if (hw > aw) return `${homeAbbr} ${hw}-${aw}`;
-      if (aw > hw) return `${awayAbbr} ${aw}-${hw}`;
-      return `Tied ${hw}-${aw}`;
-    };
-    const entries=Object.entries(st).map(([k,tp])=>{
-      // settled YES: 3+ games already played AND this k matches realized state at G3
-      const settled3Played = realized.gamesPlayed >= 3;
-      const [hw, aw] = k.split("-").map(Number);
-      // The realized H/A wins after EXACTLY 3 games
-      let realizedHWat3 = 0, realizedAWat3 = 0;
-      for (let i = 0; i < 3 && i < effG.length; i++) {
-        if (effG[i].result === "home") realizedHWat3++;
-        else if (effG[i].result === "away") realizedAWat3++;
-      }
-      const isThisOutcome = (hw === realizedHWat3 && aw === realizedAWat3);
-      const settledYes = settled3Played && isThisOutcome;
-      const settledNo = settled3Played && !isThisOutcome;
-      let p = tp;
-      if (settledYes) p = 1;
-      if (settledNo) p = 0;
-      return {k, label: labelFor(k), tp: p, _settled: settledYes || settledNo};
-    });
-    const adj=applyMargin(entries.map(e=>e.tp),margins.correctScore);
-    return entries.map((e,i)=>({...e, ap: e._settled ? e.tp : adj[i]}))
-      .sort((a,b)=>{
-        if (!!a._settled !== !!b._settled) return a._settled ? 1 : -1;
-        return b.tp - a.tp;
-      });
-  },[effKey,margins.correctScore,s.homeAbbr,s.awayAbbr,realized]);
-
-  // Per-game OT market — v31: annotate settled (game already played) per game with realized OT result
-  const otPerGame=useMemo(()=>effG.map((g,i)=>{
-    const pOT=g.pOT??0.22;
-    const [adjOT,adjNo]=applyMargin([pOT,1-pOT],margins.otGames);
-    const settled = !!g.result;
-    const wentOT = !!(g.wentOT || g.ot || g.result === "ot");
-    return {game:i+1,pOT,adjOT,adjNo,expTotal:g.expTotal,winPct:g.winPct,_settled:settled,_wentOT:wentOT};
-  }),[effKey,margins.otGames]);
-
-  // Series OT games distribution — v31: sim PMF when available
-  const otSeriesMkts=useMemo(()=>{
-    let pmf;
-    if (simResult && simResult.seriesOTPMF) {
-      pmf = simResult.seriesOTPMF;
-    } else {
-      const {lambda:lam}=computeOTSeriesDist(effG,outcomes);
-      pmf = [];
-      for (let k=0; k<8; k++) pmf.push(poissonPMF(k, lam));
-    }
-    let lambda=0; for (let k=0;k<pmf.length;k++) lambda += k*pmf[k];
-    const exactLines=[0,1,2,3,4,5,6,7];
-    // Settled exact: realized.otGames > k means "exactly k" is impossible (won't decrease).
-    // realized.otGames == k AND no games remaining means "exactly k" is settled YES.
-    const exactProbs = exactLines.map(k => pmf[k] || 0);
-    const exactSettled = exactLines.map(k => {
-      if (realized.otGames > k) return "no"; // already exceeded
-      if (realized.otGames + realized.gamesRemaining < k) return "no"; // can't reach
-      if (realized.gamesRemaining === 0 && realized.otGames === k) return "yes";
-      return null;
-    });
-    const exactAdj = exactProbs.map((p, i) => {
-      const st = exactSettled[i];
-      if (st === "yes") return 1;
-      if (st === "no") return 0;
-      // Margin-adjust: just multiply this single-event probability by margin (1+margin/2 standard)
-      return Math.min(1, p * margins.otExact);
-    });
-    const ouLines=[0.5,1.5,2.5,3.5];
-    const ouRows = ouFromSimPMF(pmf, ouLines, margins.otGames, realized.otGames, realized.gamesRemaining);
-    return {lambda, exactLines, exactProbs, exactAdj, exactSettled, ouLines, ouRows: sortSettled(ouRows)};
-  },[effKey,margins.otExact,margins.otGames,simResult,realized]);
-
-  // Spread market — v31: sim's exactScoreProb when available; per-row settled detection.
-  // Lines are wins-spread (e.g., "-3.5" = win series by 4 wins, i.e., 4-0).
-  // Spread market — v32: sim's exactScoreProb when available; settled detection by enumerating
-  // all reachable final (hw, aw) outcomes from current realized state, then asking: do they all
-  // cover (settled HOME) or none of them cover (settled AWAY)?
-  const spreadMkt=useMemo(()=>{
-    let outcomesObj;
-    if (simResult && simResult.exactScoreProb) {
-      outcomesObj = simResult.exactScoreProb;
-    } else {
-      outcomesObj = outcomes;
-    }
-    const rows = computeSpread(outcomesObj, s.homeAbbr, s.awayAbbr);
-    // Enumerate reachable finals from realized (rhw, raw, R remaining)
-    const rhw = realized.hw, raw = realized.aw, R = realized.gamesRemaining;
-    const reachable = [];
-    if (rhw >= 4) reachable.push([rhw, raw]); // already over (shouldn't happen if pricer still active)
-    else if (raw >= 4) reachable.push([rhw, raw]);
-    else {
-      // Home final = 4, away final ∈ [raw, min(3, raw+R-(4-rhw))]
-      const homeAddNeeded = 4 - rhw;
-      if (homeAddNeeded <= R) {
-        for (let extraAway = 0; extraAway <= R - homeAddNeeded && raw + extraAway <= 3; extraAway++) {
-          reachable.push([4, raw + extraAway]);
-        }
-      }
-      // Away final = 4, home final ∈ [rhw, min(3, rhw+R-(4-raw))]
-      const awayAddNeeded = 4 - raw;
-      if (awayAddNeeded <= R) {
-        for (let extraHome = 0; extraHome <= R - awayAddNeeded && rhw + extraHome <= 3; extraHome++) {
-          reachable.push([rhw + extraHome, 4]);
-        }
-      }
-    }
-    // v49: cover logic must match the new spread convention.
-    //   Home label "PIT -1.5" ⇒ home covers iff (hw - aw) > 1.5, i.e. hw - aw >= 2.
-    //   Home label "PIT +1.5" ⇒ home covers iff (aw - hw) <= 1.5, i.e. hw - aw >= -1.
-    //   Equivalent: home covers iff (hw - aw) > v where v is the NUMERIC part of the home label.
-    //   For "PIT -1.5", v=-1.5 and (hw-aw) > -1.5 — WRONG. Need stronger: (hw-aw) >= 2.
-    //   Cleaner: "home-favoured row" (r.line != null and r.line < 0) → covers iff diff >  |line|.
-    //            "away-favoured row" (r.awayLine != null) → home covers iff diff >= -|awayLine| (i.e. diff > -|awayLine| - 1 equivalent for integer diffs; use >= for clarity).
-    function homeCoversRow(row, hw, aw) {
-      const diff = hw - aw;
-      if (row.line != null && row.line < 0) return diff > Math.abs(row.line);   // home -X.5
-      if (row.awayLine != null) return (aw - hw) <= Math.abs(row.awayLine);     // home +X.5 (equivalently: away doesn't cover -X.5)
-      return null;
-    }
-    return rows.map(r=>{
-      // Determine settled by checking all reachable finals
-      let allCover = reachable.length > 0, noneCover = reachable.length > 0;
-      for (const [h, a] of reachable) {
-        const c = homeCoversRow(r, h, a);
-        if (c) noneCover = false; else allCover = false;
-      }
-      const settledHome = allCover;
-      const settledAway = noneCover;
-      let pHome = r.pHome, pAway = r.pAway;
-      if (settledHome) { pHome = 1; pAway = 0; }
-      else if (settledAway) { pHome = 0; pAway = 1; }
-      const [ah, aa] = (settledHome || settledAway) ? [pHome, pAway] : applyMargin([pHome, pAway], margins.spread);
-      return {...r, pHome, pAway, ah, aa, _settled: settledHome || settledAway, _settledSide: settledHome ? "home" : settledAway ? "away" : null};
-    }).sort((a,b)=>{
-      if (!!a._settled !== !!b._settled) return a._settled ? 1 : -1;
-      return 0;
-    });
-  },[effKey,margins.spread,outcomes,s.homeAbbr,s.awayAbbr,simResult,realized]);
-
-  // Total goals O/U — v31: prefers sim PMF when available; settled rows handled
-  const totalGoalsMkt=useMemo(()=>{
-    let pmf;
-    if (simResult && simResult.seriesGoalsPMF) pmf = simResult.seriesGoalsPMF;
-    else pmf = computeSeriesGoalsPMF(effG, 80);
-    let lambda=0; for (let k=0;k<pmf.length;k++) lambda += k*pmf[k];
-    // Build line ladder from where pAtLeast in [0.005, 0.995]
-    let kMin=0, kMax=pmf.length-1;
-    while (kMin<pmf.length && pAtLeast(pmf,kMin+1) >= 0.995) kMin++;
-    while (kMax>0 && pAtLeast(pmf,kMax) <= 0.005) kMax--;
-    const lines=[]; for (let k=Math.max(0,kMin); k<=kMax; k++) lines.push(k+0.5);
-    // Realized total goals so far + max additional possible (assume 12 goals/game cap as soft sanity)
-    const realizedTotal = realized.goalsH + realized.goalsA;
-    const maxAdditional = realized.gamesRemaining * 12;
-    const rows = ouFromSimPMF(pmf, lines, margins.totalGoals, realizedTotal, maxAdditional);
-    return {lambda, lines: sortSettled(rows)};
-  },[effKey,margins.totalGoals,simResult,realized]);
-
-  // Shutouts O/U — v31: sim PMF when available; settled when realized count exceeds line
-  const shutoutMkt=useMemo(()=>{
-    let pmf;
-    if (simResult && simResult.seriesShutoutsPMF) pmf = simResult.seriesShutoutsPMF;
-    else { const rate=s.shutoutRate??0.08; const multiplier = rate / 0.08; pmf=computeShutoutPMF(effG, multiplier, 8); }
-    let lambda=0; for (let k=0;k<pmf.length;k++) lambda += k*pmf[k];
-    const lines=[0.5,1.5,2.5,3.5];
-    // Realized shutouts so far. Max additional = remaining games (each game can produce at most 1 shutout).
-    const rows = ouFromSimPMF(pmf, lines, margins.shutouts, realized.shutouts, realized.gamesRemaining);
-    return {lambda, lines: sortSettled(rows)};
-  },[effKey,margins.shutouts,s.shutoutRate,simResult,realized]);
-
-  // Team most goals — v31: sim convolution when available; settled when one team can't possibly catch up
-  const mostGoalsMkt=useMemo(()=>{
-    let pHomeMost, pAwayMost, pTied;
-    if (simResult && simResult.homeGoalsPMF && simResult.awayGoalsPMF) {
-      // Compute P(H>A), P(A>H), P(H==A) from joint distribution (assumes near-independence)
-      const H = simResult.homeGoalsPMF, A = simResult.awayGoalsPMF;
-      let pH=0, pA=0, pT=0;
-      for (let h=0; h<H.length; h++) {
-        for (let a=0; a<A.length; a++) {
-          const p = H[h]*A[a];
-          if (h>a) pH += p; else if (a>h) pA += p; else pT += p;
-        }
-      }
-      pHomeMost = pH; pAwayMost = pA; pTied = pT;
-    } else {
-      const shift=s.winnerGoalShift??0.15;
-      ({pHomeMost,pAwayMost,pTied}=computeTeamMostGoals(hwp,awp,shift));
-    }
-    // Settled: home can't lose if (realizedH - realizedA) > maxRemaining*12
-    const maxAdd = realized.gamesRemaining * 12;
-    const homeLead = realized.goalsH - realized.goalsA;
-    const settledHome = homeLead > maxAdd;
-    const settledAway = -homeLead > maxAdd;
-    if (settledHome) { pHomeMost = 1; pAwayMost = 0; pTied = 0; }
-    else if (settledAway) { pHomeMost = 0; pAwayMost = 1; pTied = 0; }
-    const [ah,aa] = (settledHome || settledAway) ? [pHomeMost, pAwayMost] : applyMargin([pHomeMost,pAwayMost],margins.teamMostGoals);
-    return {pHomeMost,pAwayMost,pTied,ah,aa,_settled: settledHome || settledAway, _settledSide: settledHome ? "home" : settledAway ? "away" : null};
-  },[effKey,margins.teamMostGoals,s.winnerGoalShift,hwp,awp,simResult,realized]);
-
-  // Per-team goals O/U — v31: sim PMFs when available
-  const teamGoalsMkt=useMemo(()=>{
-    let pmfH, pmfA;
-    if (simResult && simResult.homeGoalsPMF && simResult.awayGoalsPMF) {
-      pmfH = simResult.homeGoalsPMF; pmfA = simResult.awayGoalsPMF;
-    } else {
-      pmfH = computeTeamGoalsPMF(effG,"home",50);
-      pmfA = computeTeamGoalsPMF(effG,"away",50);
-    }
-    let lamH=0; for (let k=0;k<pmfH.length;k++) lamH += k*pmfH[k];
-    let lamA=0; for (let k=0;k<pmfA.length;k++) lamA += k*pmfA[k];
-    function ladder(pmf) {
-      let kMin=0, kMax=pmf.length-1;
-      while (kMin<pmf.length && pAtLeast(pmf,kMin+1) >= 0.995) kMin++;
-      while (kMax>0 && pAtLeast(pmf,kMax) <= 0.005) kMax--;
-      const lines=[]; for (let k=Math.max(0,kMin); k<=kMax; k++) lines.push(k+0.5);
-      return lines;
-    }
-    const linesH=ladder(pmfH), linesA=ladder(pmfA);
-    const maxAdd = realized.gamesRemaining * 12;
-    return {
-      home:{lambda:lamH, rows: sortSettled(ouFromSimPMF(pmfH, linesH, margins.teamGoals, realized.goalsH, maxAdd))},
-      away:{lambda:lamA, rows: sortSettled(ouFromSimPMF(pmfA, linesA, margins.teamGoals, realized.goalsA, maxAdd))},
-    };
-  },[effKey,margins.teamGoals,simResult,realized]);
-
-  // v31: realized state of this series — used to mark settled outcomes across all market panels.
-  // Parlays — v49: G = next unplayed game × series winner, 4 combos
-  const parlayMkt=useMemo(()=>{
-    const {gameNum, rows} = computeParlays(effG, outcomes);
-    const adj = applyMargin(rows.map(r=>r.tp), margins.parlay);
-    return { gameNum, rows: rows.map((r,i)=>({...r, ap: adj[i]})) };
-  },[effKey,margins.parlay,outcomes]);
-
-  const MKTS=[
-    {id:"winner",l:"Winner"},{id:"eightway",l:"Correct Score"},{id:"length",l:"Length"},
-    {id:"spread",l:"Spread"},{id:"totalgoals",l:"Total Goals"},{id:"shutouts",l:"Shutouts"},
-    {id:"winorder",l:"Win Order"},{id:"score3",l:"Score @G3"},
-    {id:"ot",l:"OT/Game"},{id:"otseries",l:"OT Series"},{id:"otscorer",l:"OT Scorer"},
-    {id:"mostgoals",l:"Most Goals"},{id:"teamgoals",l:"Team Goals"},
-    {id:"parlay",l:"Parlay"},
-    {id:"props",l:"O/U Props"},{id:"binary",l:"1+ Props"},
-    {id:"goaliesaves",l:"Goalie Saves"},
-    {id:"playerdetail",l:"Player Detail"},
-    {id:"seriesleader",l:"Series Leader"},
-  ];
-
-  return (
-    <div>
-      {/* v38: Round selector — switch between R1/R2/R3/Final. Each round has its own series array. */}
-      <div style={{display:"flex",gap:6,marginBottom:10,alignItems:"center"}}>
-        <span style={{fontSize:10,fontWeight:500,letterSpacing:"0.1em",color:"var(--color-text-tertiary)",marginRight:6}}>ROUND</span>
-        {ROUND_IDS.map(rid => (
-          <button key={rid} onClick={()=>setCurrentRound&&setCurrentRound(rid)}
-            style={{
-              padding:"5px 14px",fontSize:11,fontWeight:500,borderRadius:"var(--border-radius-md)",cursor:"pointer",
-              border:"0.5px solid",
-              borderColor: currentRound===rid ? "#7c3aed" : "var(--color-border-secondary)",
-              background: currentRound===rid ? "rgba(124,58,237,0.18)" : "var(--color-background-secondary)",
-              color: currentRound===rid ? "#a78bfa" : "var(--color-text-secondary)",
-            }}>
-            {ROUND_LABELS[rid]}
-          </button>
-        ))}
-      </div>
-      <div style={{display:"flex",gap:6,marginBottom:14,flexWrap:"wrap",alignItems:"center"}}>
-        {allSeries.map((sr,i)=><button key={i} onClick={()=>setSi(i)} style={{padding:"5px 11px",fontSize:11,borderRadius:"var(--border-radius-md)",border:"0.5px solid",cursor:"pointer",
-          borderColor:safeSi===i?"#3b82f6":"var(--color-border-secondary)",background:safeSi===i?"#3b82f6":"var(--color-background-secondary)",color:safeSi===i?"white":"var(--color-text-secondary)"}}>
-          {sr.homeAbbr&&sr.awayAbbr?`${sr.homeAbbr} v ${sr.awayAbbr}`:`${ROUND_LABELS[currentRound]||"S"} #${i+1}`}</button>)}
-        <button onClick={()=>setShowMgn(v=>!v)} style={{marginLeft:"auto",padding:"4px 10px",fontSize:11,borderRadius:"var(--border-radius-md)",cursor:"pointer",
-          background:showMgn?"#1d4ed820":"var(--color-background-secondary)",border:showMgn?"0.5px solid #3b82f6":"0.5px solid var(--color-border-secondary)",
-          color:showMgn?"#60a5fa":"var(--color-text-secondary)"}}>⚙ Margins</button>
-      </div>
-
-      {showMgn&&<Card style={{marginBottom:14}}>
-        <SH title="Market Margins"/>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:8}}>
-          {Object.entries(margins).map(([k,v])=><label key={k} style={{fontSize:11,display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}>
-            <span style={{color:"var(--color-text-secondary)",textTransform:"capitalize"}}>{k.replace(/([A-Z])/g," $1")}</span>
-            <LazyNI value={v} onCommit={nv=>setMargins(m=>({...m,[k]:nv}))} min={1} max={3} step={0.01} style={{width:56}}/>
-          </label>)}
-        </div>
-      </Card>}
-
-      {s.homeAbbr && s.awayAbbr && <Card style={{marginBottom:10,background:simStale?"rgba(245,158,11,0.04)":"rgba(124,58,237,0.04)",border:`0.5px solid ${simStale?"rgba(245,158,11,0.25)":"rgba(124,58,237,0.25)"}`}}>
-        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:simResult?8:0,flexWrap:"wrap"}}>
-          <SH title="Unified Sim (MC 20k)" sub={simResult?`L1 correlation · ${simResult.simMs}ms · ${simResult.pool.length} skaters${simStale?" · STALE — inputs changed, re-run to refresh":""}`:"Click Run to simulate. Independent of closed-form prices above."}/>
-          {simResult && !simStale && <span style={{fontSize:9,padding:"2px 6px",borderRadius:3,background:"rgba(124,58,237,0.15)",color:"#a78bfa",letterSpacing:0.4,fontWeight:500}}>DUAL-TRACK</span>}
-          {simStale && <span style={{fontSize:9,padding:"2px 6px",borderRadius:3,background:"rgba(245,158,11,0.15)",color:"#f59e0b",letterSpacing:0.4,fontWeight:500}}>STALE</span>}
-          <button onClick={runSim} disabled={simRunning||!players||!!runAllProgress} style={{marginLeft:"auto",padding:"4px 12px",fontSize:11,fontWeight:500,borderRadius:4,cursor:simRunning?"wait":"pointer",background:simRunning?"var(--color-background-secondary)":simStale?"#f59e0b":"#7c3aed",color:simRunning?"var(--color-text-tertiary)":"white",border:"none"}}>
-            {simRunning?"Running…":simResult?(simStale?"Re-run":"Re-run"):"Run Unified Sim"}
-          </button>
-          <button onClick={runAllSims} disabled={!players||simRunning||!!runAllProgress}
-            title="Run unified sim for every series in this round (sequentially, ~6s per series)"
-            style={{padding:"4px 12px",fontSize:11,fontWeight:500,borderRadius:4,cursor:runAllProgress?"wait":"pointer",
-              background: runAllProgress ? "var(--color-background-secondary)" : "#10b981",
-              color: runAllProgress ? "var(--color-text-tertiary)" : "white", border:"none"}}>
-            {runAllProgress ? `Running ${runAllProgress.current}/${runAllProgress.total}…` : "Run All Sims"}
-          </button>
-        </div>
-        {simResult && <>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:10,fontSize:11}}>
-          <div>
-            <div style={{fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4,textTransform:"uppercase",marginBottom:3}}>Winner</div>
-            <div style={{fontFamily:"var(--font-mono)",fontSize:12}}>
-              <div>{s.homeAbbr||"H"}: <span style={{color:"#60a5fa"}}>{(simResult.winnerProb.H*100).toFixed(1)}%</span> <span style={{color:"var(--color-text-tertiary)",fontSize:10}}>(CF: {(hwp*100).toFixed(1)}% · Δ {((simResult.winnerProb.H-hwp)*100).toFixed(2)})</span></div>
-              <div>{s.awayAbbr||"A"}: <span style={{color:"#60a5fa"}}>{(simResult.winnerProb.A*100).toFixed(1)}%</span> <span style={{color:"var(--color-text-tertiary)",fontSize:10}}>(CF: {(awp*100).toFixed(1)}% · Δ {((simResult.winnerProb.A-awp)*100).toFixed(2)})</span></div>
-            </div>
-          </div>
-          <div>
-            <div style={{fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4,textTransform:"uppercase",marginBottom:3}}>Series Length</div>
-            <div style={{fontFamily:"var(--font-mono)",fontSize:11}}>
-              {[4,5,6,7].map(n=>{
-                const cfLen=n===4?((outcomes["4-0"]||0)+(outcomes["0-4"]||0)):n===5?((outcomes["4-1"]||0)+(outcomes["1-4"]||0)):n===6?((outcomes["4-2"]||0)+(outcomes["2-4"]||0)):((outcomes["4-3"]||0)+(outcomes["3-4"]||0));
-                const mc=simResult.seriesLengthProb[n];
-                return <div key={n}>{n}g: <span style={{color:"#60a5fa"}}>{((mc||0)*100).toFixed(1)}%</span> <span style={{color:"var(--color-text-tertiary)",fontSize:10}}>(CF: {(cfLen*100).toFixed(1)}%)</span></div>;
-              })}
-            </div>
-          </div>
-          <div>
-            <div style={{fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4,textTransform:"uppercase",marginBottom:3}}>Series Goals</div>
-            <div style={{fontFamily:"var(--font-mono)",fontSize:11}}>
-              {(()=>{
-                let mean=0; for(let k=0;k<simResult.seriesGoalsPMF.length;k++) mean+=k*simResult.seriesGoalsPMF[k];
-                return <>
-                  <div>Mean: <span style={{color:"#60a5fa"}}>{mean.toFixed(2)}</span> <span style={{color:"var(--color-text-tertiary)",fontSize:10}}>(CF: {totalGoalsMkt.lambda.toFixed(2)})</span></div>
-                  <div>Shutouts: <span style={{color:"#60a5fa"}}>{simResult.avgShutouts.toFixed(2)}</span> <span style={{color:"var(--color-text-tertiary)",fontSize:10}}>(CF: {shutoutMkt.lambda.toFixed(2)})</span></div>
-                  <div>OT games: <span style={{color:"#60a5fa"}}>{simResult.avgOT.toFixed(2)}</span></div>
-                </>;
-              })()}
-            </div>
-          </div>
-        </div>
-        <div style={{marginTop:6,fontSize:9,color:"var(--color-text-tertiary)"}}>
-          CF = closed-form (current production prices). Δ = MC − CF. Expect small non-zero deltas from sampling noise (~0.2–0.3% at 20k). Consistent bias &gt; 1% = signal.
-        </div>
-        </>}
-      </Card>}
-
-      <div style={{display:"grid",gridTemplateColumns:"340px minmax(0,1fr)",gap:14,alignItems:"start"}}>
-        <div>
-          <Card style={{marginBottom:10}}>
-            <SH title="Series Setup"/>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 66px",gap:4,marginBottom:8}}>
-              {[["homeTeam","Home team"],["homeAbbr","Abbr"],["awayTeam","Away team"],["awayAbbr","Abbr"]].map(([f,ph])=>(
-                <input key={f} placeholder={ph} value={s[f]||""} onChange={e=>updS(f,f.includes("Abbr")?e.target.value.toUpperCase():e.target.value)}
-                  style={{padding:"4px 7px",fontSize:12,background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:4,color:"var(--color-text-primary)"}}/>
-              ))}
-            </div>
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:11,tableLayout:"fixed"}}>
-              <colgroup>
-                <col style={{width:"22px"}}/>
-                <col style={{width:"34px"}}/>
-                <col style={{width:"50px"}}/>
-                <col style={{width:"42px"}}/>
-                <col style={{width:"40px"}}/>
-                <col style={{width:"70px"}}/>
-                <col style={{width:"60px"}}/>
-              </colgroup>
-              <thead><tr style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
-                {[
-                  ["G",""],
-                  ["Host","Which team hosts this game (2-2-1-1-1 rotation based on series home team)"],
-                  ["","Series HOME team's win probability for this game (ALWAYS from the series-home-team's perspective, regardless of who hosts). For games hosted by the away team, this should typically be lower to reflect home-ice advantage."],
-                  ["Total","Expected total goals for this game"],
-                  ["OT%","P(game goes to OT). NHL playoff avg ~22%. Affects OT markets only, not series outcome."],
-                  ["Score",""],
-                  ["Result",""]
-                ].map(([h,tip],idx)=>{
-                  // Dynamic label for the win% column based on series home team
-                  const label = idx===2 ? ((s.homeAbbr||"H")+" Win%") : h;
-                  return <th key={idx} style={{padding:"3px 3px",color:"var(--color-text-tertiary)",fontWeight:500,textAlign:"left",fontSize:9,cursor:tip?"help":"default"}} title={tip||undefined}>{label}</th>;
-                })}
-              </tr></thead>
-              <tbody>{effG.map((g,i)=>{
-                const isHome=HOME_PATTERN[i+1];
-                const homeLabel=isHome?(s.homeAbbr||"H"):(s.awayAbbr||"A");
-                return (
-                <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:g.result?0.5:1}}>
-                  <td style={{padding:"2px 3px",color:"var(--color-text-tertiary)",fontSize:9}}>G{i+1}</td>
-                  <td style={{padding:"2px 3px",fontSize:9,color:"var(--color-text-secondary)"}}>{homeLabel}</td>
-                  <td style={{padding:"1px 2px"}}><LazyNI value={+g.winPct.toFixed(3)} onCommit={v=>updG(i,"winPct",v)} min={0} max={1} step={0.01} style={{width:46}} showSpinner={false}/></td>
-                  <td style={{padding:"1px 2px"}}><LazyNI value={+g.expTotal.toFixed(1)} onCommit={v=>updG(i,"expTotal",v)} min={0.5} max={12} step={0.1} style={{width:40}} showSpinner={false}/></td>
-                  <td style={{padding:"1px 2px",position:"relative"}}>
-                    <LazyNI value={+(g.pOT??0.22).toFixed(2)} onCommit={v=>updG(i,"pOT",v)} min={0} max={0.5} step={0.01} style={{width:38}} showSpinner={false}/>
-                    {s.games[i]?.pOT_manual && <span title="Manually overridden — click Auto OT% to reset" style={{position:"absolute",top:0,right:-2,fontSize:8,color:"#f59e0b"}}>*</span>}
-                  </td>
-                  <td style={{padding:"1px 2px"}}>
-                    <div style={{display:"flex",gap:2,alignItems:"center"}}>
-                      <input type="number" min={0} max={20} value={g.homeScore??""} placeholder="—"
-                        onChange={e=>updG(i,"homeScore",parseInt(e.target.value)||null)}
-                        style={{width:28,fontSize:9,textAlign:"center",padding:"2px 2px",fontFamily:"var(--font-mono)",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-primary)"}}/>
-                      <span style={{fontSize:9,color:"var(--color-text-tertiary)"}}>-</span>
-                      <input type="number" min={0} max={20} value={g.awayScore??""} placeholder="—"
-                        onChange={e=>updG(i,"awayScore",parseInt(e.target.value)||null)}
-                        style={{width:28,fontSize:9,textAlign:"center",padding:"2px 2px",fontFamily:"var(--font-mono)",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-primary)"}}/>
-                    </div>
-                  </td>
-                  <td style={{padding:"1px 3px"}}>
-                    <select value={g.result||""} onChange={e=>updG(i,"result",e.target.value||null)}
-                      style={{fontSize:9,padding:"2px 3px",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-primary)",width:48}}>
-                      <option value="">—</option>
-                      <option value="home">{s.homeAbbr||"Home"} W</option>
-                      <option value="away">{s.awayAbbr||"Away"} W</option>
-                    </select>
-                  </td>
-                </tr>
-                );
-              })}</tbody>
-            </table>
-            <div style={{marginTop:8,paddingTop:8,borderTop:"0.5px solid var(--color-border-tertiary)"}}>
-              <div style={{display:"flex",gap:10,fontSize:10,alignItems:"center",flexWrap:"wrap"}}>
-                <label style={{color:"var(--color-text-secondary)",display:"flex",gap:4,alignItems:"center"}}>
-                  Shutout/G: <LazyNI value={s.shutoutRate??0.08} onCommit={v=>updS("shutoutRate",v)} min={0} max={0.5} step={0.01} style={{width:44}} showSpinner={false}/>
-                </label>
-                <label style={{color:"var(--color-text-secondary)",display:"flex",gap:4,alignItems:"center"}}>
-                  Goal shift: <LazyNI value={s.winnerGoalShift??0.15} onCommit={v=>updS("winnerGoalShift",v)} min={0} max={0.4} step={0.01} style={{width:44}} showSpinner={false}/>
-                </label>
-                <button onClick={()=>setAllSeries(p=>{const u=[...p];u[safeSi]={...u[safeSi],games:u[safeSi].games.map(g=>({...g,pOT_manual:false,pOT:null}))};return u;})}
-                  style={{fontSize:9,padding:"3px 8px",background:"transparent",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-secondary)",cursor:"pointer"}}
-                  title="Reset all games' OT% to auto-computed values from expTotal and winPct">
-                  Auto OT%
-                </button>
-                {autoWinPct!=null && <button onClick={()=>{
-                  // Seed Game 1 with xG-derived win% from team strength; pattern propagates to other games via updG logic
-                  setAllSeries(p=>{
-                    const u=[...p];
-                    const games=[...u[safeSi].games];
-                    games[0]={...games[0],winPct:+autoWinPct.toFixed(3)};
-                    for(let i=1;i<7;i++){
-                      games[i]={...games[i],winPct:HOME_PATTERN[i+1]?+autoWinPct.toFixed(3):+(1-autoWinPct).toFixed(3)};
-                    }
-                    u[safeSi]={...u[safeSi],games};
-                    return u;
-                  });
-                }}
-                  style={{fontSize:9,padding:"3px 8px",background:"rgba(59,130,246,0.12)",border:"0.5px solid #3b82f6",borderRadius:3,color:"#60a5fa",cursor:"pointer"}}
-                  title={`Derive Game 1 Win% from team xG differential. ${s.homeAbbr} diff60: ${homeStrength?.diff60.toFixed(3)}, ${s.awayAbbr} diff60: ${awayStrength?.diff60.toFixed(3)}. Auto = ${(autoWinPct*100).toFixed(1)}%`}>
-                  Auto Win% ({(autoWinPct*100).toFixed(0)}%)
-                </button>}
-                <span style={{marginLeft:"auto",color:"var(--color-text-tertiary)"}}>Exp {expG.toFixed(2)}g</span>
-              </div>
-              <div style={{marginTop:4,fontSize:9,color:"var(--color-text-tertiary)"}}>H:{s.games.filter(g=>g.result==="home").length} A:{s.games.filter(g=>g.result==="away").length} · TtlGoals λ {totalGoalsMkt.lambda.toFixed(1)} · Shut λ {shutoutMkt.lambda.toFixed(2)}</div>
-              {(homeStrength||awayStrength) && <div style={{marginTop:6,padding:"5px 7px",background:"var(--color-background-secondary)",borderRadius:3,fontSize:9,color:"var(--color-text-tertiary)",fontFamily:"var(--font-mono)"}}>
-                Team Strength (xG/60): {homeStrength ? `${s.homeAbbr} F=${homeStrength.xGF60.toFixed(2)} A=${homeStrength.xGA60.toFixed(2)} Δ=${homeStrength.diff60>=0?"+":""}${homeStrength.diff60.toFixed(3)}` : `${s.homeAbbr||"?"} —`} · {awayStrength ? `${s.awayAbbr} F=${awayStrength.xGF60.toFixed(2)} A=${awayStrength.xGA60.toFixed(2)} Δ=${awayStrength.diff60>=0?"+":""}${awayStrength.diff60.toFixed(3)}` : `${s.awayAbbr||"?"} —`}
-              </div>}
-            </div>
-          </Card>
-
-          {/* v23: Goalie Assignments per game */}
-          {goalies && s.homeAbbr && s.awayAbbr && <Card style={{marginBottom:10}}>
-            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
-              <SH title="Goalie Assignments" sub="Overrides apply to scoring props only"/>
-              <button onClick={()=>setAllSeries(p=>{const u=[...p];u[safeSi]={...u[safeSi],games:u[safeSi].games.map(g=>({...g,homeGoalie:null,awayGoalie:null}))};return u;})}
-                style={{marginLeft:"auto",fontSize:9,padding:"3px 8px",background:"transparent",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-secondary)",cursor:"pointer"}}
-                title="Clear all per-game goalie overrides; revert to team starters">
-                Auto
-              </button>
-            </div>
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:10}}>
-              <thead><tr style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
-                <th style={{padding:"3px 2px",textAlign:"left",color:"var(--color-text-tertiary)",fontWeight:500,fontSize:9}}>G</th>
-                <th style={{padding:"3px 2px",textAlign:"left",color:"var(--color-text-tertiary)",fontWeight:500,fontSize:9}}>{s.homeAbbr||"H"} G</th>
-                <th style={{padding:"3px 2px",textAlign:"left",color:"var(--color-text-tertiary)",fontWeight:500,fontSize:9}}>{s.awayAbbr||"A"} G</th>
-              </tr></thead>
-              <tbody>{[0,1,2,3,4,5,6].map(i=>{
-                const g = s.games[i];
-                const homeG = goalies.filter(gg=>gg.team===s.homeAbbr);
-                const awayG = goalies.filter(gg=>gg.team===s.awayAbbr);
-                const autoHomeG = homeG.reduce((b,gg)=>(!b||gg.starter_share>b.starter_share)?gg:b, null);
-                const autoAwayG = awayG.reduce((b,gg)=>(!b||gg.starter_share>b.starter_share)?gg:b, null);
-                const selHome = g.homeGoalie || (autoHomeG?.name||"");
-                const selAway = g.awayGoalie || (autoAwayG?.name||"");
-                const inp = {width:"100%",padding:"2px 3px",fontSize:9,background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-primary)"};
-                return <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:g.result?0.5:1}}>
-                  <td style={{padding:"1px 2px",fontSize:9,color:"var(--color-text-tertiary)"}}>G{i+1}</td>
-                  <td style={{padding:"1px 2px"}}>
-                    <select value={selHome} onChange={e=>updG(i,"homeGoalie",e.target.value||null)} style={inp}>
-                      {homeG.map(gg=>(<option key={gg.name} value={gg.name}>{gg.name.split(" ").pop()} ({(gg.quality??1).toFixed(2)})</option>))}
-                    </select>
-                    {g.homeGoalie && <span title="manually overridden" style={{fontSize:8,color:"#f59e0b"}}>*</span>}
-                  </td>
-                  <td style={{padding:"1px 2px"}}>
-                    <select value={selAway} onChange={e=>updG(i,"awayGoalie",e.target.value||null)} style={inp}>
-                      {awayG.map(gg=>(<option key={gg.name} value={gg.name}>{gg.name.split(" ").pop()} ({(gg.quality??1).toFixed(2)})</option>))}
-                    </select>
-                    {g.awayGoalie && <span title="manually overridden" style={{fontSize:8,color:"#f59e0b"}}>*</span>}
-                  </td>
-                </tr>;
-              })}</tbody>
-            </table>
-            <div style={{marginTop:4,fontSize:8,color:"var(--color-text-tertiary)",fontStyle:"italic"}}>Quality &gt;1.0 = saves more than expected (hurts opposing scorers). Clamped [0.75, 1.25].</div>
-          </Card>}
-          <Card>
-            <SH title="Quick Summary"/>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:6}}>
-              {[[s.homeTeam||"Home",adjH],[s.awayTeam||"Away",adjA]].map(([n,ap],i)=>(
-                <div key={i} style={{padding:"7px 8px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",textAlign:"center"}}>
-                  <div style={{fontSize:10,color:"var(--color-text-secondary)",marginBottom:2}}>{n}</div>
-                  <div style={{fontFamily:"var(--font-mono)",fontSize:15,fontWeight:500,color:ap>=0.5?"#4ade80":"var(--color-text-primary)"}}>{fmt(ap)}</div>
-                  <div style={{fontSize:9,color:"var(--color-text-tertiary)"}}>{(ap*100).toFixed(1)}%</div>
-                </div>
-              ))}
-            </div>
-            <div style={{display:"flex",gap:4,marginBottom:8}}>
-              {[["4g",lenAdjEffective[0]],["5g",lenAdjEffective[1]],["6g",lenAdjEffective[2]],["7g",lenAdjEffective[3]]].map(([l,ap])=>(
-                <div key={l} style={{flex:1,padding:"4px 5px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",textAlign:"center"}}>
-                  <div style={{fontSize:9,color:"var(--color-text-tertiary)"}}>{l}</div>
-                  <div style={{fontFamily:"var(--font-mono)",fontSize:10,fontWeight:500}}>{fmt(ap)}</div>
-                </div>
-              ))}
-            </div>
-            {onEnterGame&&(()=>{
-              // Find next unplayed game
-              const nextGame=s.games.findIndex(g=>!g.result);
-              const label=nextGame===-1?"All games entered":`Enter G${nextGame+1} Result`;
-              return <button
-                disabled={nextGame===-1||(!s.homeAbbr&&!s.awayAbbr)}
-                onClick={()=>onEnterGame({seriesIdx:si,gameIdx:nextGame})}
-                style={{width:"100%",padding:"7px 0",fontSize:12,fontWeight:500,borderRadius:"var(--border-radius-md)",
-                  border:"none",cursor:nextGame===-1?"default":"pointer",
-                  background:nextGame===-1?"var(--color-background-secondary)":"#10b981",
-                  color:nextGame===-1?"var(--color-text-tertiary)":"white"}}>
-                {label}
-              </button>;
-            })()}
-          </Card>
-        </div>
-
-        <div>
-          <div style={{display:"flex",gap:0,marginBottom:12,borderRadius:"var(--border-radius-md)",overflow:"hidden",border:"0.5px solid var(--color-border-secondary)",width:"fit-content",flexWrap:"wrap"}}>
-            {MKTS.map(m=><button key={m.id} onClick={()=>setMkt(m.id)} style={{padding:"5px 12px",fontSize:11,border:"none",borderRight:"0.5px solid var(--color-border-tertiary)",cursor:"pointer",
-              background:mkt===m.id?"#1d4ed8":"var(--color-background-secondary)",color:mkt===m.id?"white":"var(--color-text-secondary)"}}>{m.l}</button>)}
-          </div>
-
-          {mkt==="winner"&&<Card><SH title="Series Winner" sub={`OR: ${margins.winner}x`}/>
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><TH cols={["Team",...(showTrue?["True%"]:[]),"Adj%","American","Decimal"]}/>
-            <tbody><OR label={s.homeTeam||"Home"} tp={hwp} ap={adjH} showTrue={showTrue}/><OR label={s.awayTeam||"Away"} tp={awp} ap={adjA} showTrue={showTrue}/></tbody></table>
-          </Card>}
-
-          {mkt==="eightway"&&<Card><SH title="Series Correct Score" sub={`OR: ${margins.eightWay}x`}/>
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><TH cols={["Outcome",...(showTrue?["True%"]:[]),"Adj%","American","Decimal"]}/>
-            <tbody>{e8.map((o,i)=>(
-              <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:o._settled?0.4:1,textDecoration:o._settled?"line-through":"none"}}>
-                <td style={{padding:"5px 8px"}}>{o.l}{o._settled&&<span style={{marginLeft:6,fontSize:9,color:"#ef4444",textDecoration:"none",display:"inline-block"}}>impossible</span>}</td>
-                {showTrue&&<td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{(o.tp*100).toFixed(1)}%</td>}
-                <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11}}>{(o.ap*100).toFixed(1)}%</td>
-                <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:12,fontWeight:500,color:o.ap>=0.5?"#4ade80":"var(--color-text-primary)"}}>{o._settled?"—":fmt(o.ap)}</td>
-                <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{o._settled?"—":toDec(o.ap).toFixed(2)}</td>
-              </tr>
-            ))}</tbody></table>
-          </Card>}
-
-          {mkt==="length"&&<Card><SH title="Series Length" sub={`Realized: ${realized.gamesPlayed}g played · OR: ${margins.length}x`}/>
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><TH cols={["Games",...(showTrue?["True%"]:[]),"Adj%","American","Decimal"]}/>
-            <tbody>{(()=>{
-              const data = [["4 Games",4,len4,lenAdjEffective[0]],["5 Games",5,len5,lenAdjEffective[1]],["6 Games",6,len6,lenAdjEffective[2]],["7 Games",7,len7,lenAdjEffective[3]]];
-              const annotated = data.map(([l,L,tp,ap],i) => ({l,L,tp,ap,_settled: lengthMkt.settled[i] || (realized.gamesPlayed > L)}));
-              annotated.sort((a,b)=>{ if (!!a._settled !== !!b._settled) return a._settled ? 1 : -1; return 0; });
-              return annotated.map((o,i)=>(
-                <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:o._settled?0.4:1}}>
-                  <td style={{padding:"5px 8px"}}>{o.l}{o._settled&&<span style={{marginLeft:6,fontSize:9,color:"#ef4444"}}>impossible</span>}</td>
-                  {showTrue&&<td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{(o.tp*100).toFixed(1)}%</td>}
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11}}>{(o.ap*100).toFixed(1)}%</td>
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:12,fontWeight:500,color:o.ap>=0.5?"#4ade80":"var(--color-text-primary)"}}>{o._settled?"—":fmt(o.ap)}</td>
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{o._settled?"—":toDec(o.ap).toFixed(2)}</td>
-                </tr>
-              ));
-            })()}</tbody></table>
-            <div style={{marginTop:8,padding:"5px 8px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",fontSize:11,color:"var(--color-text-secondary)"}}>
-              Exp length: <strong style={{color:"var(--color-text-primary)"}}>{expG.toFixed(2)}g</strong></div>
-            {/* v49: O/U series length */}
-            <div style={{marginTop:12}}>
-              <SH title="Length O/U" sub={`OR: ${margins.length}x`}/>
-              <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
-                <TH cols={["Line",...(showTrue?["True O%","True U%"]:[]),"O Adj%","U Adj%","Over","Under"]}/>
-                <tbody>{(()=>{
-                  // Cumulative prob of going > line, evaluated at 4.5, 5.5, 6.5.
-                  // P(over 4.5) = P(len >= 5) = len5 + len6 + len7
-                  // P(over 5.5) = len6 + len7
-                  // P(over 6.5) = len7
-                  const rawLens = [len4, len5, len6, len7];
-                  const sim = simResult && simResult.seriesLengthProb;
-                  const srcLens = sim ? [sim[4]||0, sim[5]||0, sim[6]||0, sim[7]||0] : rawLens;
-                  const lines = [
-                    {line:4.5, pO: srcLens[1]+srcLens[2]+srcLens[3]},
-                    {line:5.5, pO: srcLens[2]+srcLens[3]},
-                    {line:6.5, pO: srcLens[3]},
-                  ];
-                  return lines.map((L,i)=>{
-                    // Settled when realized.gamesPlayed > line (OVER settled) or series decided and length < line (UNDER settled)
-                    const maxPossible = 4 + realized.gamesRemaining + Math.min(realized.hw, realized.aw);
-                    // Simpler: determine actual min/max finishable length
-                    // min final length = max(realized.gamesPlayed, 4 + max(realized.hw,realized.aw) - max(realized.hw,realized.aw))... just trust probs == 0 signal
-                    const over = L.pO;
-                    const under = 1 - over;
-                    const settledO = over <= 0.0001 ? false : (realized.gamesPlayed > L.line);
-                    const settledU = over >= 0.9999 || (over <= 0.0001 && realized.gamesPlayed >= 4);
-                    let apO, apU;
-                    if (settledO) { apO=1; apU=0; }
-                    else if (settledU) { apO=0; apU=1; }
-                    else { [apO,apU] = applyMargin([over,under], margins.length); }
-                    return (
-                      <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:(settledO||settledU)?0.55:1}}>
-                        <td style={{padding:"5px 8px",fontFamily:"var(--font-mono)"}}>{L.line}</td>
-                        {showTrue&&<td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{(over*100).toFixed(1)}%</td>}
-                        {showTrue&&<td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{(under*100).toFixed(1)}%</td>}
-                        <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11}}>{(apO*100).toFixed(1)}%</td>
-                        <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11}}>{(apU*100).toFixed(1)}%</td>
-                        <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:12,fontWeight:500,color:apO>=0.5?"#4ade80":"var(--color-text-primary)"}}>{fmt(apO)}</td>
-                        <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:12,fontWeight:500,color:apU>=0.5?"#4ade80":"var(--color-text-primary)"}}>{fmt(apU)}</td>
-                      </tr>
-                    );
-                  });
-                })()}</tbody>
-              </table>
-            </div>
-          </Card>}
-
-          {mkt==="winorder"&&(()=>{
-            const hn=s.homeTeam||s.homeAbbr||"Home";
-            const an=s.awayTeam||s.awayAbbr||"Away";
-            // Convert H/A seq to team names
-            const seqLabel=(seq)=>seq.split("").map(c=>c==="H"?hn:an).join(" / ");
-            const copyAll=()=>{
-              const txt=winOrders.map(o=>`${seqLabel(o.seq)}\t${o.ap>0?"+":""}${fmt(o.ap)}\t${toDec(o.ap).toFixed(2)}`).join("\n");
-              navigator.clipboard?.writeText(txt);
-            };
-            return <Card>
-              <div style={{display:"flex",alignItems:"center",marginBottom:10}}>
-                <SH title="Win Order (70-Way)" sub={`OR: ${margins.winOrder}x — sequences show game-by-game winner`}/>
-                <button onClick={copyAll} style={{marginLeft:"auto",padding:"3px 10px",fontSize:10,borderRadius:"var(--border-radius-md)",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",color:"var(--color-text-secondary)",cursor:"pointer"}}>Copy All</button>
-              </div>
-              <div style={{maxHeight:1000,overflowY:"auto"}}>
-                <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-                  <TH cols={["Sequence","Winner","Games",...(showTrue?["True%"]:[]),"Adj%","American","Dec"]}/>
-                  <tbody>{winOrders.map((o,i)=>(
-                    <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)")}}>
-                      <td style={{padding:"3px 8px",fontSize:10}}>{seqLabel(o.seq)}</td>
-                      <td style={{padding:"3px 8px",fontSize:10,color:"var(--color-text-secondary)"}}>{o.hw===4?hn:an}</td>
-                      <td style={{padding:"3px 8px",textAlign:"right",fontSize:10}}>{o.seq.length}</td>
-                      {showTrue&&<td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(o.tp*100).toFixed(2)}%</td>}
-                      <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{(o.ap*100).toFixed(2)}%</td>
-                      <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{fmt(o.ap)}</td>
-                      <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{toDec(o.ap).toFixed(2)}</td>
-                    </tr>
-                  ))}</tbody>
-                </table>
-              </div>
-            </Card>;
-          })()}
-
-          {mkt==="score3"&&<Card><SH title="Correct Score After 3 Games" sub={`OR: ${margins.correctScore}x`}/>
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><TH cols={["Score",...(showTrue?["True%"]:[]),"Adj%","American","Decimal"]}/>
-            <tbody>{cs3.map((o,i)=>(
-              <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:o._settled?0.4:1}}>
-                <td style={{padding:"5px 8px"}}>{o.label}{o._settled&&<span style={{marginLeft:6,fontSize:9,color:o.tp>=0.5?"#10b981":"#ef4444"}}>{o.tp>=0.5?"✓":"✗"}</span>}</td>
-                {showTrue&&<td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{(o.tp*100).toFixed(1)}%</td>}
-                <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11}}>{(o.ap*100).toFixed(1)}%</td>
-                <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:12,fontWeight:500,color:o.ap>=0.5?"#4ade80":"var(--color-text-primary)"}}>{o._settled?"—":fmt(o.ap)}</td>
-                <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{o._settled?"—":toDec(o.ap).toFixed(2)}</td>
-              </tr>
-            ))}</tbody></table>
-          </Card>}
-
-          {mkt==="ot"&&<Card><SH title="OT Per Game" sub={`Per-game OT probability — OR: ${margins.otGames}x`}/>
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
-              <TH cols={["Game","Home","Win%","Total","pOT","OT Adj%","OT Odds","No OT Odds"]}/>
-              <tbody>{otPerGame.map((o,i)=>(
-                <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)"),opacity:o._settled?0.4:1}}>
-                  <td style={{padding:"5px 8px",fontWeight:500}}>G{o.game}{o._settled&&<span style={{marginLeft:6,fontSize:9,color:o._wentOT?"#10b981":"#ef4444"}}>{o._wentOT?"OT ✓":"REG ✓"}</span>}</td>
-                  <td style={{padding:"5px 8px",fontSize:10,color:"var(--color-text-secondary)"}}>{HOME_PATTERN[o.game]?(s.homeAbbr||"H"):(s.awayAbbr||"A")}</td>
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11}}>{(o.winPct*100).toFixed(0)}%</td>
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11}}>{o.expTotal.toFixed(1)}</td>
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{(o.pOT*100).toFixed(1)}%</td>
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11}}>{(o.adjOT*100).toFixed(1)}%</td>
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:12,fontWeight:500}}>{o._settled?"—":fmt(o.adjOT)}</td>
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{o._settled?"—":fmt(o.adjNo)}</td>
-                </tr>
-              ))}</tbody>
-            </table>
-          </Card>}
-
-          {mkt==="otseries"&&<Card>
-            <SH title="OT Games in Series" sub={`λ=${otSeriesMkts.lambda.toFixed(2)} · Realized: ${realized.otGames}/${realized.gamesPlayed} games · Exact OR: ${margins.otExact}x · O/U OR: ${margins.otGames}x`}/>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
-              <div>
-                <div style={{fontSize:10,fontWeight:500,color:"var(--color-text-secondary)",marginBottom:6,textTransform:"uppercase"}}>Exact # OT Games</div>
-                <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-                  <TH cols={["#OT",...(showTrue?["True%"]:[]),"Adj%","Odds"]}/>
-                  <tbody>{(()=>{
-                    const rows = otSeriesMkts.exactLines.map((k,i)=>({
-                      k, tp: otSeriesMkts.exactProbs[i], ap: otSeriesMkts.exactAdj[i],
-                      settled: otSeriesMkts.exactSettled[i],
-                    }));
-                    rows.sort((a,b)=>{
-                      const aS = !!a.settled, bS = !!b.settled;
-                      if (aS !== bS) return aS ? 1 : -1;
-                      return a.k - b.k;
-                    });
-                    return rows.map((o,i)=>(
-                      <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:o.settled?0.4:1}}>
-                        <td style={{padding:"4px 8px"}}>Exactly {o.k}{o.settled&&<span style={{marginLeft:6,fontSize:9,color:o.settled==="yes"?"#10b981":"#ef4444"}}>{o.settled==="yes"?"✓":"✗"}</span>}</td>
-                        {showTrue&&<td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(o.tp*100).toFixed(2)}%</td>}
-                        <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{(o.ap*100).toFixed(2)}%</td>
-                        <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{o.settled?"—":fmt(o.ap)}</td>
-                      </tr>
-                    ));
-                  })()}</tbody>
-                </table>
-              </div>
-              <div>
-                <div style={{fontSize:10,fontWeight:500,color:"var(--color-text-secondary)",marginBottom:6,textTransform:"uppercase"}}>O/U OT Games</div>
-                <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-                  <TH cols={["Line",...(showTrue?["Over%"]:[]),"Ov Adj%","Over","Under"]}/>
-                  <tbody>{otSeriesMkts.ouRows.map((r,i)=>(
-                    <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:r._settled?0.4:1}}>
-                      <td style={{padding:"4px 8px",fontFamily:"var(--font-mono)"}}>{r.line}{r._settled&&<span style={{marginLeft:6,fontSize:9,color:r._settledSide==="over"?"#10b981":"#ef4444"}}>{r._settledSide==="over"?"OVER ✓":"UNDER ✓"}</span>}</td>
-                      {showTrue&&<td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(r.pOver*100).toFixed(1)}%</td>}
-                      <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{(r.ao*100).toFixed(1)}%</td>
-                      <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{r._settled?"—":fmt(r.ao)}</td>
-                      <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{r._settled?"—":fmt(r.au)}</td>
-                    </tr>
-                  ))}</tbody>
-                </table>
-              </div>
-            </div>
-          </Card>}
-
-          {mkt==="spread"&&<Card><SH title="Series Spread" sub={`Wins differential — OR: ${margins.spread}x`}/>
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
-              <TH cols={["Home Line","Away Line",...(showTrue?["True%"]:[]),"H Adj%","H Odds","A Adj%","A Odds"]}/>
-              <tbody>{spreadMkt.map((r,i)=>(
-                <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)"),opacity:r._settled?0.4:1}}>
-                  <td style={{padding:"5px 8px",fontFamily:"var(--font-mono)",fontWeight:500}}>{r.homeLabel}{r._settled&&r._settledSide==="home"&&<span style={{marginLeft:6,fontSize:9,color:"#10b981"}}>✓</span>}{r._settled&&r._settledSide==="away"&&<span style={{marginLeft:6,fontSize:9,color:"#ef4444"}}>✗</span>}</td>
-                  <td style={{padding:"5px 8px",fontFamily:"var(--font-mono)",color:"var(--color-text-secondary)"}}>{r.awayLabel}{r._settled&&r._settledSide==="away"&&<span style={{marginLeft:6,fontSize:9,color:"#10b981"}}>✓</span>}{r._settled&&r._settledSide==="home"&&<span style={{marginLeft:6,fontSize:9,color:"#ef4444"}}>✗</span>}</td>
-                  {showTrue&&<td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(r.pHome*100).toFixed(1)}%</td>}
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{(r.ah*100).toFixed(1)}%</td>
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500,color:r.ah>=0.5?"#4ade80":"var(--color-text-primary)"}}>{r._settled?"—":fmt(r.ah)}</td>
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{(r.aa*100).toFixed(1)}%</td>
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500,color:r.aa>=0.5?"#4ade80":"var(--color-text-primary)"}}>{r._settled?"—":fmt(r.aa)}</td>
-                </tr>
-              ))}</tbody>
-            </table>
-          </Card>}
-
-          {mkt==="totalgoals"&&<Card><SH title="Total Goals O/U" sub={`λ=${totalGoalsMkt.lambda.toFixed(2)} goals · OR: ${margins.totalGoals}x`}/>
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
-              <TH cols={["Line",...(showTrue?["P(Over)"]:[]),"Ov Adj%","Over","Under"]}/>
-              <tbody>{totalGoalsMkt.lines.map((r,i)=>(
-                <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)"),opacity:r._settled?0.4:1}}>
-                  <td style={{padding:"5px 8px",fontFamily:"var(--font-mono)",fontWeight:500}}>{r.line}{r._settled&&<span style={{marginLeft:6,fontSize:9,color:r._settledSide==="over"?"#10b981":"#ef4444"}}>{r._settledSide==="over"?"OVER ✓":"UNDER ✓"}</span>}</td>
-                  {showTrue&&<td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(r.pOver*100).toFixed(1)}%</td>}
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{(r.ao*100).toFixed(1)}%</td>
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{r._settled?"—":fmt(r.ao)}</td>
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{r._settled?"—":fmt(r.au)}</td>
-                </tr>
-              ))}</tbody>
-            </table>
-          </Card>}
-
-          {mkt==="shutouts"&&<Card><SH title="Total Shutouts O/U" sub={`λ=${shutoutMkt.lambda.toFixed(3)} · Rate=${s.shutoutRate??0.08}/g · OR: ${margins.shutouts}x`}/>
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
-              <TH cols={["Line",...(showTrue?["P(Over)"]:[]),"Ov Adj%","Over","Under"]}/>
-              <tbody>{shutoutMkt.lines.map((r,i)=>(
-                <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:r._settled?0.4:1}}>
-                  <td style={{padding:"5px 8px",fontFamily:"var(--font-mono)",fontWeight:500}}>{r.line}{r._settled&&<span style={{marginLeft:6,fontSize:9,color:r._settledSide==="over"?"#10b981":"#ef4444"}}>{r._settledSide==="over"?"OVER ✓":"UNDER ✓"}</span>}</td>
-                  {showTrue&&<td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(r.pOver*100).toFixed(1)}%</td>}
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{(r.ao*100).toFixed(1)}%</td>
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{r._settled?"—":fmt(r.ao)}</td>
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{r._settled?"—":fmt(r.au)}</td>
-                </tr>
-              ))}</tbody>
-            </table>
-          </Card>}
-
-          {mkt==="otscorer"&&(()=>{
-            // v49: P(player scores first OT goal in series) approximation.
-            // Model: P(any OT in series) × team OT-win share × player goal share × role weight.
-            // v50: Playoff OT is continuous — ALL active skaters can score.
-            //      Weight by role (TOP6 > MID6 > BOT6; D1 > D2 > D3) but never exclude.
-            //      Use shrunk goal rate so low-sample guys aren't inflated.
-            const eligibleRoles = new Set(["TOP6","MID6","BOT6","ACTIVE","D1","D2","D3"]);
-            const shrunkGoalRate = (p) => shrinkRate(p.g_pg || 0, p.gp || 0, "g");
-            const teamGoalRate = (team) => {
-              const pool = (players||[]).filter(p => p.team === team && eligibleRoles.has(p.lineRole));
-              return pool.reduce((s,p) => s + shrunkGoalRate(p), 0) || 1;
-            };
-            const homeG = teamGoalRate(s.homeAbbr);
-            const awayG = teamGoalRate(s.awayAbbr);
-            // Per-game P(OT): from effG
-            let pSeriesHasOT = 0;
-            const seriesTeamOT = {home: 0, away: 0};
-            const {effG: eg, realized: re} = {effG, realized};
-            for (let gi = 0; gi < eg.length; gi++) {
-              const g = eg[gi];
-              if (g.result) {
-                if (g.wentOT) seriesTeamOT[g.result === "home" ? "home" : "away"] += 1;
-                continue;
-              }
-              const pPlayed = gi <= re.gamesPlayed ? 1 : (re.gamesRemaining - (gi - re.gamesPlayed) + 1) / Math.max(1, re.gamesRemaining);
-              const pOT = g.pOT ?? 0.22;
-              pSeriesHasOT += pPlayed * pOT;
-              const wpOT = 0.5 + 0.6 * (g.winPct - 0.5);
-              seriesTeamOT.home += pPlayed * pOT * wpOT;
-              seriesTeamOT.away += pPlayed * pOT * (1 - wpOT);
-            }
-            pSeriesHasOT = Math.min(1, pSeriesHasOT);
-            const pool = (players||[])
-              .filter(p => (p.team === s.homeAbbr || p.team === s.awayAbbr) && eligibleRoles.has(p.lineRole));
-            const rows = pool.map(p => {
-              const teamRate = p.team === s.homeAbbr ? homeG : awayG;
-              const share = teamRate > 0 ? shrunkGoalRate(p) / teamRate : 0;
-              // Role multiplier — everyone has a non-zero chance (playoff OT is continuous)
-              // but top-line forwards and top-pair D are meaningfully more likely.
-              const roleMult =
-                p.lineRole === "TOP6"   ? 1.20 :
-                p.lineRole === "MID6"   ? 0.95 :
-                p.lineRole === "BOT6"   ? 0.70 :
-                p.lineRole === "ACTIVE" ? 0.85 :
-                p.lineRole === "D1"     ? 1.00 :
-                p.lineRole === "D2"     ? 0.75 :
-                p.lineRole === "D3"     ? 0.55 : 0.60;
-              const teamOT = p.team === s.homeAbbr ? seriesTeamOT.home : seriesTeamOT.away;
-              const rawP = Math.min(0.9999, share * roleMult * teamOT);
-              return {...p, share, teamOT, rawP};
-            }).filter(r => r.rawP > 0.0005)
-              .sort((a,b)=> b.rawP - a.rawP);
-            const totalRaw = rows.reduce((s,r)=>s+r.rawP, 0);
-            const or = margins.otScorer || 1.20;
-            const scale = totalRaw > 0 ? (pSeriesHasOT / totalRaw) : 1;
-            const adjusted = rows.map(r => ({...r, adjP: Math.min(0.9999, r.rawP * scale * or)}));
-            return <Card>
-              <SH title="Player to Score OT Goal in Series" sub={`Any OT in series: ${(pSeriesHasOT*100).toFixed(1)}% · OR: ${or}x · Top 40 shown`}/>
-              <div style={{marginBottom:8,fontSize:11,color:"var(--color-text-tertiary)"}}>
-                Playoff OT is continuous — every active skater can score. Shrunk goal share × role weight × team OT-win share × P(OT in series).
-              </div>
-              <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-                <TH cols={["Player","Team","Role","Share",...(showTrue?["True%"]:[]),"Adj%","American","Decimal"]}/>
-                <tbody>{adjusted.slice(0,40).map((r,i)=>(
-                  <tr key={r.name+r.team} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)")}}>
-                    <td style={{padding:"3px 8px"}}>{r.name}</td>
-                    <td style={{padding:"3px 8px"}}><span style={{fontSize:9,padding:"1px 4px",borderRadius:2,background:"rgba(59,130,246,0.12)",color:"#60a5fa"}}>{r.team}</span></td>
-                    <td style={{padding:"3px 8px"}}><RoleBadge role={r.lineRole}/></td>
-                    <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-tertiary)"}}>{(r.share*100).toFixed(1)}%</td>
-                    {showTrue&&<td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(r.rawP*100).toFixed(2)}%</td>}
-                    <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{(r.adjP*100).toFixed(2)}%</td>
-                    <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500,color:r.adjP>=0.05?"#4ade80":"var(--color-text-primary)"}}>{fmt(r.adjP)}</td>
-                    <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{toDec(r.adjP).toFixed(2)}</td>
-                  </tr>
-                ))}</tbody>
-              </table>
-            </Card>;
-          })()}
-
-          {mkt==="mostgoals"&&<Card><SH title="Team With Most Goals" sub={`Realized: ${s.homeAbbr||"H"} ${realized.goalsH}g · ${s.awayAbbr||"A"} ${realized.goalsA}g · OR: ${margins.teamMostGoals}x`}/>
-            <div style={{marginBottom:10,fontSize:11,color:"var(--color-text-tertiary)"}}>Push (tie) pays full.</div>
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
-              <TH cols={["Outcome",...(showTrue?["True%"]:[]),"Adj%","American","Decimal"]}/>
-              <tbody>
-                <tr style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:mostGoalsMkt._settled&&mostGoalsMkt._settledSide!=="home"?0.4:1}}>
-                  <td style={{padding:"5px 8px"}}>{s.homeTeam||"Home"}{mostGoalsMkt._settled&&<span style={{marginLeft:6,fontSize:9,color:mostGoalsMkt._settledSide==="home"?"#10b981":"#ef4444"}}>{mostGoalsMkt._settledSide==="home"?"✓":"✗"}</span>}</td>
-                  {showTrue&&<td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{(mostGoalsMkt.pHomeMost*100).toFixed(1)}%</td>}
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11}}>{(mostGoalsMkt.ah*100).toFixed(1)}%</td>
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:12,fontWeight:500,color:mostGoalsMkt.ah>=0.5?"#4ade80":"var(--color-text-primary)"}}>{mostGoalsMkt._settled?"—":fmt(mostGoalsMkt.ah)}</td>
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{mostGoalsMkt._settled?"—":toDec(mostGoalsMkt.ah).toFixed(2)}</td>
-                </tr>
-                <tr style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:mostGoalsMkt._settled&&mostGoalsMkt._settledSide!=="away"?0.4:1}}>
-                  <td style={{padding:"5px 8px"}}>{s.awayTeam||"Away"}{mostGoalsMkt._settled&&<span style={{marginLeft:6,fontSize:9,color:mostGoalsMkt._settledSide==="away"?"#10b981":"#ef4444"}}>{mostGoalsMkt._settledSide==="away"?"✓":"✗"}</span>}</td>
-                  {showTrue&&<td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{(mostGoalsMkt.pAwayMost*100).toFixed(1)}%</td>}
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11}}>{(mostGoalsMkt.aa*100).toFixed(1)}%</td>
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:12,fontWeight:500,color:mostGoalsMkt.aa>=0.5?"#4ade80":"var(--color-text-primary)"}}>{mostGoalsMkt._settled?"—":fmt(mostGoalsMkt.aa)}</td>
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{mostGoalsMkt._settled?"—":toDec(mostGoalsMkt.aa).toFixed(2)}</td>
-                </tr>
-                <tr style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
-                  <td style={{padding:"5px 8px",color:"var(--color-text-secondary)"}}>Tied (Push)</td>
-                  {showTrue&&<td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(mostGoalsMkt.pTied*100).toFixed(1)}%</td>}
-                  <td colSpan={3} style={{padding:"5px 8px",textAlign:"right",fontSize:10,color:"var(--color-text-tertiary)"}}>void / push</td>
-                </tr>
-              </tbody>
-            </table>
-          </Card>}
-
-          {mkt==="teamgoals"&&<Card><SH title="Per-Team Total Goals O/U" sub={`Realized: ${s.homeAbbr||"H"} ${realized.goalsH}g · ${s.awayAbbr||"A"} ${realized.goalsA}g · OR: ${margins.teamGoals}x`}/>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:0}}>
-              {[["home",s.homeTeam||s.homeAbbr||"Home",teamGoalsMkt.home],["away",s.awayTeam||s.awayAbbr||"Away",teamGoalsMkt.away]].map(([side,name,data],si)=>(
-                <div key={side} style={{
-                  padding:"0 16px 0",
-                  borderRight:si===0?`2px solid ${dark?"#2d3147":"#e2e8f0"}`:"none",
-                  paddingLeft:si===1?16:0,
-                }}>
-                  <div style={{fontSize:11,fontWeight:500,color:side==="home"?"#60a5fa":"#a78bfa",marginBottom:8,paddingBottom:6,borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
-                    {name} <span style={{color:"var(--color-text-tertiary)",fontWeight:400,fontSize:10}}>λ={data.lambda.toFixed(2)}</span>
-                  </div>
-                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-                    <TH cols={["Line",...(showTrue?["P(O)"]:[]),"Ov%","Over","Under"]}/>
-                    <tbody>{data.rows.map((r,i)=>(
-                      <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)"),opacity:r._settled?0.4:1}}>
-                        <td style={{padding:"4px 6px",fontFamily:"var(--font-mono)"}}>{r.line}{r._settled&&<span style={{marginLeft:4,fontSize:9,color:r._settledSide==="over"?"#10b981":"#ef4444"}}>{r._settledSide==="over"?"O✓":"U✓"}</span>}</td>
-                        {showTrue&&<td style={{padding:"4px 6px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(r.pOver*100).toFixed(1)}%</td>}
-                        <td style={{padding:"4px 6px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{(r.ao*100).toFixed(1)}%</td>
-                        <td style={{padding:"4px 6px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{r._settled?"—":fmt(r.ao)}</td>
-                        <td style={{padding:"4px 6px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{r._settled?"—":fmt(r.au)}</td>
-                      </tr>
-                    ))}</tbody>
-                  </table>
-                </div>
-              ))}
-            </div>
-          </Card>}
-
-          {mkt==="parlay"&&(()=>{
-            const gNum = parlayMkt.gameNum;
-            const gPlayed = s.games.filter(g=>g.result).length;
-            const parlayTitle = gNum ? `Game ${gNum} × Series Winner Parlay` : "Parlay (series complete)";
-            const parlayNote = gPlayed === 0
-              ? "Next unplayed game result × series winner (4 combos)"
-              : `Based on current series state (${s.games.filter(g=>g.result==="home").length}-${s.games.filter(g=>g.result==="away").length}). Next game × series winner.`;
-            return <Card>
-              <SH title={parlayTitle} sub={`OR: ${margins.parlay}x`}/>
-              <div style={{marginBottom:8,fontSize:11,color:"var(--color-text-tertiary)"}}>{parlayNote}</div>
-              <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
-                <TH cols={["Parlay",...(showTrue?["True%"]:[]),"Adj%","American","Decimal"]}/>
-                <tbody>{parlayMkt.rows.map((r,i)=><OR key={i} label={r.label.replace("Home",s.homeTeam||"Home").replace("Away",s.awayTeam||"Away")} tp={r.tp} ap={r.ap} showTrue={showTrue}/>)}</tbody>
-              </table>
-            </Card>;
-          })()}
-
-          {mkt==="props"&&<PropsPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark} mode="ou" simResult={simResult}/>}
-          {mkt==="binary"&&<PropsPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark} mode="binary" simResult={simResult}/>}
-          {mkt==="goaliesaves"&&<GoalieSavesPanel s={s} expG={expG} goalies={goalies} margins={margins} showTrue={showTrue} dark={dark}/>}
-          {mkt==="playerdetail"&&<PlayerDetailPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark}/>}
-          {mkt==="seriesleader"&&<SeriesLeaderPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark} simResult={simResult}/>}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── PROPS PANEL (shared O/U + Binary) ───────────────────────────────────────
-function PropsPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,players,globals,margins,showTrue,dark,mode,simResult}) {
-  const [stat,setStat]=useState("g");
-  const [line,setLine]=useState(mode==="binary"?1:0.5);
-  const [expanded,setExpanded]=useState(()=>new Set()); // v24: expanded player keys for alt-line ladder
-  const toggleExpand=(key)=>setExpanded(prev=>{const n=new Set(prev); n.has(key)?n.delete(key):n.add(key); return n;});
-  const STATS=[
-    {id:"g",label:"Goals",mk:"propsGoals"},{id:"a",label:"Assists",mk:"propsAssists"},
-    {id:"pts",label:"Points",mk:"propsPoints"},{id:"sog",label:"SOG",mk:"propsSOG"},
-    {id:"hit",label:"Hits",mk:"propsHits"},{id:"blk",label:"Blocks",mk:"propsBlocks"},
-    {id:"tk",label:"Takeaways",mk:"propsTakeaways"},
-    {id:"give",label:"Giveaways",mk:"propsGiveaways"},
-  ];
-  const statMeta=STATS.find(x=>x.id===stat)||STATS[0];
-  const statMargin=margins[statMeta.mk]||1.05;
-
-  const pool=useMemo(()=>{
-    if(!players)return[];
-    const teams=new Set([s.homeAbbr,s.awayAbbr].filter(Boolean));
-    return players.filter(p=>teams.has(p.team)&&p.lineRole!=="SCRATCHED");
-  },[players,s.homeAbbr,s.awayAbbr]);
-
-  const results=useMemo(()=>{
-    const {rateDiscount,dispersion}=globals;
-    // v46: stat-specific dispersion (scoring stats use ~Poisson, physical stats use overdispersed NB)
-    const r = dispersionFor(stat, dispersion);
-    // v24 Phase E: precompute sim index + points-PMF if sim is available and stat is simulated
-    const simStats = new Set(["g","a","sog","hit","blk","tk","pim","give"]);
-    const simIdx = simResult ? new Map(simResult.pool.map((sp,i)=>[sp.name+"|"+sp.team, i])) : null;
-    return pool.map(p=>{
-      const rm=roleMultiplier(p.lineRole, stat);
-      // stat key mapping
-      const pgKey=stat==="tk"?"take_pg":stat==="pim"?"pim_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
-      // v13: shrink rate for <20 GP; scratched already filtered out above
-      const shrunk=shrinkRate(p[pgKey],p.gp,stat);
-      // v21: stat-category rate adjustment (physical stats go up, scoring stays at baseline discount)
-      const rm_rate_disc = shrunk*rm*rateDiscount*statRateMultiplier(stat);
-      const remainingGames = Math.max(0, expG - (p.pGP||0));
-      const actual=readActual(p, stat);
-      // v16: for scoring stats, use per-game probability-weighted goal equivalents (respects per-game expTotal);
-      // for defensive stats, fall back to flat expected-games-remaining.
-      // v23: for scoring stats, gameEquivalentsFor(team, stat) additionally applies per-game goalie-faced multiplier.
-      const gEq = SCORING_STATS.has(stat) && gameEquivalentsFor
-        ? gameEquivalentsFor(p.team, stat)
-        : (gameEquivalents!=null && SCORING_STATS.has(stat)) ? gameEquivalents : remainingGames;
-      const futureLam = Math.max(0.0001, rm_rate_disc*gEq);
-      const lam=Math.max(0.0001,actual+futureLam);
-      // v22: settled logic.
-      // Binary (X+): settled YES when actual >= line (irrevocable win).
-      // O/U: settled OVER when actual > line (half-lines mean strict >).
-      //       settled UNDER only if mathematically impossible to reach line — i.e., when no games remain (remainingGames===0) and actual < line.
-      const settledYes = mode==="binary"
-        ? actual >= line
-        : actual > line;
-      const settledNo = mode==="ou" && actual <= line && remainingGames <= 0 && gEq <= 0;
-      const settled = settledYes || settledNo;
-      // Only compute pOver for unsettled rows; settled rows get pOver=1 (if Yes) or 0 (if No)
-      let pOver, effectiveLine, needMore;
-      if (settledYes) { pOver = 1; effectiveLine = line; needMore = 0; }
-      else if (settledNo) { pOver = 0; effectiveLine = line; needMore = Math.max(0, Math.ceil(line-0.001) - actual); }
-      else {
-        // v13 fix: For binary (1+), bump the line above what they already have.
-        effectiveLine = mode==="binary" ? Math.max(line, actual+1) : line;
-        const lineInt=Math.ceil(effectiveLine-0.001);
-        needMore = Math.max(0, lineInt - actual);
-        pOver = needMore===0 ? 1 : 1-nbCDF(needMore-1, futureLam, r);
-      }
-      // v24 Phase E: Unified-sim Over% for comparison. Uses the correlated sim's PMF.
-      // For pts, sums G and A PMFs via convolution (since sim doesn't store pts PMF directly).
-      let pSim = null;
-      if (simIdx && (simStats.has(stat) || stat==="pts")) {
-        const idx = simIdx.get(p.name+"|"+p.team);
-        if (idx != null) {
-          let pmf;
-          if (stat === "pts") {
-            // Convolve g and a PMFs to get pts PMF
-            const gPMF = simResult.playerPMF[idx].g;
-            const aPMF = simResult.playerPMF[idx].a;
-            const maxK = gPMF.length + aPMF.length - 2;
-            pmf = convolve(gPMF, aPMF, maxK);
-          } else {
-            pmf = simResult.playerPMF[idx][stat];
-          }
-          if (pmf) {
-            if (settledYes) pSim = 1;
-            else if (settledNo) pSim = 0;
-            else {
-              const lineInt = Math.ceil(effectiveLine - 0.001);
-              const threshold = mode==="binary" ? Math.max(1, lineInt) : (Math.floor(effectiveLine)===effectiveLine ? lineInt+1 : lineInt);
-              // pSim = P(total >= threshold); sim PMF is indexed by total, so sum tail
-              let s = 0; for (let k = threshold; k < pmf.length; k++) s += pmf[k];
-              pSim = s;
-            }
-          }
-        }
-      }
-      // Apply margin only to uncertain events
-      const [adjO,adjU]= settled || pOver>=0.9999 ? [pOver, 1-pOver] :
-                         pOver<=0.0001 ? [0,1] : applyMargin([pOver,1-pOver],statMargin);
-      return {...p,lam,futureLam,actual,effectiveLine,needMore,pYes:pOver,pSim,adjYes:adjO,adjNo:adjU,settled,settledYes,settledNo,remainingGames};
-    }).sort((a,b)=>{
-      // v49: settled rows drop to bottom; unsettled sort by adjYes desc
-      if (!!a.settled !== !!b.settled) return a.settled ? 1 : -1;
-      return b.adjYes - a.adjYes;
-    });
-  },[pool,stat,line,globals,expG,statMargin,gameEquivalents,mode,simResult]);
-
-  if(!s.homeAbbr||!s.awayAbbr) return <Card><div style={{color:"var(--color-text-secondary)",fontSize:12}}>Set team abbreviations to load props</div></Card>;
-
-  const title=mode==="binary"
-    ?`To Record ${line}+ ${statMeta.label}`
-    :`O/U ${statMeta.label} — Line ${line}`;
-
-  return <Card>
-    <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:10,flexWrap:"wrap"}}>
-      <SH title={title} sub={`OR: ${statMargin}x · λ from reg season × ${globals.rateDiscount} discount`}/>
-      <Seg options={STATS.map(s=>({id:s.id,label:s.label}))} value={stat} onChange={v=>{setStat(v);setLine(mode==="binary"?1:v==="sog"?2.5:v==="hit"?2.5:0.5);}} accent="#1d4ed8"/>
-      <label style={{fontSize:11,color:"var(--color-text-secondary)",display:"flex",gap:5,alignItems:"center"}}>
-        {mode==="binary"?"Min:":"Line:"} <LazyNI value={line} onCommit={setLine} min={mode==="binary"?1:0.5} max={50} step={mode==="binary"?1:0.5} style={{width:48}} showSpinner={false}/>
-      </label>
-      {mode==="ou" && <>
-        <button onClick={()=>{
-          if (expanded.size>0) setExpanded(new Set());
-          else setExpanded(new Set(results.filter(r=>!r.settled).map(r=>r.name+"|"+r.team)));
-        }} style={{fontSize:10,padding:"3px 8px",borderRadius:4,border:"0.5px solid var(--color-border-secondary)",background:"transparent",color:"var(--color-text-secondary)",cursor:"pointer"}}>{expanded.size>0?"Collapse all":"Expand all"}</button>
-        <span style={{fontSize:10,color:"var(--color-text-tertiary)",fontStyle:"italic"}}>click a row to see alt lines</span>
-      </>}
-    </div>
-    <div style={{overflowX:"auto"}}>
-      <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-        <TH cols={["#","Player","Team","Role","Now","Line","λ",...(showTrue?["True%"]:[]),...(simResult?["Sim%"]:[]),"Adj%","Yes Odds","No Odds"]}/>
-        <tbody>{results.map((p,i)=>{
-          // v22: use settled flag from result (definitive), distinguish settledYes vs settledNo
-          const settled = p.settled;
-          const settledYes = p.settledYes;
-          const settledNo = p.settledNo;
-          const rowOpacity = settled ? 0.45 : 1;
-          const settleLabel = settledYes ? "✓ HIT" : settledNo ? "✗ MISS" : "";
-          const settleColor = settledYes ? "#10b981" : settledNo ? "#ef4444" : "#64748b";
-          // v24: alt-line ladder expansion (O/U only, not settled)
-          const canExpand = mode==="ou" && !settled;
-          const pKey = p.name+"|"+p.team;
-          const isExp = expanded.has(pKey);
-          const colCount = 10 + (showTrue?1:0) + (simResult?1:0);
-          // Build ladder only when expanded (lazy)
-          let ladder = null;
-          if (canExpand && isExp) {
-            const {dispersion} = globals;
-            // v46: stat-specific dispersion
-            const r = dispersionFor(stat, dispersion);
-            const lam = p.lam;
-            const futureLam = p.futureLam;
-            const actual = p.actual;
-            const remainingGames = p.remainingGames;
-            const maxLine = Math.ceil(lam)+4;
-            const rows = [];
-            for (let l=0.5; l<=maxLine; l+=0.5) {
-              const li = Math.ceil(l-0.001);
-              const need = Math.max(0, li-actual);
-              // CORRECT MATH: condition on actual (realized), model only the future.
-              // line already cleared (actual > l) -> settled Over: pO=1
-              // line unreachable (need > 0 AND no games/goals remain) -> settled Under: pO=0
-              // otherwise: pOver = P(X_future >= need) = 1 - F(need-1; futureLam, r)
-              const settledO = actual > l; // strict > for half-lines
-              const settledU = need > 0 && remainingGames <= 0 && futureLam <= 0.0002;
-              let pO;
-              if (settledO) pO = 1;
-              else if (settledU) pO = 0;
-              else pO = need === 0 ? 1 : 1 - nbCDF(need-1, futureLam, r);
-              const pU = 1 - pO;
-              // No margin on settled lines
-              const [ao,au] = (settledO || settledU || pO>=0.9999) ? [pO,pU]
-                            : pO<=0.0001 ? [0,1]
-                            : applyMargin([pO,pU],statMargin);
-              rows.push({line:l,need,pO,pU,ao,au,settledO,settledU});
-            }
-            ladder = rows;
-          }
-          return (
-          <Fragment key={i}>
-          <tr style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:settled?(dark?"rgba(100,116,139,0.08)":"rgba(100,116,139,0.05)"):i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)"),opacity:rowOpacity,cursor:canExpand?"pointer":"default"}} onClick={canExpand?()=>toggleExpand(pKey):undefined}>
-            <td style={{padding:"3px 8px",color:"var(--color-text-tertiary)",fontSize:9}}>{canExpand?<span style={{display:"inline-block",width:10,color:"#60a5fa",marginRight:3,transform:isExp?"rotate(90deg)":"none",transition:"transform 120ms"}}>▸</span>:""}{i+1}</td>
-            <td style={{padding:"3px 8px",fontWeight:settled?400:(i<3?500:400),textDecoration:settled?"line-through":"none"}}>{p.name}{settled?<span style={{marginLeft:6,fontSize:9,color:settleColor,fontWeight:500,textDecoration:"none"}}>{settleLabel}</span>:""}</td>
-            <td style={{padding:"3px 8px",textAlign:"right"}}><span style={{fontSize:9,padding:"1px 4px",borderRadius:2,background:"rgba(59,130,246,0.12)",color:"#60a5fa"}}>{p.team}</span></td>
-            <td style={{padding:"3px 8px",textAlign:"right"}}><RoleBadge role={p.lineRole}/></td>
-            <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,fontWeight:p.actual>0?500:400,color:p.actual>0?"#4ade80":"var(--color-text-tertiary)"}}>{p.actual||0}</td>
-            <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:mode==="binary"&&p.effectiveLine>line?"#f59e0b":"var(--color-text-secondary)"}}>{mode==="binary"?`${p.effectiveLine}+`:p.line}</td>
-            <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{p.lam.toFixed(2)}</td>
-            {showTrue&&<td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{settled?"—":(p.pYes*100).toFixed(1)+"%"}</td>}
-            {simResult&&<td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:p.pSim!=null&&Math.abs(p.pSim-p.pYes)>0.02?"#f59e0b":"#a78bfa"}} title={p.pSim!=null?`Unified MC · Δ vs closed-form: ${((p.pSim-p.pYes)*100).toFixed(2)}pp`:"not simulated"}>{settled||p.pSim==null?"—":(p.pSim*100).toFixed(1)+"%"}</td>}
-            <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{settled?"—":(p.adjYes*100).toFixed(1)+"%"}</td>
-            <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500,color:settled?"var(--color-text-tertiary)":(p.adjYes>=0.5?"#4ade80":"var(--color-text-primary)")}}>{settled?"—":fmt(p.adjYes)}</td>
-            <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{settled?"—":fmt(p.adjNo)}</td>
-          </tr>
-          {ladder && <tr style={{background:dark?"rgba(59,130,246,0.04)":"rgba(59,130,246,0.03)"}}>
-            <td colSpan={colCount} style={{padding:"6px 10px 10px 28px"}}>
-              <div style={{fontSize:9,color:"var(--color-text-tertiary)",marginBottom:4,letterSpacing:0.4,textTransform:"uppercase"}}>Alt Lines · {p.name} · λ={p.lam.toFixed(3)} · OR={statMargin}x</div>
-              <div style={{overflowX:"auto"}}>
-                <table style={{borderCollapse:"collapse",fontSize:10,width:"auto"}}>
-                  <thead><tr style={{color:"var(--color-text-tertiary)"}}>
-                    <th style={{padding:"2px 8px",textAlign:"left",fontWeight:500}}>Line</th>
-                    <th style={{padding:"2px 8px",textAlign:"right",fontWeight:500}}>Need</th>
-                    {showTrue&&<th style={{padding:"2px 8px",textAlign:"right",fontWeight:500}}>True Ov</th>}
-                    <th style={{padding:"2px 8px",textAlign:"right",fontWeight:500}}>Ov%</th>
-                    <th style={{padding:"2px 8px",textAlign:"right",fontWeight:500}}>Un%</th>
-                    <th style={{padding:"2px 8px",textAlign:"right",fontWeight:500}}>Over</th>
-                    <th style={{padding:"2px 8px",textAlign:"right",fontWeight:500}}>Under</th>
-                  </tr></thead>
-                  <tbody>{ladder.map((r,j)=>{
-                    const isKey = !r.settledO && !r.settledU && Math.abs(r.pO-0.5)<0.08;
-                    const bg = r.settledO ? (dark?"rgba(16,185,129,0.08)":"rgba(16,185,129,0.06)")
-                             : r.settledU ? (dark?"rgba(239,68,68,0.08)":"rgba(239,68,68,0.06)")
-                             : isKey ? (dark?"rgba(59,130,246,0.1)":"rgba(59,130,246,0.06)")
-                             : "transparent";
-                    const lineColor = r.settledO ? "#10b981" : r.settledU ? "#ef4444" : isKey ? "#60a5fa" : "var(--color-text-primary)";
-                    return <tr key={j} style={{background:bg}}>
-                      <td style={{padding:"1px 8px",fontFamily:"var(--font-mono)",fontWeight:isKey||r.settledO||r.settledU?500:400,color:lineColor}}>{r.line.toFixed(1)}</td>
-                      <td style={{padding:"1px 8px",textAlign:"right",fontFamily:"var(--font-mono)",color:r.need===0?"#4ade80":"var(--color-text-secondary)"}}>{r.need===0?"✓":r.need}</td>
-                      {showTrue&&<td style={{padding:"1px 8px",textAlign:"right",fontFamily:"var(--font-mono)",color:"var(--color-text-secondary)"}}>{r.settledO?"100.0%":r.settledU?"0.0%":(r.pO*100).toFixed(1)+"%"}</td>}
-                      <td style={{padding:"1px 8px",textAlign:"right",fontFamily:"var(--font-mono)"}}>{r.settledO?"100.0%":r.settledU?"0.0%":(r.ao*100).toFixed(1)+"%"}</td>
-                      <td style={{padding:"1px 8px",textAlign:"right",fontFamily:"var(--font-mono)",color:"var(--color-text-secondary)"}}>{r.settledO?"0.0%":r.settledU?"100.0%":(r.au*100).toFixed(1)+"%"}</td>
-                      <td style={{padding:"1px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontWeight:500,color:r.settledO?"#10b981":r.ao>=0.5?"#4ade80":"var(--color-text-primary)"}}>{r.settledO?"✓ HIT":r.settledU?"—":fmt(r.ao)}</td>
-                      <td style={{padding:"1px 8px",textAlign:"right",fontFamily:"var(--font-mono)",color:r.settledU?"#ef4444":"var(--color-text-secondary)"}}>{r.settledU?"✗ MISS":r.settledO?"—":fmt(r.au)}</td>
-                    </tr>;
-                  })}</tbody>
-                </table>
-              </div>
-            </td>
-          </tr>}
-          </Fragment>
-          );
-        })}</tbody>
-      </table>
-    </div>
-  </Card>;
-}
-
-// ─── GOALIE SAVES PANEL ──────────────────────────────────────────────────────
-// Model: lambda = starter_share × saves_pg × expGames (Poisson O/U)
-// Line auto-set to round(lambda) - 0.5 (nearest under). Matches Goalie Series Props sheet.
-function GoalieSavesPanel({s,expG,goalies,margins,showTrue,dark}) {
-  const or = margins.propsGoals||1.05; // reuse saves margin setting
-
-  const seriesGoalies = useMemo(()=>{
-    if(!goalies) return [];
-    const teams = new Set([s.homeAbbr, s.awayAbbr].filter(Boolean));
-    if(!teams.size) return [];
-    return goalies
-      .filter(g => teams.has(g.team))
-      .map(g => {
-        const lam = Math.max(0.0001, g.starter_share * g.saves_pg * expG);
-        const autoLine = Math.max(0.5, Math.round(lam) - 0.5);
-        return {...g, lam, autoLine};
-      })
-      .sort((a,b) => b.starter_share - a.starter_share);
-  },[goalies, s.homeAbbr, s.awayAbbr, expG]);
-
-  if(!goalies) return <Card><div style={{color:"var(--color-text-secondary)",fontSize:12}}>Load goalies CSV in Upload tab to enable goalie saves props</div></Card>;
-  if(!s.homeAbbr||!s.awayAbbr) return <Card><div style={{color:"var(--color-text-secondary)",fontSize:12}}>Set team abbreviations to load goalie props</div></Card>;
-  if(!seriesGoalies.length) return <Card><div style={{color:"var(--color-text-secondary)",fontSize:12}}>No goalies found for {s.homeAbbr} / {s.awayAbbr} — check team abbreviations match goalies CSV</div></Card>;
-
-  return <Card>
-    <SH title="Goalie Saves O/U" sub={`λ = starter_share × saves_pg × expGames · OR: ${or}x`}/>
-    <div style={{fontSize:10,color:"var(--color-text-tertiary)",marginBottom:10}}>
-      Exp series games: <strong style={{color:"var(--color-text-primary)"}}>{expG.toFixed(2)}</strong> · Line auto-set to round(λ)−0.5
-    </div>
-    {[s.homeAbbr, s.awayAbbr].map(abbr => {
-      const teamGoalies = seriesGoalies.filter(g => g.team === abbr);
-      if(!teamGoalies.length) return null;
-      return (
-        <div key={abbr} style={{marginBottom:20}}>
-          <div style={{fontSize:10,fontWeight:500,color:"var(--color-text-secondary)",marginBottom:6,textTransform:"uppercase",letterSpacing:"0.08em"}}>{abbr} — {TEAM_NAMES[abbr]||abbr}</div>
-          <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-            <TH cols={["Goalie","Share","Sv/G","λ","Line",...(showTrue?["P(O)"]:[]),"Ov Adj%","Over","Under"]}/>
-            <tbody>{teamGoalies.map((g,i)=>{
-              const [ao,au] = applyMargin([1-poissonCDF(Math.ceil(g.autoLine-0.001)-1,g.lam), poissonCDF(Math.ceil(g.autoLine-0.001)-1,g.lam)], or);
-              const pOver = 1-poissonCDF(Math.ceil(g.autoLine-0.001)-1, g.lam);
-              return (
-                <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)"),opacity:g.starter_share<0.05?0.45:1}}>
-                  <td style={{padding:"4px 8px",fontWeight:g.starter_share>0.4?500:400}}>{g.name}</td>
-                  <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(g.starter_share*100).toFixed(1)}%</td>
-                  <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{g.saves_pg.toFixed(1)}</td>
-                  <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{g.lam.toFixed(1)}</td>
-                  <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontWeight:500}}>{g.autoLine.toFixed(1)}</td>
-                  {showTrue&&<td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(pOver*100).toFixed(1)}%</td>}
-                  <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{(ao*100).toFixed(1)}%</td>
-                  <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500,color:ao>=0.5?"#4ade80":"var(--color-text-primary)"}}>{fmt(ao)}</td>
-                  <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{fmt(au)}</td>
-                </tr>
-              );
-            })}</tbody>
-          </table>
-        </div>
-      );
-    })}
-    <div style={{marginTop:8,padding:"6px 10px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",fontSize:10,color:"var(--color-text-tertiary)"}}>
-      Goalies with &lt;5% starter share shown at reduced opacity — line not priced (insufficient starts).
-      Playoff actual saves can be entered in Roles tab once playoffs begin.
-    </div>
-  </Card>;
-}
-
-// ─── PLAYER O/U DETAIL PANEL ─────────────────────────────────────────────────
-// Full multi-line O/U table for a single selected player across all stats.
-// Matches Player O-U Detail sheet: shows every half-integer line from 0.5 up.
-function PlayerDetailPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,players,globals,margins,showTrue,dark}) {
-  const [selectedPlayer,setSelectedPlayer] = useState("");
-  const [stat,setStat] = useState("g");
-  const STATS=[
-    {id:"g",label:"Goals",mk:"propsGoals"},{id:"a",label:"Assists",mk:"propsAssists"},
-    {id:"pts",label:"Points",mk:"propsPoints"},{id:"sog",label:"SOG",mk:"propsSOG"},
-    {id:"hit",label:"Hits",mk:"propsHits"},{id:"blk",label:"Blocks",mk:"propsBlocks"},
-    {id:"tk",label:"Takeaways",mk:"propsTakeaways"},
-    {id:"give",label:"Giveaways",mk:"propsGiveaways"},
-  ];
-  const statMeta = STATS.find(x=>x.id===stat)||STATS[0];
-  const or = margins[statMeta.mk]||1.05;
-
-  const pool = useMemo(()=>{
-    if(!players) return [];
-    const teams = new Set([s.homeAbbr,s.awayAbbr].filter(Boolean));
-    return players.filter(p=>teams.has(p.team)&&p.lineRole!=="SCRATCHED").sort((a,b)=>a.team.localeCompare(b.team)||b.pts-a.pts);
-  },[players,s.homeAbbr,s.awayAbbr]);
-
-  const player = pool.find(p=>p.name===selectedPlayer);
-
-  const lines = useMemo(()=>{
-    if(!player) return [];
-    const {rateDiscount,dispersion} = globals;
-    // v46: stat-specific dispersion
-    const r = dispersionFor(stat, dispersion);
-    const rm = roleMultiplier(player.lineRole, stat);
-    const pgKey = stat==="tk"?"take_pg":stat==="pim"?"pim_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
-    const rr_base = shrinkRate(player[pgKey],player.gp,stat)*rm*rateDiscount*statRateMultiplier(stat);
-    const remainingGames = Math.max(0, expG - (player.pGP||0));
-    const gEq = SCORING_STATS.has(stat) && gameEquivalentsFor
-      ? gameEquivalentsFor(player.team, stat)
-      : (gameEquivalents!=null && SCORING_STATS.has(stat)) ? gameEquivalents : remainingGames;
-    const actual = readActual(player, stat);
-    const futureLam = Math.max(0.0001, rr_base*gEq);
-    const lam = Math.max(0.0001, actual + futureLam);
-    // Build line table: 0.5 through ceil(lam)+4, step 0.5
-    const maxLine = Math.ceil(lam)+4;
-    const lineArr = [];
-    for(let l=0.5; l<=maxLine; l+=0.5) {
-      const li = Math.ceil(l-0.001);
-      const need = Math.max(0, li-actual);
-      // Conditional on actual: model only future, add realized
-      const settledO = actual > l;
-      const settledU = need > 0 && remainingGames <= 0 && futureLam <= 0.0002;
-      let pOver;
-      if (settledO) pOver = 1;
-      else if (settledU) pOver = 0;
-      else pOver = need===0 ? 1 : 1-nbCDF(need-1, futureLam, r);
-      const pUnder = 1-pOver;
-      const [ao,au] = (settledO||settledU||pOver>=0.9999) ? [pOver,pUnder]
-                    : pOver<=0.0001 ? [0,1]
-                    : applyMargin([pOver,pUnder],or);
-      lineArr.push({line:l,pOver,pUnder,ao,au,lam,actual,need,settledO,settledU});
-    }
-    return {lam, rows: lineArr};
-  },[player,stat,expG,globals,or,gameEquivalents,gameEquivalentsFor]);
-
-  if(!s.homeAbbr||!s.awayAbbr) return <Card><div style={{color:"var(--color-text-secondary)",fontSize:12}}>Set team abbreviations first</div></Card>;
-
-  return <Card>
-    <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:12,flexWrap:"wrap"}}>
-      <SH title="Player O/U Detail" sub="Full line table for selected player"/>
-      <select value={selectedPlayer} onChange={e=>setSelectedPlayer(e.target.value)}
-        style={{...SEL, minWidth:180, fontSize:12}}>
-        <option value="">— Select player —</option>
-        {pool.map(p=><option key={p.name+p.team} value={p.name}>{p.name} ({p.team})</option>)}
-      </select>
-      <Seg options={STATS.map(x=>({id:x.id,label:x.label}))} value={stat} onChange={setStat} accent="#1d4ed8"/>
-    </div>
-
-    {!player && <div style={{color:"var(--color-text-secondary)",fontSize:12,padding:"20px 0",textAlign:"center"}}>Select a player above</div>}
-
-    {player && lines.rows && <>
-      <div style={{display:"flex",gap:16,marginBottom:12,padding:"8px 10px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",flexWrap:"wrap"}}>
-        {[["Player",player.name],["Team",player.team],["Role",player.lineRole||"—"],["λ",lines.lam.toFixed(3)],["Actual",player[stat==="tk"?"pTK":stat==="pim"?"pPIM":"p"+stat.toUpperCase()]||0],["Exp Rem",expG.toFixed(2)+"g"],["OR",or+"x"]].map(([k,v])=>(
-          <div key={k} style={{fontSize:10}}>
-            <span style={{color:"var(--color-text-tertiary)"}}>{k}: </span>
-            <span style={{fontFamily:"var(--font-mono)",fontWeight:500,color:"var(--color-text-primary)"}}>{v}</span>
-          </div>
-        ))}
-      </div>
-      <div style={{overflowX:"auto"}}>
-        <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-          <TH cols={["Line","Actual","Need",...(showTrue?["P(Over)","P(Under)"]:[]),"Ov Adj%","Un Adj%","Over","Under"]}/>
-          <tbody>{lines.rows.map((r,i)=>{
-            // Highlight the auto-line row (closest to 50/50)
-            const isKey = !r.settledO && !r.settledU && Math.abs(r.pOver-0.5)<0.08;
-            const bg = r.settledO ? (dark?"rgba(16,185,129,0.08)":"rgba(16,185,129,0.06)")
-                     : r.settledU ? (dark?"rgba(239,68,68,0.08)":"rgba(239,68,68,0.06)")
-                     : isKey ? (dark?"rgba(59,130,246,0.08)":"rgba(59,130,246,0.05)")
-                     : i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)");
-            const lineColor = r.settledO?"#10b981":r.settledU?"#ef4444":isKey?"#60a5fa":"var(--color-text-primary)";
-            return (
-              <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:bg}}>
-                <td style={{padding:"3px 8px",fontFamily:"var(--font-mono)",fontWeight:isKey||r.settledO||r.settledU?500:400,color:lineColor}}>{r.line.toFixed(1)}</td>
-                <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{r.actual}</td>
-                <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:r.need===0?"#4ade80":"var(--color-text-secondary)"}}>{r.need===0?"✓":r.need}</td>
-                {showTrue&&<>
-                  <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{r.settledO?"100.0%":r.settledU?"0.0%":(r.pOver*100).toFixed(1)+"%"}</td>
-                  <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{r.settledO?"0.0%":r.settledU?"100.0%":(r.pUnder*100).toFixed(1)+"%"}</td>
-                </>}
-                <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{r.settledO?"100.0%":r.settledU?"0.0%":(r.ao*100).toFixed(1)+"%"}</td>
-                <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{r.settledO?"0.0%":r.settledU?"100.0%":(r.au*100).toFixed(1)+"%"}</td>
-                <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500,color:r.settledO?"#10b981":r.ao>=0.5?"#4ade80":"var(--color-text-primary)"}}>{r.settledO?"✓ HIT":r.settledU?"—":fmt(r.ao)}</td>
-                <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:r.settledU?"#ef4444":"var(--color-text-secondary)"}}>{r.settledU?"✗ MISS":r.settledO?"—":fmt(r.au)}</td>
-              </tr>
-            );
-          })}</tbody>
-        </table>
-      </div>
-    </>}
-  </Card>;
-}
-
-
-// Dead-heat leader market for both series teams. Per-stat temperature (power factor).
-// Matches Leader View sheet: separate overround + per-stat temperature inputs.
-const SERIES_LEADER_STATS = [
-  {id:"g",    label:"Goals",     temp:1.1, kMax:12},
-  {id:"a",    label:"Assists",   temp:1.3, kMax:15},
-  {id:"pts",  label:"Points",    temp:1.3, kMax:20},
-  {id:"sog",  label:"SOG",       temp:2.0, kMax:40},
-  {id:"hit",  label:"Hits",      temp:1.5, kMax:50},
-  {id:"blk",  label:"Blocks",    temp:1.5, kMax:40},
-  {id:"tk",   label:"TK",        temp:1.5, kMax:20},
-  {id:"give", label:"GV",        temp:1.5, kMax:30},
-  ];
-
-function SeriesLeaderPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,players,globals,margins,showTrue,dark,simResult}) {
-  const [stat,setStat]=useState("g");
-  const [customTemps,setCustomTemps]=useState({});
-  const meta=SERIES_LEADER_STATS.find(x=>x.id===stat)||SERIES_LEADER_STATS[0];
-  const temp=customTemps[stat]??meta.temp;
-  const or=margins.seriesLeader||1.15;
-
-  const pool=useMemo(()=>{
-    if(!players)return[];
-    const teams=new Set([s.homeAbbr,s.awayAbbr].filter(Boolean));
-    return players.filter(p=>teams.has(p.team)&&p.lineRole!=="SCRATCHED");
-  },[players,s.homeAbbr,s.awayAbbr]);
-
-  const leaderRows=useMemo(()=>{
-    if(!pool.length)return[];
-    const {rateDiscount,dispersion}=globals;
-    // v24 Phase E: if unified sim is available AND this stat is simulated, use its leader probs (correct teammate correlation).
-    // Otherwise fall back to independent-player MC (simulateLeader).
-    const simStats = new Set(["g","a","pts","sog","hit","blk","tk","pim","give"]);
-    const useUnified = simResult && simResult.leaderProb && simStats.has(stat);
-
-    // Build per-player lambda (for display), actual (for Now column), futureLam (for fallback)
-    const entries=pool.map(p=>{
-      const rm=roleMultiplier(p.lineRole, stat);
-      const pgKey=stat==="tk"?"take_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat==="pim"?"pim_pg":stat+"_pg";
-      const rr_base=shrinkRate(p[pgKey],p.gp,stat)*rm*rateDiscount*statRateMultiplier(stat);
-      const remainingGames = Math.max(0, expG - (p.pGP||0));
-      const gEq = SCORING_STATS.has(stat) && gameEquivalentsFor
-        ? gameEquivalentsFor(p.team, stat)
-        : (gameEquivalents!=null && SCORING_STATS.has(stat)) ? gameEquivalents : remainingGames;
-      const actual = readActual(p, stat);
-      const futureLam = Math.max(0.0001, rr_base*gEq);
-      return {actual, futureLam, lam: actual+futureLam};
-    });
-
-    let raw;
-    if (useUnified) {
-      // Map pool -> simResult index by name+team
-      const simIdx = new Map(simResult.pool.map((sp,i)=>[sp.name+"|"+sp.team, i]));
-      const simProbs = simResult.leaderProb[stat] || [];
-      raw = pool.map(p=>{
-        const idx = simIdx.get(p.name+"|"+p.team);
-        return idx==null ? 0 : (simProbs[idx] || 0);
-      });
-    } else {
-      const seed = 54321 + stat.charCodeAt(0);
-      // v46: stat-specific dispersion (scoring stats use ~Poisson)
-      const r = dispersionFor(stat, dispersion);
-      raw = simulateLeader(entries.map(e=>({futureLam:e.futureLam,actual:e.actual})), r, 10000, seed);
-    }
-
-    // v49: principled leader overround — cap favorites, redistribute overflow to longshots
-    const adj = applyLeaderOverround(raw, temp, or);
-    return pool.map((p,i)=>({...p,lambda:entries[i].lam,futureLam:entries[i].futureLam,actualStat:entries[i].actual,trueProb:raw[i],adjProb:adj[i]}))
-      .sort((a,b)=>b.adjProb-a.adjProb);
-  },[pool,stat,expG,globals,temp,or,gameEquivalents,gameEquivalentsFor,simResult]);
-
-  if(!s.homeAbbr||!s.awayAbbr) return <Card><div style={{color:"var(--color-text-secondary)",fontSize:12}}>Set team abbreviations to load series leaders</div></Card>;
-
-  const engineLabel = simResult && simResult.leaderProb ? `Unified MC (${simResult.trials/1000}k, L1)` : "Independent MC (10k)";
-
-  return <Card>
-    <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:10,flexWrap:"wrap"}}>
-      <SH title="Series Stat Leader" sub={`${engineLabel} · OR: ${or}x · Temp: ${temp}`}/>
-      <Seg options={SERIES_LEADER_STATS.map(s=>({id:s.id,label:s.label}))} value={stat} onChange={setStat} accent="#7c3aed"/>
-      <label style={{fontSize:11,color:"var(--color-text-secondary)",display:"flex",gap:4,alignItems:"center"}}>
-        Temp: <LazyNI value={temp} onCommit={v=>setCustomTemps(t=>({...t,[stat]:v}))} min={0.5} max={5} step={0.1} style={{width:46}} showSpinner={false}/>
-      </label>
-      {simResult && <span style={{fontSize:9,padding:"2px 6px",borderRadius:3,background:"rgba(124,58,237,0.15)",color:"#a78bfa",letterSpacing:0.4,fontWeight:500}}>UNIFIED</span>}
-    </div>
-    <div style={{overflowX:"auto"}}>
-      <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-        <TH cols={["#","Player","Team","Role","Now","λ",...(showTrue?["True%","DH%"]:[]),"Adj%","American","Dec"]}/>
-        <tbody>{leaderRows.map((p,i)=>{
-          const a=toAmer(p.adjProb);
-          // current actual series stat
-          const now=readActual(p, stat);
-          return <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)")}}>
-            <td style={{padding:"3px 8px",color:"var(--color-text-tertiary)",fontSize:9}}>{i+1}</td>
-            <td style={{padding:"3px 8px",fontWeight:i<3?500:400}}>{p.name}</td>
-            <td style={{padding:"3px 8px",textAlign:"right"}}><span style={{fontSize:9,padding:"1px 4px",borderRadius:2,background:"rgba(124,58,237,0.15)",color:"#a78bfa"}}>{p.team}</span></td>
-            <td style={{padding:"3px 8px",textAlign:"right"}}><RoleBadge role={p.lineRole}/></td>
-            <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:now>0?500:400,color:now>0?"#4ade80":"var(--color-text-tertiary)"}}>{now>0?now:"—"}</td>
-            <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{p.lambda.toFixed(2)}</td>
-            {showTrue&&<><td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(p.trueProb*100).toFixed(2)}%</td>
-            <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(Math.pow(p.trueProb,temp)*100).toFixed(2)}%</td></>}
-            <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{(p.adjProb*100).toFixed(2)}%</td>
-            <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500,color:a<0?"#4ade80":"var(--color-text-primary)"}}>{a>0?`+${a}`:a}</td>
-            <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{toDec(p.adjProb).toFixed(2)}</td>
-          </tr>;
-        })}</tbody>
-      </table>
-    </div>
-  </Card>;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// LINE COMPARE TAB
-// ═══════════════════════════════════════════════════════════════════════════════
-// Parser for book odds paste. Format: "Player Name +ODDS" or "Player Name -ODDS"
-// Handles: American odds (+390, -150), decimal (3.90), loose text/headers ignored.
-function parseBookPaste(text, playerPool) {
-  // Extract all "Name +/-NNNN" or "Name NNNN" patterns
-  // Strategy: find tokens matching american odds (+100 to +99999, -9999 to -100)
-  const lines = text.replace(/\s{2,}/g,' ').split(/[\n\r]+/);
-  const results = [];
-  const oddsRe = /([+-]\d{2,5})/g;
-  const nameOddsRe = /^(.+?)\s+([+-]\d{2,5})\s*$/;
-
-  // Build fuzzy match index from player pool
-  function normalize(s){ return s.toLowerCase().replace(/[^a-z]/g,''); }
-  const poolIndex = playerPool.map(p=>({...p, norm:normalize(p.name)}));
-
-  function fuzzyMatch(name) {
-    const n = normalize(name);
-    // Exact normalized match first
-    let m = poolIndex.find(p=>p.norm===n);
-    if(m) return m;
-    // Last name match (avoid false positives — require last name >= 4 chars)
-    const parts = name.trim().split(/\s+/);
-    const last = normalize(parts[parts.length-1]);
-    if(last.length>=4){
-      const lastMatches = poolIndex.filter(p=>p.norm.endsWith(last)||p.norm.includes(last));
-      if(lastMatches.length===1) return lastMatches[0];
-    }
-    // Starts-with match on full normalized name
-    if(n.length>=6){
-      const sw = poolIndex.filter(p=>p.norm.startsWith(n.slice(0,6))||n.startsWith(p.norm.slice(0,6)));
-      if(sw.length===1) return sw[0];
-    }
-    return null;
-  }
-
-  // Process line by line — each line may have "Name +ODDS" or just be header noise
-  let buf = "";
-  for(const raw of lines){
-    const line = raw.trim();
-    if(!line) continue;
-    // Try direct "Name ODDS" pattern first
-    const m = line.match(nameOddsRe);
-    if(m){
-      const candidate = m[1].trim();
-      const odds = parseInt(m[2]);
-      if(Math.abs(odds)>=100 && Math.abs(odds)<=99999){
-        const player = fuzzyMatch(candidate);
-        if(player) results.push({player, odds, raw:line, matched:true});
-        else results.push({player:null, odds, raw:line, matched:false, candidateName:candidate});
-      }
-      continue;
-    }
-    // No direct match — try to find odds token anywhere in line
-    const oddsTokens = [...line.matchAll(/([+-]\d{2,5})/g)];
-    for(const tok of oddsTokens){
-      const odds = parseInt(tok[1]);
-      if(Math.abs(odds)<100||Math.abs(odds)>99999) continue;
-      // Name is everything before the odds token
-      const namePart = line.slice(0, tok.index).trim().replace(/[^a-zA-Z\s'.]/g,'').trim();
-      if(namePart.split(/\s+/).length<2) continue; // need at least first + last
-      const player = fuzzyMatch(namePart);
-      if(player) results.push({player, odds, raw:line, matched:true});
-      else results.push({player:null, odds, raw:line, matched:false, candidateName:namePart});
-    }
-  }
-
-  // Deduplicate — if same player matched multiple times, keep first
-  const seen = new Set();
-  const deduped = results.filter(r=>{
-    if(!r.matched||!r.player) return true;
-    const key=r.player.name;
-    if(seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-
-  return deduped;
-}
-
-function amerToDecimal(amer){
-  if(amer>0) return +(1+100/amer).toFixed(3);
-  if(amer<0) return +(1+100/Math.abs(amer)).toFixed(3);
-  return null;
-}
-
-function CompareTab({leaderMarket,STATS,lStat,setLStat,lScope,setLScope,dark}) {
-  const BOOKS=["FanDuel","BetMGM","DraftKings","Pinnacle","Bet365"];
-  // bookOdds[bookName][playerName] = { amer, dec } (american int + decimal float)
-  const [bookOdds,setBookOdds]=useState({});
-  const [activeBook,setActiveBook]=useState("FanDuel");
-  const [pasteText,setPasteText]=useState("");
-  const [parseResult,setParseResult]=useState(null); // {matched,unmatched,book}
-  const [showPastePanel,setShowPastePanel]=useState(true);
-  const [showAll,setShowAll]=useState(true);
-  const [filterTeam,setFilterTeam]=useState("ALL");
-  const [search,setSearch]=useState("");
-
-  const teams=[...new Set(leaderMarket.map(p=>p.team))].sort();
-
-  function getOdds(book,name){ return bookOdds[book]?.[name]||null; }
-  function setPlayerOdds(book,name,amer,dec){
-    setBookOdds(prev=>({...prev,[book]:{...(prev[book]||{}),[name]:{amer,dec}}}));
-  }
-  function clearBook(book){ setBookOdds(prev=>({...prev,[book]:{}})); }
-
-  function handleParse(){
-    if(!pasteText.trim()) return;
-    const pool = leaderMarket; // already computed players with name/team
-    const parsed = parseBookPaste(pasteText, pool);
-    let matched=0, unmatched=[];
-    for(const r of parsed){
-      if(r.matched&&r.player){
-        const dec = amerToDecimal(r.odds);
-        setPlayerOdds(activeBook, r.player.name, r.odds, dec);
-        matched++;
-      } else if(!r.matched && r.candidateName) {
-        unmatched.push(r.candidateName);
-      }
-    }
-    setParseResult({matched, unmatched:[...new Set(unmatched)].slice(0,15), book:activeBook, total:parsed.length});
-    setPasteText("");
-  }
-
-  // Diff: book implied% - our adj%. Negative = we're shorter = value on our side.
-  function diffVal(bookDec, adjProb){
-    if(!bookDec||bookDec<=1) return null;
-    return (1/bookDec) - adjProb;
-  }
-  const diffColor=(v)=>v===null?"var(--color-text-tertiary)":v>0.025?"#ef4444":v<-0.025?"#4ade80":"var(--color-text-secondary)";
-  const fmtDiff=(v)=>v===null?"—":(v>0?"+":"")+(v*100).toFixed(1)+"%";
-
-  // Players with any book odds entered (for active book)
-  const withOdds = leaderMarket.filter(p=>getOdds(activeBook,p.name));
-  const displayed = leaderMarket
-    .filter(p=>filterTeam==="ALL"||p.team===filterTeam)
-    .filter(p=>!search||p.name.toLowerCase().includes(search.toLowerCase()))
-    .filter(p=>showAll||getOdds(activeBook,p.name));
-
-  const edges = withOdds.filter(p=>{
-    const o=getOdds(activeBook,p.name);
-    return o && diffVal(o.dec,p.adjProb)>0.025;
-  });
-  const ourShort = withOdds.filter(p=>{
-    const o=getOdds(activeBook,p.name);
-    return o && diffVal(o.dec,p.adjProb)<-0.025;
-  });
-
-  const cs={padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11};
-
-  return (
-    <div>
-      {/* Book selector + controls */}
-      <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:12}}>
-        <div style={{display:"flex",borderRadius:"var(--border-radius-md)",overflow:"hidden",border:"0.5px solid var(--color-border-secondary)"}}>
-          {[{id:"r1",label:"Round 1"},{id:"full",label:"Full Playoff"}].map(s=>(
-            <button key={s.id} onClick={()=>setLScope(s.id)} style={{padding:"5px 12px",fontSize:11,border:"none",cursor:"pointer",
-              background:lScope===s.id?"#3b82f6":"var(--color-background-secondary)",color:lScope===s.id?"white":"var(--color-text-secondary)"}}>
-              {s.label}
-            </button>
-          ))}
-        </div>
-        <Seg options={STATS.map(s=>({id:s.id,label:s.label}))} value={lStat} onChange={setLStat} accent="#1d4ed8"/>
-        <div style={{marginLeft:"auto",display:"flex",gap:6,alignItems:"center"}}>
-          {BOOKS.map(b=>{
-            const cnt=Object.keys(bookOdds[b]||{}).length;
-            return <button key={b} onClick={()=>setActiveBook(b)} style={{
-              padding:"4px 10px",fontSize:11,borderRadius:3,border:"0.5px solid",cursor:"pointer",
-              borderColor:activeBook===b?"#3b82f6":"var(--color-border-secondary)",
-              background:activeBook===b?"rgba(59,130,246,0.15)":"var(--color-background-secondary)",
-              color:activeBook===b?"#60a5fa":"var(--color-text-secondary)",fontWeight:activeBook===b?500:400,
-              position:"relative",
-            }}>
-              {b}
-              {cnt>0&&<span style={{marginLeft:5,fontSize:9,padding:"1px 4px",borderRadius:8,
-                background:activeBook===b?"#3b82f6":"var(--color-border-secondary)",
-                color:"white"}}>{cnt}</span>}
-            </button>;
-          })}
-        </div>
-      </div>
-
-      {/* Paste panel */}
-      <Card style={{marginBottom:14}}>
-        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
-          <SH title={`Paste ${activeBook} Odds`} sub="Copy the odds table from the book page and paste below — player names + American odds parsed automatically"/>
-          <button onClick={()=>setShowPastePanel(v=>!v)} style={{marginLeft:"auto",padding:"3px 10px",fontSize:11,
-            borderRadius:"var(--border-radius-md)",background:"var(--color-background-secondary)",
-            border:"0.5px solid var(--color-border-secondary)",color:"var(--color-text-secondary)",cursor:"pointer"}}>
-            {showPastePanel?"Hide":"Show"}
-          </button>
-        </div>
-        {showPastePanel&&<>
-          <textarea value={pasteText} onChange={e=>setPasteText(e.target.value)}
-            placeholder={`Paste ${activeBook} odds here…\n\nExample format (any of these work):\n  Bryan Rust +390\n  Evgeni Malkin +600\n  Sidney Crosby +650\n\nThe parser handles extra text, headers, and whitespace automatically.`}
-            style={{width:"100%",height:140,fontSize:11,fontFamily:"var(--font-mono)",
-              background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
-              borderRadius:"var(--border-radius-md)",padding:10,color:"var(--color-text-primary)",
-              resize:"vertical",boxSizing:"border-box",marginBottom:8}}/>
-          <div style={{display:"flex",gap:8,alignItems:"center"}}>
-            <button onClick={handleParse} disabled={!pasteText.trim()} style={{
-              padding:"6px 18px",fontSize:12,fontWeight:500,borderRadius:"var(--border-radius-md)",border:"none",
-              cursor:pasteText.trim()?"pointer":"default",
-              background:pasteText.trim()?"#3b82f6":"var(--color-background-secondary)",
-              color:pasteText.trim()?"white":"var(--color-text-tertiary)"}}>
-              Parse & Import
-            </button>
-            <button onClick={()=>{clearBook(activeBook);setParseResult(null);}} style={{
-              padding:"5px 12px",fontSize:11,borderRadius:"var(--border-radius-md)",
-              background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
-              color:"var(--color-text-secondary)",cursor:"pointer"}}>
-              Clear {activeBook}
-            </button>
-            {!leaderMarket.length&&<span style={{fontSize:11,color:"var(--color-text-tertiary)"}}>Note: load player data for name matching</span>}
-          </div>
-          {parseResult&&<div style={{marginTop:10,padding:"8px 12px",borderRadius:"var(--border-radius-md)",
-            background:parseResult.matched>0?"rgba(16,185,129,0.08)":"rgba(239,68,68,0.08)",
-            border:`0.5px solid ${parseResult.matched>0?"rgba(16,185,129,0.3)":"rgba(239,68,68,0.3)"}`}}>
-            <div style={{fontSize:11,fontWeight:500,color:parseResult.matched>0?"#10b981":"#ef4444",marginBottom:parseResult.unmatched.length?4:0}}>
-              ✓ {parseResult.matched} players imported into {parseResult.book}
-            </div>
-            {parseResult.unmatched.length>0&&<div style={{fontSize:10,color:"var(--color-text-secondary)"}}>
-              Could not match: {parseResult.unmatched.join(", ")}
-              {parseResult.unmatched.length>=15&&"…"}
-              <div style={{marginTop:2,color:"var(--color-text-tertiary)"}}>
-                Check spelling or add manually in the table below.
-              </div>
-            </div>}
-          </div>}
-        </>}
-      </Card>
-
-      {/* Edge summary */}
-      {withOdds.length>0&&<div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:14}}>
-        <Card style={{background:dark?"rgba(239,68,68,0.07)":"rgba(239,68,68,0.04)",border:"0.5px solid rgba(239,68,68,0.2)"}}>
-          <div style={{fontSize:9,fontWeight:500,textTransform:"uppercase",letterSpacing:"0.08em",color:"#ef4444",marginBottom:6}}>
-            Book shorter than us (&gt;2.5%) — {edges.length}
-          </div>
-          {edges.length===0
-            ?<div style={{fontSize:10,color:"var(--color-text-tertiary)"}}>None</div>
-            :edges.map(p=>{const o=getOdds(activeBook,p.name);const v=diffVal(o?.dec,p.adjProb);return(
-              <div key={p.name} style={{display:"flex",justifyContent:"space-between",padding:"2px 0",borderBottom:"0.5px solid var(--color-border-tertiary)",fontSize:10}}>
-                <span style={{fontWeight:500}}>{p.name} <span style={{color:"var(--color-text-tertiary)",fontWeight:400,fontSize:9}}>({p.team})</span></span>
-                <span style={{fontFamily:"var(--font-mono)",color:"#ef4444"}}>{o?.amer>0?`+${o.amer}`:o?.amer} · {fmtDiff(v)}</span>
-              </div>
-            );})}
-        </Card>
-        <Card style={{background:dark?"rgba(74,222,128,0.07)":"rgba(74,222,128,0.04)",border:"0.5px solid rgba(74,222,128,0.2)"}}>
-          <div style={{fontSize:9,fontWeight:500,textTransform:"uppercase",letterSpacing:"0.08em",color:"#4ade80",marginBottom:6}}>
-            We're shorter than book (&gt;2.5%) — {ourShort.length}
-          </div>
-          {ourShort.length===0
-            ?<div style={{fontSize:10,color:"var(--color-text-tertiary)"}}>None</div>
-            :ourShort.map(p=>{const o=getOdds(activeBook,p.name);const v=diffVal(o?.dec,p.adjProb);return(
-              <div key={p.name} style={{display:"flex",justifyContent:"space-between",padding:"2px 0",borderBottom:"0.5px solid var(--color-border-tertiary)",fontSize:10}}>
-                <span style={{fontWeight:500}}>{p.name} <span style={{color:"var(--color-text-tertiary)",fontWeight:400,fontSize:9}}>({p.team})</span></span>
-                <span style={{fontFamily:"var(--font-mono)",color:"#4ade80"}}>{o?.amer>0?`+${o.amer}`:o?.amer} · {fmtDiff(v)}</span>
-              </div>
-            );})}
-        </Card>
-      </div>}
-
-      {/* Comparison table */}
-      <Card>
-        <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:10,flexWrap:"wrap"}}>
-          <SH title={`${lScope==="r1"?"R1":"Playoff"} ${STATS.find(s=>s.id===lStat)?.label||""} — ${activeBook} vs Our Price`}
-            sub={withOdds.length?`${withOdds.length} players with ${activeBook} odds · ${displayed.length} shown`:"Paste odds above to populate"}/>
-          <div style={{marginLeft:"auto",display:"flex",gap:8,alignItems:"center"}}>
-            <select value={filterTeam} onChange={e=>setFilterTeam(e.target.value)} style={SEL}>
-              <option value="ALL">All Teams</option>
-              {teams.map(t=><option key={t} value={t}>{t}</option>)}
-            </select>
-            <input placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)}
-              style={{padding:"4px 8px",fontSize:11,background:"var(--color-background-secondary)",
-                border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",
-                color:"var(--color-text-primary)",width:130}}/>
-            <Toggle label="All players" checked={showAll} onChange={setShowAll}/>
-          </div>
-        </div>
-
-        {!leaderMarket.length
-          ?<div style={{fontSize:12,color:"var(--color-text-secondary)",padding:"20px 0",textAlign:"center"}}>
-            Configure R1 Matchups and load player data first.
-          </div>
-          :<div style={{overflowX:"auto"}}>
-          <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-            <thead><tr style={{borderBottom:"0.5px solid var(--color-border-secondary)"}}>
-              {["#","Player","Team","λ","Our%","Our Odds",activeBook+" Amer",activeBook+" Dec","Diff",
-                ...BOOKS.filter(b=>b!==activeBook).map(b=>b.slice(0,3))
-              ].map((h,i)=>(
-                <th key={i} style={{padding:"5px 8px",textAlign:i<2?"left":"right",
-                  color:i>=9?"var(--color-text-tertiary)":"var(--color-text-secondary)",
-                  fontWeight:i>=9?400:500,fontSize:i>=9?9:10,textTransform:"uppercase"}}>{h}</th>
-              ))}
+  useEffect(()=>{if(adpData.players.length>0&&drafts.length>0&&!namesResolved){const resolved=resolveAllNames(drafts,adpData.players);setDrafts(resolved);localStorage.setItem('bb_v3',JSON.stringify(resolved));setNamesResolved(true);}},[adpData.players.length,drafts.length]);
+  const saveScores=useCallback(ns=>{setScores(ns);localStorage.setItem('bb_scores',JSON.stringify(ns));},[]);
+
+  const saveDrafts=useCallback(nd=>{setDrafts(nd);localStorage.setItem('bb_v3',JSON.stringify(nd));},[]);
+  const an=useMemo(()=>compute(drafts,adpData.players,contest,phaseFilter),[drafts,adpData,contest,phaseFilter]);
+  const filteredDraftsAll=useMemo(()=>{let fd=contest==='ALL'?drafts:drafts.filter(d=>d.tournament===contest);if(phaseFilter!=='ALL')fd=fd.filter(d=>(d.phase||'pre')===phaseFilter);return fd;},[drafts,contest,phaseFilter]);
+  const avgPos=pos=>{const t=drafts.reduce((s,d)=>s+d.picks.filter(p=>p.pos===pos).length,0);return(t/(drafts.length||1)).toFixed(1);};
+  const allContests=['ALL',...[...new Set(drafts.map(d=>d.tournament).filter(Boolean))]];
+
+  const sorted=useMemo(()=>{let f=an.allPlayers||[];if(pf!=='ALL')f=f.filter(p=>p.pos===pf);if(q)f=f.filter(p=>p.name.toLowerCase().includes(q.toLowerCase()));
+    return[...f].sort((a,b)=>{const m=sDir==='desc'?-1:1;if(sBy==='name')return a.name.localeCompare(b.name)*m;let av=a[sBy],bv=b[sBy];
+      if(sBy==='value'){av=av??0;bv=bv??0;}else if(sBy==='count'||sBy==='exposure'||sBy==='avgPick'){av=av||0;bv=bv||0;}else{av=av??999;bv=bv??999;}return(av-bv)*m;});
+  },[an.allPlayers,pf,q,sBy,sDir]);
+
+  const onSort=(f)=>{if(sBy===f)setSDir(d=>d==='desc'?'asc':'desc');else{setSBy(f);setSDir(f==='name'?'asc':'desc');}};
+  const hasAnyPhase=drafts.some(d=>d.phase);
+  const PhaseSel=()=>hasAnyPhase?<div style={{display:'flex',gap:2,background:S.s2,borderRadius:6,padding:2}}>{[{id:'ALL',l:'All'},{id:'pre',l:'Pre'},{id:'post',l:'Post'},{id:'regular',l:'Reg'}].map(ph=>{const ct=ph.id==='ALL'?drafts.length:drafts.filter(d=>(d.phase||'pre')===ph.id).length;return<button key={ph.id} onClick={()=>setPhaseFilter(ph.id)} style={{fontSize:10,fontWeight:700,padding:'4px 9px',borderRadius:4,border:'none',cursor:'pointer',background:phaseFilter===ph.id?'#60a5fa':'transparent',color:phaseFilter===ph.id?'#fff':S.mt,opacity:ct===0?0.4:1}} disabled={ct===0} title={`${ct} draft${ct===1?'':'s'}`}>{ph.l}{ct>0&&<span style={{opacity:0.7,marginLeft:3,fontSize:9}}>{ct}</span>}</button>;})}</div>:null;
+  const ContestSel=()=>(<div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}><PhaseSel/>{allContests.length>1&&<select value={contest} onChange={e=>setContest(e.target.value)} style={{fontSize:11,padding:'5px 8px',background:S.s2,border:`1px solid ${S.bd}`,borderRadius:6,color:S.tx}}>{allContests.map(c=><option key={c} value={c}>{c==='ALL'?'All Contests':c}</option>)}</select>}</div>);
+
+  const handleExport=()=>{const b=new Blob([JSON.stringify({drafts,adpHistory,scores,v:6})],{type:'application/json'});const u=URL.createObjectURL(b);const a=document.createElement('a');a.href=u;a.download='bestball-backup.json';a.click();};
+  const handleImport=e=>{const file=e.target.files?.[0];if(!file)return;const r=new FileReader();r.onload=ev=>{try{const d=JSON.parse(ev.target.result);if(d.drafts)saveDrafts(d.drafts);if(d.adpHistory){setAdpHistory(d.adpHistory);localStorage.setItem('bb_adp_history',JSON.stringify(d.adpHistory));setAdpData(historyToAdpData(d.adpHistory));}if(d.scores)saveScores(d.scores);alert('Imported!');}catch{alert('Invalid');}};r.readAsText(file);};
+  const handleEditSave=updated=>{saveDrafts(drafts.map(d=>d.id===updated.id?updated:d));setEditD(null);};
+  const handleDeleteDraft=id=>{saveDrafts(drafts.filter(d=>d.id!==id));setEditD(null);};
+  const handleAdpUpload=e=>{const file=e.target.files?.[0];if(!file)return;let dateLabel=prompt('What date is this ADP from? (e.g. 3/22)');if(!dateLabel)return;
+    dateLabel=dateLabel.replace(/\/2026|\/2025|2026|2025/g,'').trim();
+    const r=new FileReader();r.onload=ev=>{const csvText=ev.target.result;const h=mergeAdpSnapshot(adpHistory,csvText,dateLabel);if(!h){alert('No changes detected.');return;}
+      setAdpHistory(h);localStorage.setItem('bb_adp_history',JSON.stringify(h));setAdpData(historyToAdpData(h));setNamesResolved(false);
+      const extra=JSON.parse(localStorage.getItem('bb_adp_extra')||'[]');extra.push({csv:csvText,date:dateLabel});localStorage.setItem('bb_adp_extra',JSON.stringify(extra));
+      alert(`ADP updated: ${dateLabel}`);};r.readAsText(file);e.target.value='';};
+
+  const filteredMovers=useMemo(()=>{if(!adpData.players.length||adpData.dates.length<2)return{up:[],down:[]};const from=moverFrom;const to=moverTo<0?adpData.dates.length-1:Math.min(moverTo,adpData.dates.length-1);if(from>=to)return{up:[],down:[]};
+    const list=adpData.players.filter(p=>(p.adp[from]<240||p.adp[to]<240)&&(p.adp[from]<200||p.adp[to]<200)).map(p=>({...p,rc:p.adp[from]-p.adp[to]}));
+    return{up:list.filter(p=>p.rc>1).sort((a,b)=>b.rc-a.rc).slice(0,40),down:list.filter(p=>p.rc<-1).sort((a,b)=>a.rc-b.rc).slice(0,40)};},[adpData,moverFrom,moverTo]);
+
+  const pairsData=useMemo(()=>{const allPks=drafts.flatMap(d=>[...d.picks,...(d.field||[]).flatMap(f=>f.picks)]);const lookup=n=>allPks.find(x=>x.name===n);const src=pairsView==='mine'?an.pairs:an.fieldPairs;
+    return Object.entries(src).sort((a,b)=>b[1]-a[1]).slice(0,80).map(([k,v])=>{const[a,b]=k.split('~');const pa=lookup(a),pb=lookup(b);return{a,b,ct:v,posA:pa?.pos,posB:pb?.pos,stack:pa?.team===pb?.team&&pa?.team!=='FA'};});},[an.pairs,an.fieldPairs,pairsView,drafts]);
+
+  const fieldArchCounts=useMemo(()=>{const m={};an.fieldBuilds.forEach(b=>b.tags.forEach(t=>{m[t]=(m[t]||0)+1;}));return m;},[an.fieldBuilds]);
+  const myStructCounts=useMemo(()=>{const m={};an.myBuilds.forEach(b=>{const k=`${b.counts.QB}/${b.counts.RB}/${b.counts.WR}/${b.counts.TE}`;m[k]=(m[k]||0)+1;});return Object.entries(m).sort((a,b)=>b[1]-a[1]);},[an.myBuilds]);
+  const fieldStructCounts=useMemo(()=>{const m={};an.fieldBuilds.forEach(b=>{const k=`${b.counts.QB}/${b.counts.RB}/${b.counts.WR}/${b.counts.TE}`;m[k]=(m[k]||0)+1;});return Object.entries(m).sort((a,b)=>b[1]-a[1]);},[an.fieldBuilds]);
+
+  // Team exposure — sortable
+  const teamData=useMemo(()=>{const allTeams=[...new Set([...Object.keys(an.teamExp),...Object.keys(an.fieldTeamExp)])].sort();
+    const myTotal=Object.values(an.teamExp).reduce((s,v)=>s+v,0)||1;const fTotal=Object.values(an.fieldTeamExp).reduce((s,v)=>s+v,0)||1;
+    let data=allTeams.map(t=>({team:t,mine:an.teamExp[t]||0,myPct:((an.teamExp[t]||0)/myTotal*100),field:an.fieldTeamExp[t]||0,fieldPct:((an.fieldTeamExp[t]||0)/fTotal*100),diff:((an.teamExp[t]||0)/myTotal*100)-((an.fieldTeamExp[t]||0)/fTotal*100)}));
+    const m=teamSortDir==='desc'?-1:1;data.sort((a,b)=>(a[teamSortBy]-b[teamSortBy])*m*-1);return data;},[an.teamExp,an.fieldTeamExp,teamSortBy,teamSortDir]);
+
+  // P&L
+  const pnl=useMemo(()=>{const totalFees=drafts.reduce((s,d)=>s+(d.fee||0),0);const totalWin=drafts.reduce((s,d)=>s+(d.winnings||0),0);
+    const byContest={};drafts.forEach(d=>{const c=d.tournament||'Unknown';if(!byContest[c])byContest[c]={fees:0,win:0,count:0};byContest[c].fees+=(d.fee||0);byContest[c].win+=(d.winnings||0);byContest[c].count++;});
+    return{totalFees,totalWin,net:totalWin-totalFees,byContest:Object.entries(byContest).sort((a,b)=>(b[1].win-b[1].fees)-(a[1].win-a[1].fees))};},[drafts]);
+
+  // Best/worst value teams
+  const draftValues=useMemo(()=>{const all=[];drafts.forEach(d=>{const tv=d.picks.reduce((s,p)=>{const adp=matchADP(p.name,p.pos,p.team,p.pick,adpData.players);return s+(adp&&adp.latest<240?p.pick-adp.latest:0);},0);
+    all.push({name:d.name,seat:d.draftPosition,value:tv,mine:true,draft:d});
+    if(d.field)d.field.forEach(f=>{const fv=f.picks.reduce((s,p)=>{const adp=matchADP(p.name,p.pos,p.team,p.pick,adpData.players);return s+(adp&&adp.latest<240?p.pick-adp.latest:0);},0);
+      all.push({name:f.name,seat:f.seat,value:fv,mine:false,fieldTeam:f,draftName:d.name});});});
+    const sorted=[...all].sort((a,b)=>b.value-a.value);return{best:sorted.slice(0,10),worst:sorted.slice(-10).reverse()};},[drafts,adpData.players]);
+
+  // Correlation finder: QB+WR/TE same-team stacks with frequency + quality score
+  const correlations=useMemo(()=>{const corrs={};drafts.forEach(d=>{const qbs=d.picks.filter(p=>p.pos==='QB');const pass=d.picks.filter(p=>p.pos==='WR'||p.pos==='TE');
+    qbs.forEach(qb=>{pass.forEach(wr=>{if(qb.team===wr.team&&qb.team!=='FA'){const k=`${qb.name} + ${wr.name}`;if(!corrs[k])corrs[k]={qb:qb.name,wr:wr.name,team:qb.team,qbPos:'QB',wrPos:wr.pos,count:0};corrs[k].count++;}});});});
+    return Object.values(corrs).sort((a,b)=>b.count-a.count).slice(0,30);},[drafts]);
+
+  const tabs=[{id:'exposure',l:'Exposure',i:'📊'},{id:'build',l:'Builds',i:'🏗️'},{id:'heatmap',l:'Heatmap',i:'🔥'},{id:'teams',l:'Teams',i:'🏈'},{id:'pairs',l:'Pairs',i:'🤝'},{id:'movers',l:'Movers',i:'📈'},{id:'lastseason',l:'2025 Stats',i:'📅'},{id:'final',l:'2025 Final',i:'🏆'},{id:'season',l:'Season',i:'🏟️'},{id:'adp',l:'ADP',i:'📋'},{id:'drafts',l:'Drafts',i:'📝'},{id:'import',l:'Import',i:'📥'},{id:'settings',l:'Settings',i:'⚙️'}];
+
+  return(<div style={{minHeight:'100vh',background:S.bg,color:S.tx,fontFamily:"'Barlow', 'Barlow Condensed', system-ui, -apple-system, sans-serif",fontSize:13}}>
+    <style>{`@import url('https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700;800;900&family=Barlow+Condensed:wght@600;700;800;900&display=swap');`}</style>
+    <div style={{borderBottom:`1px solid ${S.bd}`,padding:'10px 20px',display:'flex',alignItems:'center',background:S.s1,position:'sticky',top:0,zIndex:50}}>
+      <div style={{display:'flex',alignItems:'center',gap:10}}>
+        <div style={{width:32,height:32,borderRadius:8,background:'linear-gradient(135deg,#22c55e,#059669)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:15}}>🏆</div>
+        <div><h1 style={{fontFamily:FONT,fontSize:17,fontWeight:900,letterSpacing:-.5,lineHeight:1}}>BESTBALL HQ</h1>
+          <p style={{fontSize:9,color:S.mt,letterSpacing:3,textTransform:'uppercase',fontWeight:600}}>TobyDaKid • {drafts.length} Drafts</p></div></div></div>
+    <div style={{borderBottom:`1px solid ${S.bd}`,background:S.s1,padding:'0 16px',display:'flex',overflowX:'auto'}}>
+      {tabs.map(t=><button key={t.id} onClick={()=>setTab(t.id)} style={{fontSize:11,fontWeight:tab===t.id?700:500,padding:'11px 12px',background:'none',border:'none',borderBottom:tab===t.id?'2px solid #22c55e':'2px solid transparent',color:tab===t.id?S.tx:S.mt,cursor:'pointer',whiteSpace:'nowrap',display:'flex',alignItems:'center',gap:4}}><span style={{fontSize:13}}>{t.i}</span>{t.l}</button>)}</div>
+    <div style={{padding:'10px 16px',display:'flex',gap:8,overflowX:'auto',borderBottom:`1px solid ${S.bd}`}}>
+      {[{l:'Drafts',v:an.total,c:'#22c55e'},{l:'Players',v:(an.allPlayers||[]).length,c:'#3b82f6'},...['QB','RB','WR','TE'].map(pos=>({l:`Avg ${pos}`,v:avgPos(pos),c:POS[pos].accent}))
+      ].map((s,i)=><div key={i} style={{background:S.s2,borderRadius:8,padding:'8px 12px',minWidth:70,flex:'0 0 auto'}}>
+        <p style={{fontSize:8,color:S.mt,textTransform:'uppercase',letterSpacing:1,fontWeight:600,margin:0}}>{s.l}</p>
+        <p style={{fontFamily:FONT,fontSize:16,fontWeight:900,color:s.c,margin:'2px 0 0'}}>{s.v}</p></div>)}</div>
+
+    <div style={{padding:16}}>
+      {/* EXPOSURE — sortable headers */}
+      {tab==='exposure'&&<div>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8,marginBottom:12}}>
+          <h2 style={{fontFamily:FONT,fontSize:16,fontWeight:900,textTransform:'uppercase'}}>Exposure</h2>
+          <div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}><ContestSel/>
+            <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search..." style={{fontSize:12,padding:'6px 10px',background:S.s2,border:`1px solid ${S.bd}`,borderRadius:6,color:S.tx,width:130}}/>
+            <div style={{display:'flex',gap:2,background:S.s2,borderRadius:6,padding:2}}>
+              {['ALL','QB','RB','WR','TE'].map(p=><button key={p} onClick={()=>setPf(p)} style={{fontSize:10,fontWeight:700,padding:'4px 8px',borderRadius:4,border:'none',cursor:'pointer',background:pf===p?(p==='ALL'?'#22c55e':POS[p]?.bg):'transparent',color:pf===p?'#fff':S.mt}}>{p}</button>)}</div></div></div>
+        <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,overflow:'hidden'}}><div style={{overflowX:'auto'}}>
+          <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+            <thead><tr style={{background:S.s2}}>
+              <SortTH field="name" label="Player" sortBy={sBy} sortDir={sDir} onSort={onSort} align="left"/>
+              <th style={{padding:'8px',textAlign:'center',fontWeight:700,color:S.mt,borderBottom:`2px solid ${S.bd}`,fontSize:10}}>Pos</th>
+              <th style={{padding:'8px',textAlign:'center',fontWeight:700,color:S.mt,borderBottom:`2px solid ${S.bd}`,fontSize:10}}>Tm</th>
+              <SortTH field="exposure" label="Exp%" sortBy={sBy} sortDir={sDir} onSort={onSort}/>
+              <SortTH field="count" label="#" sortBy={sBy} sortDir={sDir} onSort={onSort}/>
+              <SortTH field="avgPick" label="Avg Pk" sortBy={sBy} sortDir={sDir} onSort={onSort}/>
+              <SortTH field="currentADP" label="ADP" sortBy={sBy} sortDir={sDir} onSort={onSort}/>
+              <SortTH field="value" label="Value" sortBy={sBy} sortDir={sDir} onSort={onSort}/>
             </tr></thead>
-            <tbody>{displayed.map((p,i)=>{
-              const ourAmer=toAmer(p.adjProb);
-              const ourDec=toDec(p.adjProb);
-              const bo=getOdds(activeBook,p.name);
-              const dv=bo?diffVal(bo.dec,p.adjProb):null;
-              const isEdge=dv!==null&&Math.abs(dv)>0.025;
-              return (
-                <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",
-                  background:isEdge?(dv>0?(dark?"rgba(239,68,68,0.06)":"rgba(239,68,68,0.03)"):(dark?"rgba(74,222,128,0.06)":"rgba(74,222,128,0.03)")):
-                    i%2===0?"transparent":(dark?"rgba(255,255,255,0.015)":"rgba(0,0,0,0.01)")}}>
-                  <td style={{padding:"3px 8px",color:"var(--color-text-tertiary)",fontSize:10}}>{leaderMarket.indexOf(p)+1}</td>
-                  <td style={{padding:"3px 8px",fontWeight:bo?500:400}}>{p.name}</td>
-                  <td style={{...cs}}><span style={{fontSize:9,padding:"1px 4px",borderRadius:2,background:"rgba(59,130,246,0.12)",color:"#60a5fa"}}>{p.team}</span></td>
-                  <td style={{...cs,color:"var(--color-text-secondary)"}}>{p.lambda.toFixed(2)}</td>
-                  <td style={{...cs}}>{(p.adjProb*100).toFixed(2)}%</td>
-                  <td style={{...cs,fontWeight:500,color:ourAmer<0?"#4ade80":"var(--color-text-primary)"}}>
-                    {ourAmer>0?`+${ourAmer}`:ourAmer}
-                    <span style={{color:"var(--color-text-tertiary)",fontWeight:400,fontSize:9,marginLeft:4}}>({ourDec.toFixed(2)})</span>
-                  </td>
-                  {/* Active book odds — editable */}
-                  <td style={{padding:"2px 4px",textAlign:"right"}}>
-                    <input type="number" step={1} value={bo?.amer??""} placeholder="—"
-                      onChange={e=>{const a=parseInt(e.target.value)||0;if(Math.abs(a)>=100)setPlayerOdds(activeBook,p.name,a,amerToDecimal(a));}}
-                      style={{width:58,fontSize:11,textAlign:"center",padding:"2px 4px",fontFamily:"var(--font-mono)",
-                        background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
-                        borderRadius:3,color:"var(--color-text-primary)"}}/>
-                  </td>
-                  <td style={{...cs,color:bo?"var(--color-text-secondary)":"var(--color-text-tertiary)"}}>
-                    {bo?bo.dec.toFixed(2):"—"}
-                  </td>
-                  <td style={{...cs,fontWeight:isEdge?500:400,color:diffColor(dv)}}>{fmtDiff(dv)}</td>
-                  {/* Other books — compact */}
-                  {BOOKS.filter(b=>b!==activeBook).map(b=>{
-                    const o=getOdds(b,p.name);
-                    const dv2=o?diffVal(o.dec,p.adjProb):null;
-                    return <td key={b} style={{padding:"2px 3px",textAlign:"right"}}>
-                      <input type="number" step={1} value={o?.amer??""} placeholder="—"
-                        onChange={e=>{const a=parseInt(e.target.value)||0;if(Math.abs(a)>=100)setPlayerOdds(b,p.name,a,amerToDecimal(a));}}
-                        style={{width:48,fontSize:10,textAlign:"center",padding:"1px 3px",fontFamily:"var(--font-mono)",
-                          background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-tertiary)",
-                          borderRadius:3,color:dv2!==null?diffColor(dv2):"var(--color-text-tertiary)"}}/>
-                    </td>;
-                  })}
-                </tr>
-              );
-            })}</tbody>
-          </table>
-        </div>}
-        <div style={{marginTop:8,padding:"5px 10px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",fontSize:10,color:"var(--color-text-tertiary)"}}>
-          Diff = Book implied% − Our adj%. <span style={{color:"#ef4444"}}>Red = book shorter (tighter than us)</span> · <span style={{color:"#4ade80"}}>Green = we're shorter (tighter than book)</span>. Threshold ±2.5%. Manual edits accepted in American odds columns.
+            <tbody>{sorted.slice(0,400).map((p,i)=>(
+              <tr key={i} onClick={()=>setSelP(p)} style={{borderBottom:'1px solid #334155',cursor:'pointer',opacity:p.count>0?1:0.4}} onMouseEnter={e=>e.currentTarget.style.background=S.s2} onMouseLeave={e=>e.currentTarget.style.background='transparent'}>
+                <td style={{padding:'7px 10px',fontWeight:600}}>{p.name}</td><td style={{padding:'7px 6px',textAlign:'center'}}><Pill pos={p.pos}/></td>
+                <td style={{padding:'7px 6px',textAlign:'center',color:S.mt,fontSize:11}}>{p.team}</td>
+                <td style={{padding:'7px 6px',textAlign:'center',fontWeight:700,color:(p.exposure||0)>0?S.tx:S.mt}}>{(p.exposure||0).toFixed(1)}%</td>
+                <td style={{padding:'7px 6px',textAlign:'center',fontWeight:700}}>{p.count||'—'}</td>
+                <td style={{padding:'7px 6px',textAlign:'center'}}>{p.avgPick?p.avgPick.toFixed(1):'—'}</td>
+                <td style={{padding:'7px 6px',textAlign:'center',color:S.mt}}>{p.currentADP!=null&&p.currentADP<240?p.currentADP.toFixed(1):'—'}</td>
+                <td style={{padding:'7px 6px',textAlign:'center',fontWeight:700,color:p.value!=null?(p.value>0?'#22c55e':'#ef4444'):S.mt}}>{p.value!=null?`${p.value>0?'+':''}${p.value.toFixed(1)}`:'—'}</td>
+              </tr>))}</tbody></table></div></div></div>}
+
+      {/* BUILDS */}
+      {tab==='build'&&<div>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14}}><h2 style={{fontFamily:FONT,fontSize:16,fontWeight:900,textTransform:'uppercase'}}>Build Analysis</h2><ContestSel/></div>
+        <p style={{fontSize:10,color:S.mt,textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:8}}>Archetypes — You vs Field</p>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(200px,1fr))',gap:8,marginBottom:20}}>
+          {an.archetypes.map(([t,c])=>{const fc=fieldArchCounts[t]||0;return<div key={t} style={{background:S.s2,borderRadius:8,padding:'12px 14px'}}>
+            <span style={{fontSize:12,fontWeight:700}}>{t}</span><div style={{display:'flex',justifyContent:'space-between',marginTop:6,fontSize:11}}>
+              <span style={{color:'#22c55e'}}>You: {c}/{an.total} ({an.total?(c/an.total*100).toFixed(0):0}%)</span>
+              <span style={{color:S.mt}}>Field: {fc} ({an.fieldBuilds.length?(fc/an.fieldBuilds.length*100).toFixed(0):0}%)</span></div></div>;})}</div>
+        <p style={{fontSize:10,color:S.mt,textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:8}}>Position Counts</p>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:10,marginBottom:20}}>
+          {['QB','RB','WR','TE'].map(pos=><div key={pos} style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,padding:14}}>
+            <p style={{fontSize:14,fontWeight:800,marginBottom:10,color:POS[pos].accent}}>{pos}</p>
+            {Object.entries(an.bd[pos]||{}).sort((a,b)=>+a[0]-+b[0]).map(([ct,n])=>(
+              <div key={ct} style={{display:'flex',justifyContent:'space-between',fontSize:12,marginBottom:5}}>
+                <span style={{color:S.mt}}>{ct} {pos}s</span>
+                <span style={{fontWeight:700,fontSize:11,color:POS[pos].accent}}>{n}/{an.total} ({((n/(an.total||1))*100).toFixed(0)}%)</span></div>))}
+          </div>)}</div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14,marginBottom:20}}>
+          <div><p style={{fontSize:10,color:S.mt,textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:8}}>First 3 Picks</p>
+            <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,overflow:'hidden'}}>
+              {an.first3.slice(0,8).map(([k,c])=><div key={k} style={{padding:'8px 12px',borderBottom:'1px solid #334155',display:'flex',justifyContent:'space-between',fontSize:12}}>
+                <span style={{fontWeight:700,fontFamily:'monospace'}}>{k}</span><span style={{color:'#22c55e',fontWeight:700}}>{c}×</span></div>)}</div></div>
+          <div><p style={{fontSize:10,color:S.mt,textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:8}}>First 4 Picks</p>
+            <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,overflow:'hidden'}}>
+              {an.first4.slice(0,8).map(([k,c])=><div key={k} style={{padding:'8px 12px',borderBottom:'1px solid #334155',display:'flex',justifyContent:'space-between',fontSize:12}}>
+                <span style={{fontWeight:700,fontFamily:'monospace'}}>{k}</span><span style={{color:'#22c55e',fontWeight:700}}>{c}×</span></div>)}</div></div></div>
+        <p style={{fontSize:10,color:S.mt,textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:8}}>Structures (QB/RB/WR/TE)</p>
+        <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:20}}>{myStructCounts.map(([k,c])=><div key={k} style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:8,padding:'10px 14px'}}><span style={{fontSize:13,fontWeight:800,fontFamily:'monospace'}}>{k}</span> <span style={{fontWeight:900,color:'#22c55e'}}>{c}× ({((c/(an.total||1))*100).toFixed(0)}%)</span></div>)}</div>
+        {fieldStructCounts.length>0&&<><p style={{fontSize:10,color:S.mt,textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:8}}>Field Structures</p>
+          <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,overflow:'hidden',marginBottom:20}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+            <thead><tr style={{background:S.s2}}><th style={{padding:'8px 12px',textAlign:'left',fontWeight:700,color:S.mt,fontSize:10}}>QB/RB/WR/TE</th><th style={{padding:'8px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10}}>Count</th><th style={{padding:'8px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10}}>%</th></tr></thead>
+            <tbody>{fieldStructCounts.map(([k,c])=><tr key={k} style={{borderBottom:'1px solid #334155'}}><td style={{padding:'6px 12px',fontWeight:600,fontFamily:'monospace'}}>{k}</td><td style={{padding:'6px',textAlign:'center'}}>{c}</td><td style={{padding:'6px',textAlign:'center',color:'#f59e0b',fontWeight:700}}>{(c/an.fieldBuilds.length*100).toFixed(1)}%</td></tr>)}</tbody></table></div></>}
+        {/* Draft slot + pick range breakdowns — compact side by side */}
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14}}>
+          <div>
+            <p style={{fontSize:10,color:S.mt,textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:8}}>Draft Slot {slotFilter&&<span style={{color:'#22c55e',fontSize:9}}>(Seat {slotFilter}) <button onClick={()=>setSlotFilter(null)} style={{background:'none',border:'none',color:'#ef4444',cursor:'pointer',fontSize:9}}>Clear</button></span>}</p>
+            <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,overflow:'hidden'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:11}}>
+              <thead><tr style={{background:S.s2}}><th style={{padding:'6px 10px',textAlign:'left',fontWeight:700,color:S.mt,fontSize:10}}>Slot</th><th style={{padding:'6px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10}}>Ct</th><th style={{padding:'6px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10}}>%</th></tr></thead>
+              <tbody>{an.slots.map(s=><tr key={s.slot} onClick={()=>setSlotFilter(slotFilter===s.slot?null:s.slot)} style={{borderBottom:'1px solid #334155',background:slotFilter===s.slot?'rgba(34,197,94,0.15)':s.count>0?'rgba(34,197,94,0.05)':'transparent',cursor:'pointer'}}>
+                <td style={{padding:'4px 10px',fontWeight:700}}>{s.slot}</td><td style={{padding:'4px',textAlign:'center',fontWeight:700,color:s.count>0?'#22c55e':S.mt}}>{s.count}</td>
+                <td style={{padding:'4px',textAlign:'center',color:s.count>0?'#22c55e':S.mt,fontSize:10}}>{s.pct.toFixed(0)}%</td></tr>)}</tbody></table></div>
+          </div>
+          <div>
+            <p style={{fontSize:10,color:S.mt,textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:8}}>Seat Range Breakdown</p>
+            <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,overflow:'hidden'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:11}}>
+              <thead><tr style={{background:S.s2}}><th style={{padding:'6px 10px',textAlign:'left',fontWeight:700,color:S.mt,fontSize:10}}>Range</th><th style={{padding:'6px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10}}>Count</th><th style={{padding:'6px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10}}>%</th></tr></thead>
+              <tbody>{[{l:'Seats 1-3',s:1,e:3},{l:'Seats 4-6',s:4,e:6},{l:'Seats 7-9',s:7,e:9},{l:'Seats 10-12',s:10,e:12}].map(rng=>{
+                const filteredDrafts=filteredDraftsAll;
+                const ct=filteredDrafts.filter(d=>d.draftPosition>=rng.s&&d.draftPosition<=rng.e).length;
+                return<tr key={rng.l} style={{borderBottom:'1px solid #334155'}}>
+                  <td style={{padding:'4px 10px',fontWeight:600,fontSize:10}}>{rng.l}</td>
+                  <td style={{padding:'4px',textAlign:'center',fontWeight:700,color:'#22c55e'}}>{ct}</td>
+                  <td style={{padding:'4px',textAlign:'center',fontWeight:700,color:'#22c55e'}}>{filteredDrafts.length?(ct/filteredDrafts.length*100).toFixed(0)+'%':'—'}</td></tr>;})}</tbody></table></div>
+          </div>
         </div>
-      </Card>
-    </div>
-  );
-}
-
-// ─── EXPORT / IMPORT PANEL ───────────────────────────────────────────────────
-function ExportImportPanel({exportState,importState}) {
-  const [exportJson,setExportJson]=useState("");
-  const [importText,setImportText]=useState("");
-  const [msg,setMsg]=useState("");
-  const [copied,setCopied]=useState(false);
-
-  function doExport(){
-    const json=exportState();
-    setExportJson(json);
-    // Try clipboard
-    if(navigator.clipboard){
-      navigator.clipboard.writeText(json).then(()=>{setCopied(true);setTimeout(()=>setCopied(false),2000);}).catch(()=>{});
-    }
-  }
-  function doImport(){
-    const r=importState(importText);
-    setMsg(r.ok?"✓ State restored successfully":`Error: ${r.error}`);
-    if(r.ok){setImportText("");setExportJson("");}
-  }
-
-  return <div>
-    <div style={{display:"flex",gap:8,marginBottom:8,alignItems:"center"}}>
-      <button onClick={doExport} style={{padding:"5px 14px",fontSize:12,borderRadius:"var(--border-radius-md)",
-        background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
-        color:"var(--color-text-primary)",cursor:"pointer"}}>
-        {copied?"✓ Copied!":"Export State"}
-      </button>
-      <span style={{fontSize:10,color:"var(--color-text-tertiary)"}}>Copies JSON to clipboard + shows below</span>
-    </div>
-    {exportJson&&<textarea readOnly value={exportJson} onClick={e=>e.target.select()}
-      style={{width:"100%",height:80,fontSize:9,fontFamily:"var(--font-mono)",
-        background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
-        borderRadius:"var(--border-radius-md)",padding:8,color:"var(--color-text-secondary)",
-        resize:"vertical",boxSizing:"border-box",marginBottom:8}}/>}
-    <textarea value={importText} onChange={e=>setImportText(e.target.value)}
-      placeholder="Paste exported JSON here to restore state…"
-      style={{width:"100%",height:60,fontSize:9,fontFamily:"var(--font-mono)",
-        background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
-        borderRadius:"var(--border-radius-md)",padding:8,color:"var(--color-text-primary)",
-        resize:"vertical",boxSizing:"border-box",marginBottom:6}}/>
-    <button onClick={doImport} disabled={!importText.trim()} style={{
-      padding:"4px 12px",fontSize:11,borderRadius:"var(--border-radius-md)",border:"none",
-      cursor:importText.trim()?"pointer":"default",
-      background:importText.trim()?"#1d4ed8":"var(--color-background-secondary)",
-      color:importText.trim()?"white":"var(--color-text-tertiary)"}}>
-      Restore from JSON
-    </button>
-    {msg&&<div style={{marginTop:6,fontSize:11,color:msg.startsWith("✓")?"#10b981":"#ef4444"}}>{msg}</div>}
-  </div>;
-}
-
-// ─── GAME STAT IMPORTER ──────────────────────────────────────────────────────
-// v28: full rewrite around parseHRFullPage.
-// - Single paste: entire HR game page (header + scoring + both teams + advanced + goalies)
-// - Auto-detects series from team abbrs in the paste
-// - Auto-detects game# = max played gameNum for that series + 1 (with override)
-// - Imports BOTH teams' skater stats + goalie stats + game result (score, OT) in one shot
-// - Shows warnings for unmatched players (late callups not in skaters.csv)
-// - Per-game dedup via paste hash + (seriesIdx, gameNum) key
-// - Undo restores both teams' player + goalie state and clears the game result
-function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAllSeries,onGameUploaded}) {
-  const [paste,setPaste]=useState("");
-  const [preview,setPreview]=useState(null); // parsed preview before commit
-  const [overrideGame,setOverrideGame]=useState(null); // null = use auto-detected
-  const [overrideSeries,setOverrideSeries]=useState(null); // null = use auto-detected
-  const [unmatchedDecisions,setUnmatchedDecisions]=useState({}); // name -> "skip"|"add"
-  const [result,setResult]=useState(null);
-  const [err,setErr]=useState("");
-
-  // Imports log persisted to localStorage. Each entry covers BOTH teams of one game.
-  // Schema: {id, ts, seriesIdx, seriesLabel, round, game, hash, awayAbbr, homeAbbr,
-  //          awayScore, homeScore, ot, matched, unmatched, deltaPlayers, deltaGoalies}
-  const [imports,setImports] = useState(()=>{try{const s=localStorage.getItem("nhl_imports_v28");return s?JSON.parse(s):[];}catch{return[];}});
-  useEffect(()=>{try{localStorage.setItem("nhl_imports_v28",JSON.stringify(imports));}catch{}},[imports]);
-
-  function hashStr(str){let h=0;for(let i=0;i<str.length;i++){h=((h<<5)-h)+str.charCodeAt(i);h|=0;}return (h>>>0).toString(36);}
-  // v28.1: NFD-normalize then strip combining diacritics (ö → o, č → c, ü → u, etc.)
-  // Critical for matching HR-style names with accents against ASCII-stripped CSV names (or vice versa).
-  const norm=s=>(s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().replace(/[^a-z0-9]/g,"");
-
-  // Auto-detect series from team abbrs in parsed result
-  function detectSeriesIdx(awayAbbr, homeAbbr){
-    if (!allSeries) return -1;
-    const teams = new Set([awayAbbr, homeAbbr]);
-    return allSeries.findIndex(sr => teams.has(sr.homeAbbr) && teams.has(sr.awayAbbr));
-  }
-
-  // Auto-detect next game# = max gameNum with a recorded result + 1
-  function detectGameNum(seriesIdx){
-    const sr = allSeries?.[seriesIdx];
-    if (!sr || !sr.games) return 1;
-    let maxPlayed = 0;
-    sr.games.forEach((g, idx) => {
-      if (g && g.result) maxPlayed = Math.max(maxPlayed, idx+1);
-    });
-    return Math.min(7, maxPlayed + 1);
-  }
-
-  // Step 1: parse + show preview (no commit yet)
-  function handleParse(){
-    setErr(""); setResult(null); setPreview(null); setUnmatchedDecisions({});
-    if(!players){setErr("Load skaters.csv first.");return;}
-    if(!paste.trim()) return;
-
-    const r = parseHRFullPage(paste);
-    if (r.error) { setErr(r.error); return; }
-
-    const detectedSeries = detectSeriesIdx(r.awayAbbr, r.homeAbbr);
-    if (detectedSeries === -1) {
-      setErr(`Parsed teams ${r.awayAbbr} @ ${r.homeAbbr} — no matching series in setup. Add this matchup in Series Pricer first.`);
-      return;
-    }
-    const detectedGame = detectGameNum(detectedSeries);
-
-    // Build matched/unmatched lists for both teams against players roster
-    const checkSide = (sidePlayers, teamAbbr) => {
-      const matched = []; const unmatched = [];
-      sidePlayers.forEach(u => {
-        // Skip the goalie row that often sneaks into HR skater table (TOI ~60min, no shots/G/A)
-        // We detect that by also checking goalies list
-        const m = players.find(p => p.team===teamAbbr && (norm(u.name)===norm(p.name)
-          || (norm(u.name).length>=4 && norm(p.name).endsWith(norm(u.name.split(" ").pop()||"")))));
-        if (m) matched.push({u, p:m});
-        else unmatched.push(u);
-      });
-      return {matched, unmatched};
-    };
-    const away = checkSide(r.awayPlayers, r.awayAbbr);
-    const home = checkSide(r.homePlayers, r.homeAbbr);
-
-    // Filter out goalies from "unmatched" (they're in goalies.csv, not skaters.csv)
-    const goalieNames = new Set([
-      ...r.awayGoalies.map(g=>norm(g.name)),
-      ...r.homeGoalies.map(g=>norm(g.name)),
-    ]);
-    away.unmatched = away.unmatched.filter(u => !goalieNames.has(norm(u.name)));
-    home.unmatched = home.unmatched.filter(u => !goalieNames.has(norm(u.name)));
-
-    // Goalie matching
-    const checkGoalies = (sideGoalies, teamAbbr) => {
-      const matched = []; const unmatched = [];
-      sideGoalies.forEach(u => {
-        const m = (goalies||[]).find(g => g.team===teamAbbr && (norm(u.name)===norm(g.name)
-          || (norm(u.name).length>=4 && norm(g.name).endsWith(norm(u.name.split(" ").pop()||"")))));
-        if (m) matched.push({u, g:m});
-        else unmatched.push(u);
-      });
-      return {matched, unmatched};
-    };
-    const awayG = checkGoalies(r.awayGoalies, r.awayAbbr);
-    const homeG = checkGoalies(r.homeGoalies, r.homeAbbr);
-
-    setPreview({
-      ...r,
-      detectedSeries, detectedGame,
-      awayMatched: away.matched, awayUnmatched: away.unmatched,
-      homeMatched: home.matched, homeUnmatched: home.unmatched,
-      awayGoaliesMatched: awayG.matched, awayGoaliesUnmatched: awayG.unmatched,
-      homeGoaliesMatched: homeG.matched, homeGoaliesUnmatched: homeG.unmatched,
-    });
-    setOverrideGame(null);
-    setOverrideSeries(null);
-  }
-
-  // Step 2: commit the import after user reviews
-  function handleCommit(){
-    if (!preview) return;
-    setErr(""); setResult(null);
-
-    const seriesIdx = overrideSeries != null ? overrideSeries : preview.detectedSeries;
-    const gameNum = overrideGame != null ? overrideGame : preview.detectedGame;
-    const sr = allSeries?.[seriesIdx];
-    if (!sr) { setErr("Series not found."); return; }
-
-    const hash = hashStr(paste.trim());
-    const dup = imports.find(x => x.seriesIdx===seriesIdx && x.game===gameNum);
-    if (dup) {
-      setErr(`G${gameNum} already imported for ${sr.homeAbbr} vs ${sr.awayAbbr} at ${dup.ts}. Undo it first to re-import.`);
-      return;
-    }
-
-    // Build skater pGames updates
-    const deltaPlayers = []; // {name, team, round, game}
-    const playersById = new Map((players||[]).map(p=>[p.name+"|"+p.team, p]));
-
-    const applySide = (sideMatched, teamAbbr) => {
-      sideMatched.forEach(({u, p}) => {
-        const base = migratePlayer(p);
-        const existingGames = base.pGames || [];
-        const already = existingGames.some(e => e.round===1 && e.game===gameNum);
-        if (already) return;
-        const newEntry = {
-          round: 1, game: gameNum,
-          g: u.g||0, a: u.a||0, sog: u.sog||0,
-          hit: u.hit||0, blk: u.blk||0, tk: 0, pim: u.pim||0, give: 0,
-          toi: u.toi||0,
-          _source: "hr_full_v28",
-        };
-        const updated = withRollups({...base, pGames:[...existingGames, newEntry]});
-        playersById.set(p.name+"|"+p.team, updated);
-        deltaPlayers.push({name:p.name, team:p.team, round:1, game:gameNum});
-      });
-    };
-    applySide(preview.awayMatched, preview.awayAbbr);
-    applySide(preview.homeMatched, preview.homeAbbr);
-
-    // Handle unmatched: add as new players if user chose "add"
-    const unmatchedAdded = [];
-    const handleUnmatchedSide = (sideUnmatched, teamAbbr) => {
-      sideUnmatched.forEach(u => {
-        const decision = unmatchedDecisions[u.name+"|"+teamAbbr];
-        if (decision === "add") {
-          // Synthesize a player record with default rates (zero baseline)
-          const newP = {
-            name: u.name, team: teamAbbr, position: "F",
-            gp: 1, g_pg: 0, a_pg: 0, sog_pg: 0, hit_pg: 0, blk_pg: 0,
-            take_pg: 0, pim_pg: 0, give_pg: 0,
-            pG: 0, pA: 0, pSOG: 0, pHIT: 0, pBLK: 0, pTK: 0, pPIM: 0, pGIVE: 0, pGP: 0,
-            lineRole: "MID6",
-            _addedViaImport: true,
-            pGames: [{
-              round: 1, game: gameNum,
-              g: u.g||0, a: u.a||0, sog: u.sog||0,
-              hit: u.hit||0, blk: u.blk||0, tk: 0, pim: u.pim||0, give: 0,
-              toi: u.toi||0, _source: "hr_full_v28",
-            }],
-          };
-          const rolled = withRollups(newP);
-          playersById.set(rolled.name+"|"+rolled.team, rolled);
-          deltaPlayers.push({name:rolled.name, team:rolled.team, round:1, game:gameNum, _added:true});
-          unmatchedAdded.push(rolled.name);
-        }
-      });
-    };
-    handleUnmatchedSide(preview.awayUnmatched, preview.awayAbbr);
-    handleUnmatchedSide(preview.homeUnmatched, preview.homeAbbr);
-
-    // Goalie updates
-    const deltaGoalies = [];
-    const goaliesById = new Map((goalies||[]).map(g=>[g.name+"|"+g.team, g]));
-    const applyGoalies = (sideMatched) => {
-      sideMatched.forEach(({u, g}) => {
-        const existing = g.pGames || [];
-        const already = existing.some(e => e.round===1 && e.game===gameNum);
-        if (already) return;
-        const newEntry = {
-          round:1, game:gameNum, ga:u.ga||0, sa:u.sa||0, sv:u.sv||0,
-          so:u.so||0, toi:u.toi||0, dec:u.dec||"",
-        };
-        const rolled = withGoalieRollups({...g, pGames:[...existing, newEntry]});
-        goaliesById.set(g.name+"|"+g.team, rolled);
-        deltaGoalies.push({name:g.name, team:g.team, round:1, game:gameNum});
-      });
-    };
-    applyGoalies(preview.awayGoaliesMatched);
-    applyGoalies(preview.homeGoaliesMatched);
-
-    // Push state
-    const newPlayers = [...playersById.values()];
-    setPlayers(newPlayers);
-    if (setGoalies && goalies) setGoalies([...goaliesById.values()]);
-
-    // Push score + OT into Series Pricer game row.
-    // games[gameNum-1] convention: home/away are determined by the series record's homeAbbr/awayAbbr,
-    // NOT by HR's away/home. So map preview's away/home → series's home/away.
-    if (setAllSeries) {
-      setAllSeries(prev => {
-        const u = [...prev];
-        const s2 = u[seriesIdx];
-        const games = [...s2.games];
-        const idx = gameNum - 1;
-        // Resolve which score corresponds to series.homeAbbr
-        const homeIsAway = preview.awayAbbr === s2.homeAbbr;
-        const homeScore = homeIsAway ? preview.awayScore : preview.homeScore;
-        const awayScore = homeIsAway ? preview.homeScore : preview.awayScore;
-        const winResult = homeScore > awayScore ? "home" : awayScore > homeScore ? "away" : null;
-        games[idx] = {
-          ...games[idx],
-          homeScore, awayScore,
-          result: winResult || games[idx].result,
-          ot: !!preview.ot,
-        };
-        u[seriesIdx] = {...s2, games};
-        return u;
-      });
-    }
-
-    // Log it
-    const matchedCount = preview.awayMatched.length + preview.homeMatched.length;
-    const unmatchedAll = [...preview.awayUnmatched, ...preview.homeUnmatched].map(u=>u.name);
-    const seriesLabel = `${sr.homeAbbr} vs ${sr.awayAbbr}`;
-    const entry = {
-      id: Date.now()+"-"+Math.random().toString(36).slice(2,7),
-      ts: new Date().toLocaleString(),
-      seriesIdx, seriesLabel, round:1, game:gameNum, hash,
-      awayAbbr: preview.awayAbbr, homeAbbr: preview.homeAbbr,
-      awayScore: preview.awayScore, homeScore: preview.homeScore,
-      ot: !!preview.ot,
-      matched: matchedCount, unmatched: unmatchedAll.slice(0,20),
-      addedPlayers: unmatchedAdded,
-      deltaPlayers, deltaGoalies,
-    };
-    setImports(prev => [entry, ...prev].slice(0,200));
-    setResult({
-      seriesLabel, gameNum, awayAbbr:preview.awayAbbr, homeAbbr:preview.homeAbbr,
-      awayScore:preview.awayScore, homeScore:preview.homeScore, ot:!!preview.ot,
-      matched: matchedCount, unmatched: unmatchedAll.length,
-      addedPlayers: unmatchedAdded, goalies: deltaGoalies.length,
-    });
-    setPaste(""); setPreview(null);
-    // v31: signal SeriesTab to auto-run the unified sim with the new state
-    if (onGameUploaded) onGameUploaded();
-  }
-
-  function handleUndo(entryId){
-    const entry = imports.find(x => x.id===entryId);
-    if (!entry) return;
-    const round = entry.round||1, game = entry.game;
-
-    // Roll back skater pGames
-    const playerKeys = new Set((entry.deltaPlayers||[]).map(d => d.name+"|"+d.team));
-    const addedKeys = new Set((entry.deltaPlayers||[]).filter(d=>d._added).map(d=>d.name+"|"+d.team));
-    setPlayers(prev => prev
-      .map(p => {
-        if (!playerKeys.has(p.name+"|"+p.team)) return p;
-        if (!p.pGames) return p;
-        const filtered = p.pGames.filter(e => !(e.round===round && e.game===game));
-        if (filtered.length === p.pGames.length) return p;
-        return withRollups({...p, pGames:filtered});
-      })
-      .filter(p => !(addedKeys.has(p.name+"|"+p.team) && (!p.pGames || p.pGames.length===0)))
-    );
-
-    // Roll back goalie pGames
-    const goalieKeys = new Set((entry.deltaGoalies||[]).map(d => d.name+"|"+d.team));
-    if (setGoalies && goalies) {
-      setGoalies(prev => prev.map(g => {
-        if (!goalieKeys.has(g.name+"|"+g.team)) return g;
-        if (!g.pGames) return g;
-        const filtered = g.pGames.filter(e => !(e.round===round && e.game===game));
-        if (filtered.length === g.pGames.length) return g;
-        return withGoalieRollups({...g, pGames:filtered});
-      }));
-    }
-
-    // Clear game result
-    if (setAllSeries) {
-      setAllSeries(prev => {
-        const u = [...prev];
-        if (!u[entry.seriesIdx]) return prev;
-        const games = [...u[entry.seriesIdx].games];
-        games[entry.game-1] = {...games[entry.game-1], homeScore:null, awayScore:null, result:null, ot:false};
-        u[entry.seriesIdx] = {...u[entry.seriesIdx], games};
-        return u;
-      });
-    }
-    setImports(prev => prev.filter(x => x.id !== entryId));
-  }
-
-  // Status grid: show all 7 games for currently-detected (or first) series
-  const focusSeriesIdx = preview ? (overrideSeries != null ? overrideSeries : preview.detectedSeries) : 0;
-  const focusSeries = allSeries?.[focusSeriesIdx];
-  const seriesImports = imports.filter(x => x.seriesIdx === focusSeriesIdx);
-
-  return <div>
-    <div style={{fontSize:10,color:"var(--color-text-tertiary)",marginBottom:8,lineHeight:1.5}}>
-      Paste the <strong>entire</strong> Hockey Reference game page (Ctrl+A → Ctrl+C from the page).
-      Includes scoring summary, both teams' skater + goalie tables, and advanced stats.
-      Series + game # auto-detected. One paste covers both teams.
-    </div>
-
-    <textarea value={paste} onChange={e=>{setPaste(e.target.value); setPreview(null); setResult(null); setErr("");}}
-      placeholder={"Paste full HR game page here (Ctrl+A then Ctrl+C from hockey-reference.com/boxscores/...)"}
-      style={{width:"100%",height:140,fontSize:10,fontFamily:"var(--font-mono)",
-        background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
-        borderRadius:"var(--border-radius-md)",padding:10,color:"var(--color-text-primary)",
-        resize:"vertical",boxSizing:"border-box",marginBottom:8}}/>
-
-    <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:8}}>
-      <button onClick={handleParse} disabled={!paste.trim()||!players}
-        style={{padding:"6px 18px",fontSize:12,fontWeight:500,borderRadius:"var(--border-radius-md)",border:"none",
-          cursor:paste.trim()&&players?"pointer":"default",
-          background:paste.trim()&&players?"#3b82f6":"var(--color-background-secondary)",
-          color:paste.trim()&&players?"white":"var(--color-text-tertiary)"}}>
-        1. Parse Preview
-      </button>
-      <button onClick={()=>{setPaste("");setPreview(null);setResult(null);setErr("");}}
-        style={{padding:"5px 10px",fontSize:11,borderRadius:"var(--border-radius-md)",
-          background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
-          color:"var(--color-text-secondary)",cursor:"pointer"}}>Clear</button>
-      {!players&&<span style={{fontSize:11,color:"#f59e0b"}}>Load skaters.csv first</span>}
-      {!goalies&&<span style={{fontSize:11,color:"#f59e0b"}}>Load goalies.csv to capture goalie stats</span>}
-    </div>
-
-    {err&&<div style={{marginBottom:8,padding:8,borderRadius:"var(--border-radius-md)",
-      background:"rgba(239,68,68,0.1)",border:"0.5px solid rgba(239,68,68,0.3)",fontSize:11,color:"#ef4444"}}>{err}</div>}
-
-    {/* PREVIEW PANEL */}
-    {preview && <div style={{marginBottom:10,padding:10,borderRadius:"var(--border-radius-md)",
-      background:"rgba(59,130,246,0.06)",border:"0.5px solid rgba(59,130,246,0.3)"}}>
-      <div style={{fontSize:11,fontWeight:500,color:"#3b82f6",marginBottom:8}}>
-        Parsed: {preview.awayAbbr} {preview.awayScore} @ {preview.homeAbbr} {preview.homeScore}
-        {preview.ot && <span style={{marginLeft:6,color:"#f59e0b"}}>(OT)</span>}
-        {preview.dateISO && <span style={{marginLeft:6,color:"var(--color-text-tertiary)",fontWeight:400}}>· {preview.dateISO}</span>}
-      </div>
-
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:8}}>
-        <div>
-          <div style={{fontSize:9,color:"var(--color-text-secondary)",marginBottom:3}}>SERIES (auto-detected)</div>
-          <select value={overrideSeries != null ? overrideSeries : preview.detectedSeries}
-            onChange={e=>setOverrideSeries(+e.target.value)}
-            style={{width:"100%",padding:"4px 8px",fontSize:11,background:"var(--color-background-secondary)",
-              border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",color:"var(--color-text-primary)"}}>
-            {(allSeries||[]).map((sr,i)=>(
-              <option key={i} value={i}>{sr.homeAbbr&&sr.awayAbbr?`${sr.homeAbbr} vs ${sr.awayAbbr}`:`Series ${i+1}`}{i===preview.detectedSeries?" ✓":""}</option>
-            ))}
-          </select>
-        </div>
-        <div>
-          <div style={{fontSize:9,color:"var(--color-text-secondary)",marginBottom:3}}>GAME # (auto: G{preview.detectedGame})</div>
-          <select value={overrideGame != null ? overrideGame : preview.detectedGame}
-            onChange={e=>setOverrideGame(+e.target.value)}
-            style={{width:"100%",padding:"4px 8px",fontSize:11,background:"var(--color-background-secondary)",
-              border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",color:"var(--color-text-primary)"}}>
-            {[1,2,3,4,5,6,7].map(n=><option key={n} value={n}>Game {n}{n===preview.detectedGame?" ✓":""}</option>)}
-          </select>
-        </div>
-      </div>
-
-      {/* Match summary */}
-      <div style={{fontSize:10,marginBottom:6,color:"var(--color-text-secondary)"}}>
-        <span style={{color:"#10b981"}}>{preview.awayMatched.length}</span> {preview.awayAbbr} matched
-        {preview.awayUnmatched.length>0&&<span style={{color:"#f59e0b"}}> · {preview.awayUnmatched.length} unmatched</span>}
-        {" · "}
-        <span style={{color:"#10b981"}}>{preview.homeMatched.length}</span> {preview.homeAbbr} matched
-        {preview.homeUnmatched.length>0&&<span style={{color:"#f59e0b"}}> · {preview.homeUnmatched.length} unmatched</span>}
-        {" · Goalies: "}
-        <span style={{color:"#10b981"}}>{preview.awayGoaliesMatched.length+preview.homeGoaliesMatched.length}</span> matched
-        {(preview.awayGoaliesUnmatched.length+preview.homeGoaliesUnmatched.length)>0
-          &&<span style={{color:"#f59e0b"}}> · {preview.awayGoaliesUnmatched.length+preview.homeGoaliesUnmatched.length} unmatched</span>}
-      </div>
-
-      {/* Unmatched player decisions */}
-      {[...preview.awayUnmatched.map(u=>({u,team:preview.awayAbbr})),
-        ...preview.homeUnmatched.map(u=>({u,team:preview.homeAbbr}))].length>0 && (
-        <div style={{marginBottom:8,padding:8,background:"rgba(245,158,11,0.08)",borderRadius:"var(--border-radius-md)",border:"0.5px solid rgba(245,158,11,0.25)"}}>
-          <div style={{fontSize:10,fontWeight:500,color:"#f59e0b",marginBottom:4}}>Unmatched skaters (not in roster)</div>
-          {[...preview.awayUnmatched.map(u=>({u,team:preview.awayAbbr})),
-            ...preview.homeUnmatched.map(u=>({u,team:preview.homeAbbr}))].map(({u,team},i)=>{
-            const key = u.name+"|"+team;
-            const decision = unmatchedDecisions[key] || "skip";
-            return <div key={i} style={{display:"flex",gap:8,alignItems:"center",fontSize:10,padding:"2px 0"}}>
-              <span style={{minWidth:140}}>{u.name} <span style={{color:"var(--color-text-tertiary)"}}>({team})</span></span>
-              <span style={{color:"var(--color-text-secondary)",fontFamily:"var(--font-mono)",minWidth:120}}>
-                {u.g}G {u.a}A · {u.sog}S · {u.hit}H {u.blk}B
-              </span>
-              <select value={decision} onChange={e=>setUnmatchedDecisions(prev=>({...prev,[key]:e.target.value}))}
-                style={{padding:"2px 6px",fontSize:10,background:"var(--color-background-secondary)",
-                  border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-primary)"}}>
-                <option value="skip">Skip</option>
-                <option value="add">Add as new player</option>
-              </select>
-            </div>;
-          })}
-        </div>
-      )}
-
-      {/* v29.1: Unmatched goalies display — read-only (goalies always skip on commit since
-          we don't synthesize goalie records from box scores; user should load goalies.csv
-          or manually add a goalie entry if missing). */}
-      {[...preview.awayGoaliesUnmatched.map(u=>({u,team:preview.awayAbbr})),
-        ...preview.homeGoaliesUnmatched.map(u=>({u,team:preview.homeAbbr}))].length>0 && (
-        <div style={{marginBottom:8,padding:8,background:"rgba(245,158,11,0.08)",borderRadius:"var(--border-radius-md)",border:"0.5px solid rgba(245,158,11,0.25)"}}>
-          <div style={{fontSize:10,fontWeight:500,color:"#f59e0b",marginBottom:4}}>Unmatched goalies (not in goalies.csv) — will be skipped on commit</div>
-          {[...preview.awayGoaliesUnmatched.map(u=>({u,team:preview.awayAbbr})),
-            ...preview.homeGoaliesUnmatched.map(u=>({u,team:preview.homeAbbr}))].map(({u,team},i)=>(
-            <div key={i} style={{display:"flex",gap:8,alignItems:"center",fontSize:10,padding:"2px 0"}}>
-              <span style={{minWidth:140}}>{u.name} <span style={{color:"var(--color-text-tertiary)"}}>({team})</span></span>
-              <span style={{color:"var(--color-text-secondary)",fontFamily:"var(--font-mono)",minWidth:160}}>
-                {u.dec||"—"} · {u.ga}GA / {u.sa}SA · {u.sv}SV{u.so>0?` · ${u.so}SO`:""}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-
-      <div style={{display:"flex",gap:8,alignItems:"center"}}>
-        <button onClick={handleCommit}
-          style={{padding:"6px 18px",fontSize:12,fontWeight:500,borderRadius:"var(--border-radius-md)",border:"none",
-            cursor:"pointer",background:"#10b981",color:"white"}}>
-          2. Commit Import
-        </button>
-        <button onClick={()=>{setPreview(null);setUnmatchedDecisions({});}}
-          style={{padding:"5px 10px",fontSize:11,borderRadius:"var(--border-radius-md)",
-            background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
-            color:"var(--color-text-secondary)",cursor:"pointer"}}>Cancel</button>
-      </div>
-    </div>}
-
-    {result&&<div style={{marginBottom:10,padding:8,borderRadius:"var(--border-radius-md)",
-      background:"rgba(16,185,129,0.1)",border:"0.5px solid rgba(16,185,129,0.3)",fontSize:11}}>
-      <div style={{color:"#10b981",fontWeight:500,marginBottom:2}}>
-        ✓ {result.seriesLabel} G{result.gameNum}: {result.awayAbbr} {result.awayScore} @ {result.homeAbbr} {result.homeScore}
-        {result.ot && " (OT)"} — {result.matched} skaters · {result.goalies} goalies
-      </div>
-      {result.unmatched>0&&<div style={{fontSize:10,color:"#f59e0b"}}>
-        {result.unmatched} unmatched player{result.unmatched===1?"":"s"} {result.addedPlayers.length>0?`(${result.addedPlayers.length} added: ${result.addedPlayers.join(", ")})`:"(skipped)"}
+        {slotFilter&&<div style={{marginTop:12}}><div style={{display:'flex',flexDirection:'column',gap:4}}>
+          {drafts.filter(d=>d.draftPosition===slotFilter).map((d,i)=>{const c=d._cls||{counts:{QB:0,RB:0,WR:0,TE:0}};return<div key={i} onClick={()=>setSelD(d)} style={{background:S.s2,borderRadius:6,padding:'8px 12px',display:'flex',justifyContent:'space-between',cursor:'pointer',fontSize:12}}>
+            <span style={{fontWeight:600}}>{d.name}</span><div style={{display:'flex',gap:4}}>{['QB','RB','WR','TE'].map(pos=><span key={pos} style={{fontSize:9,color:POS[pos].accent,fontWeight:700}}>{pos}{c.counts[pos]}</span>)}</div></div>;})}
+        </div></div>}
       </div>}
-    </div>}
 
-    {/* Status grid for the focused series */}
-    {focusSeries&&focusSeries.homeAbbr&&focusSeries.awayAbbr&&<div style={{marginTop:12}}>
-      <div style={{fontSize:10,fontWeight:500,color:"var(--color-text-secondary)",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:6}}>
-        {focusSeries.homeAbbr} vs {focusSeries.awayAbbr} — Game Status
-      </div>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:4}}>
+      {/* HEATMAP — round-by-round position breakdown */}
+      {tab==='heatmap'&&<div>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14}}><h2 style={{fontFamily:FONT,fontSize:16,fontWeight:900,textTransform:'uppercase'}}>Round-by-Round Heatmap</h2><ContestSel/></div>
+        <p style={{fontSize:10,color:S.mt,marginBottom:12}}>What % of picks in each round are QB/RB/WR/TE — You vs Field</p>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:20}}>
+          {[{t:'Your Picks',data:an.roundHeat.me,c:'#22c55e'},{t:'Field Picks',data:an.roundHeat.field,c:'#f59e0b'}].map(section=>(
+            <div key={section.t}><p style={{fontSize:11,color:section.c,textTransform:'uppercase',fontWeight:700,marginBottom:8}}>{section.t}</p>
+              <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,overflow:'hidden'}}>
+                <table style={{width:'100%',borderCollapse:'collapse',fontSize:11}}>
+                  <thead><tr style={{background:S.s2}}><th style={{padding:'6px 10px',textAlign:'left',color:S.mt,fontSize:10}}>Rd</th>
+                    {['QB','RB','WR','TE'].map(pos=><th key={pos} style={{padding:'6px',textAlign:'center',color:POS[pos].accent,fontSize:10,fontWeight:700}}>{pos}</th>)}</tr></thead>
+                  <tbody>{Array.from({length:20},(_,r)=>{const rd=section.data[r+1];if(!rd)return null;return<tr key={r} style={{borderBottom:'1px solid #334155'}}>
+                    <td style={{padding:'4px 10px',fontWeight:700,color:S.mt}}>{r+1}</td>
+                    {['QB','RB','WR','TE'].map(pos=>{const pct=rd.total?(rd[pos]||0)/rd.total*100:0;return<td key={pos} style={{padding:'4px',textAlign:'center',fontWeight:700,fontSize:11,
+                      background:`rgba(${pos==='QB'?'220,38,38':pos==='RB'?'5,150,105':pos==='WR'?'37,99,235':'217,119,6'},${Math.min(pct/100*0.6,0.5)})`,
+                      color:pct>20?S.tx:S.mt}}>{pct>0?pct.toFixed(0)+'%':'—'}</td>;})}</tr>;}).filter(Boolean)}</tbody></table></div></div>))}
+        </div>
+        {/* Correlation finder */}
+        <h3 style={{fontSize:14,fontWeight:900,textTransform:'uppercase',marginTop:24,marginBottom:12}}>QB-Pass Catcher Correlations</h3>
+        <p style={{fontSize:10,color:S.mt,marginBottom:8}}>Your most common QB + WR/TE same-team stacks</p>
+        {correlations.length===0?<p style={{color:S.mt,fontSize:12}}>No QB stacks found yet.</p>:
+        <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,overflow:'hidden'}}>
+          <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+            <thead><tr style={{background:S.s2}}><th style={{padding:'8px 10px',textAlign:'left',fontWeight:700,color:S.mt,fontSize:10}}>QB</th><th style={{padding:'8px 10px',textAlign:'left',fontWeight:700,color:S.mt,fontSize:10}}>Pass Catcher</th><th style={{padding:'8px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10}}>Team</th><th style={{padding:'8px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10}}>Count</th></tr></thead>
+            <tbody>{correlations.map((c,i)=><tr key={i} style={{borderBottom:'1px solid #334155'}}>
+              <td style={{padding:'6px 10px',fontWeight:600}}><Pill pos="QB"/> {c.qb}</td>
+              <td style={{padding:'6px 10px',fontWeight:600}}><Pill pos={c.wrPos}/> {c.wr}</td>
+              <td style={{padding:'6px',textAlign:'center',color:S.mt}}>{c.team}</td>
+              <td style={{padding:'6px',textAlign:'center'}}><span style={{fontWeight:800,color:'#f59e0b'}}>{c.count}×</span></td></tr>)}</tbody></table></div>}
+      </div>}
+
+      {/* TEAMS — sortable */}
+      {tab==='teams'&&<div>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14}}><h2 style={{fontFamily:FONT,fontSize:16,fontWeight:900,textTransform:'uppercase'}}>Teams</h2><ContestSel/></div>
+        <p style={{fontSize:10,color:S.mt,marginBottom:8}}>Click a team to see stack details</p>
+        <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,overflow:'hidden'}}>
+          <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+            <thead><tr style={{background:S.s2}}>
+              <th onClick={()=>{setTeamSortBy('team');setTeamSortDir(d=>d==='asc'?'desc':'asc');}} style={{padding:'8px 12px',textAlign:'left',fontWeight:700,color:S.mt,fontSize:10,cursor:'pointer'}}>Team</th>
+              <th onClick={()=>{setTeamSortBy('mine');setTeamSortDir(d=>d==='asc'?'desc':'asc');}} style={{padding:'8px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10,cursor:'pointer'}}>Picks{teamSortBy==='mine'?(teamSortDir==='desc'?' ↓':' ↑'):''}</th>
+              <th onClick={()=>{setTeamSortBy('myPct');setTeamSortDir(d=>d==='asc'?'desc':'asc');}} style={{padding:'8px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10,cursor:'pointer'}}>Your %{teamSortBy==='myPct'?(teamSortDir==='desc'?' ↓':' ↑'):''}</th>
+              <th onClick={()=>{setTeamSortBy('fieldPct');setTeamSortDir(d=>d==='asc'?'desc':'asc');}} style={{padding:'8px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10,cursor:'pointer'}}>Field %{teamSortBy==='fieldPct'?(teamSortDir==='desc'?' ↓':' ↑'):''}</th>
+              <th onClick={()=>{setTeamSortBy('diff');setTeamSortDir(d=>d==='asc'?'desc':'asc');}} style={{padding:'8px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10,cursor:'pointer'}}>Diff{teamSortBy==='diff'?(teamSortDir==='desc'?' ↓':' ↑'):''}</th>
+              <th style={{padding:'8px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10}}>Stacks</th>
+            </tr></thead>
+            <tbody>{teamData.map(t=>{const stk=an.stacks.find(s=>s.team===t.team);return<React.Fragment key={t.team}>
+              <tr onClick={()=>setExpandTeam(expandTeam===t.team?null:t.team)} style={{borderBottom:'1px solid #334155',cursor:'pointer',background:expandTeam===t.team?'rgba(139,92,246,0.08)':'transparent'}}>
+              <td style={{padding:'6px 12px',fontWeight:700}}>{t.team} {expandTeam===t.team?'▼':'▶'}</td><td style={{padding:'6px',textAlign:'center'}}>{t.mine}</td>
+              <td style={{padding:'6px',textAlign:'center',fontWeight:700,color:'#22c55e'}}>{t.myPct.toFixed(1)}%</td>
+              <td style={{padding:'6px',textAlign:'center',color:S.mt}}>{t.fieldPct.toFixed(1)}%</td>
+              <td style={{padding:'6px',textAlign:'center',fontWeight:700,color:t.diff>1?'#22c55e':t.diff<-1?'#ef4444':S.mt}}>{t.diff>0?'+':''}{t.diff.toFixed(1)}%</td>
+              <td style={{padding:'6px',textAlign:'center',color:stk?'#f59e0b':S.mt,fontWeight:700}}>{stk?`${stk.count}× (${stk.pct.toFixed(0)}%)`:'—'}</td></tr>
+              {expandTeam===t.team&&stk&&<tr><td colSpan={6} style={{padding:'10px 16px',background:'rgba(139,92,246,0.05)'}}>
+                <div style={{display:'flex',gap:4,flexWrap:'wrap',marginBottom:8}}>{stk.topPl.map((pl,i)=><span key={i} style={{fontSize:11,background:S.s2,padding:'3px 8px',borderRadius:5}}>{pl.name} <span style={{color:'#f59e0b',fontWeight:700}}>{pl.count}×</span></span>)}</div>
+                {stk.topCombos.length>0&&<div>{stk.topCombos.map((c,i)=><p key={i} style={{fontSize:11,color:'#a78bfa',margin:'2px 0'}}>{c.combo} <span style={{color:'#f59e0b',fontWeight:700}}>({c.count}×)</span></p>)}</div>}
+              </td></tr>}
+            </React.Fragment>;})}</tbody></table></div></div>}
+
+      {/* PAIRS */}
+      {tab==='pairs'&&<div>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14,flexWrap:'wrap',gap:8}}>
+          <h2 style={{fontFamily:FONT,fontSize:16,fontWeight:900,textTransform:'uppercase'}}>Pairs</h2>
+          <div style={{display:'flex',gap:6,alignItems:'center'}}>
+            <div style={{display:'flex',gap:2,background:S.s2,borderRadius:6,padding:2}}>
+              {[{id:'mine',l:'My Pairs'},{id:'field',l:'All Room'}].map(v=><button key={v.id} onClick={()=>setPairsView(v.id)} style={{fontSize:10,fontWeight:700,padding:'5px 10px',borderRadius:4,border:'none',cursor:'pointer',background:pairsView===v.id?'#f59e0b':'transparent',color:pairsView===v.id?'#fff':S.mt}}>{v.l}</button>)}</div>
+            <button onClick={()=>setShowBoard(true)} style={{fontSize:10,fontWeight:700,padding:'5px 12px',background:'#22c55e',color:'#fff',border:'none',borderRadius:6,cursor:'pointer'}}>Draft Board</button></div></div>
+        {pairsData.length===0?<p style={{color:S.mt,fontSize:12}}>No data.</p>:
+        <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,overflow:'hidden'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+          <thead><tr style={{background:S.s2}}>{['Player A','','Player B','Count'].map(h=><th key={h} style={{padding:'8px 10px',textAlign:h==='Count'?'center':'left',fontWeight:700,color:S.mt,borderBottom:`2px solid ${S.bd}`,fontSize:10}}>{h}</th>)}</tr></thead>
+          <tbody>{pairsData.map((p,i)=><tr key={i} style={{borderBottom:'1px solid #334155'}}>
+            <td style={{padding:'6px 10px'}}><div style={{display:'flex',alignItems:'center',gap:5}}>{p.posA&&<Pill pos={p.posA}/>}<span style={{fontWeight:600}}>{p.a}</span></div></td>
+            <td style={{padding:'6px 4px',textAlign:'center'}}>{p.stack&&<span style={{fontSize:9,background:'#f59e0b',color:'#fff',padding:'1px 5px',borderRadius:4,fontWeight:700}}>STACK</span>}</td>
+            <td style={{padding:'6px 10px'}}><div style={{display:'flex',alignItems:'center',gap:5}}>{p.posB&&<Pill pos={p.posB}/>}<span style={{fontWeight:600}}>{p.b}</span></div></td>
+            <td style={{padding:'6px 10px',textAlign:'center'}}><span style={{fontFamily:FONT,fontWeight:800,color:'#f59e0b',fontSize:13}}>{p.ct}×</span></td></tr>)}</tbody></table></div>}</div>}
+
+
+      {/* 2025 FINAL TOURNAMENT REVIEW */}
+      {tab==='final'&&<div>
+        <h2 style={{fontFamily:FONT,fontSize:16,fontWeight:900,textTransform:'uppercase',marginBottom:14}}>2025 Final Review</h2>
+        <p style={{fontSize:10,color:S.mt,marginBottom:16}}>1,021 entries • DraftKings Best Ball Milly Maker 2025 Championship</p>
         {(()=>{
-          const cells=[]; let hw=0, aw=0;
-          for(let g=1; g<=7; g++){
-            const game = focusSeries.games?.[g-1] || {};
-            const hs = game.homeScore, as = game.awayScore;
-            const hasScore = typeof hs==="number" && typeof as==="number";
-            if (hasScore) { if (hs>as) hw++; else if (as>hs) aw++; }
-            const runningLabel = hasScore
-              ? (hw===aw ? `${hw}-${aw}` : hw>aw ? `${focusSeries.homeAbbr} ${hw}-${aw}` : `${focusSeries.awayAbbr} ${aw}-${hw}`)
-              : null;
-            const bg = hasScore ? "rgba(16,185,129,0.12)" : "var(--color-background-secondary)";
-            const borderCol = hasScore ? "rgba(16,185,129,0.3)" : "var(--color-border-tertiary)";
-            cells.push(
-              <div key={g} style={{padding:"5px 4px",textAlign:"center",background:bg,borderRadius:3,fontSize:9,border:`0.5px solid ${borderCol}`,minHeight:54}}>
-                <div style={{fontSize:8,color:"var(--color-text-tertiary)",marginBottom:2}}>G{g}</div>
-                {hasScore
-                  ? <>
-                      <div style={{fontSize:10,fontWeight:500,color:"var(--color-text-primary)",fontFamily:"var(--font-mono)"}}>
-                        {hs}-{as}{game.ot?<span style={{color:"#f59e0b",marginLeft:2}}>OT</span>:""}
-                      </div>
-                      <div style={{fontSize:8,color:"var(--color-text-secondary)",marginTop:1}}>{runningLabel}</div>
-                    </>
-                  : <div style={{fontSize:9,color:"var(--color-text-tertiary)",marginTop:6}}>—</div>
-                }
-              </div>
-            );
-          }
-          return cells;
-        })()}
-      </div>
-    </div>}
-
-    {/* Imports log */}
-    {seriesImports.length>0&&<div style={{marginTop:12}}>
-      <div style={{fontSize:10,fontWeight:500,color:"var(--color-text-secondary)",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:4}}>
-        Recent Imports ({seriesImports.length})
-      </div>
-      <div style={{maxHeight:180,overflowY:"auto",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)"}}>
-        {seriesImports.map(e=>(
-          <div key={e.id} style={{display:"flex",gap:8,fontSize:10,padding:"4px 8px",borderBottom:"0.5px solid var(--color-border-tertiary)",alignItems:"center"}}>
-            <span style={{color:"var(--color-text-tertiary)",flexShrink:0,fontSize:9}}>{e.ts}</span>
-            <span style={{color:"#10b981",flexShrink:0,fontFamily:"var(--font-mono)"}}>G{e.game}</span>
-            <span style={{flexShrink:0,fontFamily:"var(--font-mono)",color:"var(--color-text-secondary)"}}>
-              {e.awayAbbr} {e.awayScore}-{e.homeScore} {e.homeAbbr}{e.ot?" OT":""}
-            </span>
-            <span style={{color:"var(--color-text-secondary)",flexShrink:0}}>{e.matched}p</span>
-            {e.unmatched.length>0&&<span style={{color:"#f59e0b",fontSize:9}}>⚠{e.unmatched.length}</span>}
-            <button onClick={()=>handleUndo(e.id)}
-              style={{marginLeft:"auto",padding:"2px 8px",fontSize:9,borderRadius:3,border:"0.5px solid rgba(239,68,68,0.3)",background:"rgba(239,68,68,0.08)",color:"#ef4444",cursor:"pointer"}}>
-              Undo
-            </button>
-          </div>
-        ))}
-      </div>
-    </div>}
-  </div>;
-}
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// PLAYOFF TOTALS VERIFICATION TABLE (v13)
-// Shows every player with pGP>0 or any recorded playoff stat. Lets user
-// confirm Game Stat Import actually landed. Primary debug tool for import issues.
-// ═══════════════════════════════════════════════════════════════════════════════
-function PlayoffTotalsTable({players,dark}) {
-  const [filterTeam,setFilterTeam]=useState("ALL");
-  const [sortBy,setSortBy]=useState("pts");
-
-  const rows=useMemo(()=>{
-    if(!players) return [];
-    return players
-      .filter(p=>(p.pGP||0)>0 || (p.pG||0)>0 || (p.pA||0)>0 || (p.pSOG||0)>0)
-      .filter(p=>filterTeam==="ALL"||p.team===filterTeam)
-      .map(p=>({...p,pPts:(p.pG||0)+(p.pA||0)}))
-      .sort((a,b)=>{
-        if(sortBy==="team") return a.team.localeCompare(b.team)||b.pPts-a.pPts;
-        if(sortBy==="pts") return b.pPts-a.pPts;
-        if(sortBy==="g") return (b.pG||0)-(a.pG||0);
-        if(sortBy==="sog") return (b.pSOG||0)-(a.pSOG||0);
-        return 0;
-      });
-  },[players,filterTeam,sortBy]);
-
-  const teams=useMemo(()=>{
-    if(!players) return [];
-    return [...new Set(players.filter(p=>(p.pGP||0)>0).map(p=>p.team))].sort();
-  },[players]);
-
-  if(!players) return <div style={{fontSize:11,color:"var(--color-text-tertiary)"}}>Load skaters.csv first.</div>;
-  if(rows.length===0) return <div style={{fontSize:11,color:"var(--color-text-tertiary)"}}>No playoff game stats imported yet. After you paste a Hockey Reference box score above, matched players will appear here.</div>;
-
-  return <div>
-    <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:8,fontSize:10,flexWrap:"wrap"}}>
-      <span style={{color:"var(--color-text-secondary)"}}>{rows.length} players with playoff stats</span>
-      <select value={filterTeam} onChange={e=>setFilterTeam(e.target.value)}
-        style={{fontSize:10,padding:"2px 5px",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-primary)"}}>
-        <option value="ALL">All teams</option>
-        {teams.map(t=><option key={t} value={t}>{t}</option>)}
-      </select>
-      <select value={sortBy} onChange={e=>setSortBy(e.target.value)}
-        style={{fontSize:10,padding:"2px 5px",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-primary)"}}>
-        <option value="pts">Sort: Points</option>
-        <option value="g">Sort: Goals</option>
-        <option value="sog">Sort: SOG</option>
-        <option value="team">Sort: Team</option>
-      </select>
-    </div>
-    <div style={{maxHeight:280,overflowY:"auto",overflowX:"auto"}}>
-      <table style={{width:"100%",borderCollapse:"collapse",fontSize:10}}>
-        <thead style={{position:"sticky",top:0,background:dark?"#131625":"#fff",zIndex:1}}>
-          <tr style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
-            {["Player","Team","GP","G","A","Pts","SOG"].map(h=>(
-              <th key={h} style={{padding:"3px 6px",color:"var(--color-text-tertiary)",fontWeight:500,textAlign:h==="Player"||h==="Team"?"left":"right",fontSize:9}}>{h}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>{rows.map((p,i)=>(
-          <tr key={p.name+p.team} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)")}}>
-            <td style={{padding:"2px 6px"}}>{p.name}</td>
-            <td style={{padding:"2px 6px"}}><span style={{fontSize:8,padding:"1px 4px",borderRadius:2,background:"rgba(59,130,246,0.12)",color:"#60a5fa"}}>{p.team}</span></td>
-            <td style={{padding:"2px 6px",textAlign:"right",fontFamily:"var(--font-mono)"}}>{p.pGP||0}</td>
-            <td style={{padding:"2px 6px",textAlign:"right",fontFamily:"var(--font-mono)",color:(p.pG||0)>0?"#4ade80":"var(--color-text-tertiary)",fontWeight:(p.pG||0)>0?500:400}}>{p.pG||0}</td>
-            <td style={{padding:"2px 6px",textAlign:"right",fontFamily:"var(--font-mono)",color:(p.pA||0)>0?"#4ade80":"var(--color-text-tertiary)"}}>{p.pA||0}</td>
-            <td style={{padding:"2px 6px",textAlign:"right",fontFamily:"var(--font-mono)",fontWeight:500}}>{p.pPts}</td>
-            <td style={{padding:"2px 6px",textAlign:"right",fontFamily:"var(--font-mono)",color:"var(--color-text-secondary)"}}>{p.pSOG||0}</td>
-          </tr>
-        ))}</tbody>
-      </table>
-    </div>
-  </div>;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// UPLOAD TAB
-// ═══════════════════════════════════════════════════════════════════════════════
-function UploadTab({players,setPlayers,goalies,setGoalies,exportState,importState,syncStatus,allSeries,setAllSeries,dark,onGameUploaded,currentRound}) {
-  const [fileErr,setFileErr]=useState("");
-  const setErr=setFileErr; // alias used in file handlers
-
-  const playerFileRef = useRef(null);
-  const goalieFileRef = useRef(null);
-  const hrRosterFileRef = useRef(null);
-
-  // v29: Merge HR season-skater roster into existing players.
-  // Strategy: for each HR player, try to match on (normalized name + team). If matched,
-  // update the player's NAME to the HR spelling (so diacritics line up with box score pastes)
-  // and overlay any HR-source fields that the existing record is missing/zero. Preserve
-  // MoneyPuck's xG fields (onIceF/onIceA) and any playoff data (pGames/pG/pA/...).
-  // If no match, add as a new player.
-  function mergeHRRoster(hrPlayers) {
-    if (!hrPlayers || !hrPlayers.length) return;
-    const norm = s => (s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().replace(/[^a-z0-9]/g,"");
-    const existing = players || [];
-    // Index existing by (normName + team) for fast lookup
-    const byKey = new Map(existing.map(p => [norm(p.name)+"|"+p.team, p]));
-    const updated = [];
-    const seenKeys = new Set();
-    let nameFixed = 0, added = 0, teamMoved = 0;
-
-    // First pass: walk HR players, attempt to match
-    for (const hp of hrPlayers) {
-      const k = norm(hp.name) + "|" + hp.team;
-      // Direct match (same team)
-      let match = byKey.get(k);
-      // Cross-team match (player traded; HR has new team, existing has old team)
-      if (!match) {
-        for (const ep of existing) {
-          if (norm(ep.name) === norm(hp.name)) { match = ep; break; }
-        }
-      }
-      if (match) {
-        seenKeys.add(norm(match.name)+"|"+match.team);
-        const teamChanged = match.team !== hp.team;
-        if (teamChanged) teamMoved++;
-        const nameChanged = match.name !== hp.name;
-        if (nameChanged) nameFixed++;
-        updated.push({
-          ...match,
-          name: hp.name,    // adopt HR spelling (diacritics)
-          team: hp.team,    // adopt HR team (post-trade)
-          // Overlay HR rates ONLY where existing record has zero/missing — preserve MoneyPuck advanced data otherwise.
-          gp: match.gp || hp.gp,
-          g_pg:    match.g_pg    || hp.g_pg,
-          a_pg:    match.a_pg    || hp.a_pg,
-          sog_pg:  match.sog_pg  || hp.sog_pg,
-          hit_pg:  match.hit_pg  || hp.hit_pg,
-          blk_pg:  match.blk_pg  || hp.blk_pg,
-          take_pg: match.take_pg || hp.take_pg,
-          pim_pg:  match.pim_pg  || hp.pim_pg,
-          give_pg: match.give_pg || hp.give_pg,
-        });
-      } else {
-        updated.push(hp);
-        added++;
-      }
-    }
-    // Second pass: keep existing players who weren't in HR (e.g., on non-playoff teams or scratched all year).
-    // We add them only if their team is in the playoff set; HR is authoritative for current rosters.
-    for (const ep of existing) {
-      const k = norm(ep.name)+"|"+ep.team;
-      if (seenKeys.has(k)) continue;
-      // Find by name only — if HR has them on a different team, they're already in `updated`
-      const hrHasName = hrPlayers.some(hp => norm(hp.name) === norm(ep.name));
-      if (hrHasName) continue; // matched cross-team, already in updated
-      updated.push(ep);
-    }
-
-    updated.sort((a,b)=> (a.team||"").localeCompare(b.team||"") || (b.pts||0) - (a.pts||0));
-    setPlayers(updated);
-    setFileErr(`✓ HR roster merged: ${hrPlayers.length} HR players · ${added} added · ${nameFixed} names corrected · ${teamMoved} teams updated`);
-  }
-
-  function handleHRRosterFile(e) {
-    const file = e.target.files[0]; if (!file) return;
-    e.target.value = "";
-    const reader = new FileReader();
-    reader.onload = ev => {
-      try {
-        const r = parseHRSkaters(ev.target.result);
-        if (r.error) { setFileErr("HR parse error: " + r.error); return; }
-        mergeHRRoster(r.players);
-      } catch (e) { setFileErr("HR parse error: " + e.message); }
-    };
-    reader.readAsText(file);
-  }
-
-  // Paste-based HR roster import (no file upload — paste CSV directly into a textarea)
-  const [hrPasteText, setHrPasteText] = useState("");
-  function handleHRRosterPaste() {
-    if (!hrPasteText.trim()) return;
-    try {
-      const r = parseHRSkaters(hrPasteText);
-      if (r.error) { setFileErr("HR parse error: " + r.error); return; }
-      mergeHRRoster(r.players);
-      setHrPasteText("");
-    } catch (e) { setFileErr("HR parse error: " + e.message); }
-  }
-
-  function handlePlayerFile(e){
-    const file=e.target.files[0];if(!file)return;
-    e.target.value=""; // reset so same file can be re-selected
-    const reader=new FileReader();
-    reader.onload=ev=>{
-      try{
-        const text=ev.target.result;
-        if(file.name.endsWith(".json")){const d=JSON.parse(text);setPlayers(Array.isArray(d)?d:d.players);return;}
-        const lines=text.split("\n"),headers=lines[0].split(",");
-        const idx=h=>headers.indexOf(h);
-        const pt=new Set(["ANA","BOS","BUF","CAR","COL","DAL","EDM","LAK","MIN","MTL","OTT","PHI","PIT","TBL","UTA","VGK"]);
-        const parsed=[];
-        for(let i=1;i<lines.length;i++){
-          const c=lines[i].split(",");
-          if(!c[idx("situation")]||c[idx("situation")].trim()!=="all")continue;
-          let team=c[idx("team")]?.trim();if(!pt.has(team))continue;if(team==="VGK")team="VEG";
-          const gp=parseFloat(c[idx("games_played")])||1;
-          const g=parseFloat(c[idx("I_F_goals")])||0;
-          const a=(parseFloat(c[idx("I_F_primaryAssists")])||0)+(parseFloat(c[idx("I_F_secondaryAssists")])||0);
-          const sog=parseFloat(c[idx("I_F_shotsOnGoal")])||0;
-          const hit=parseFloat(c[idx("I_F_hits")])||0;
-          const blk=parseFloat(c[idx("shotsBlockedByPlayer")])||0;
-          const tk=parseFloat(c[idx("I_F_takeaways")])||0;
-          const pim=parseFloat(c[idx("I_F_penalityMinutes")])||0;
-          const tsa=parseFloat(c[idx("I_F_shotAttempts")])||0;
-          const give=parseFloat(c[idx("I_F_giveaways")])||0;
-          // v24: xG for team strength. onIce_F/A_xGoals for TOI-weighted team strength. icetime in seconds.
-          const onIceF=parseFloat(c[idx("OnIce_F_xGoals")])||0;
-          const onIceA=parseFloat(c[idx("OnIce_A_xGoals")])||0;
-          const toi=parseFloat(c[idx("icetime")])||0;
-          const posVal=c[idx("position")]?.trim()||"F";
-          const name=c[idx("name")]?.trim();if(!name)continue;
-          const defRole=posVal==="D"?"D2":posVal==="G"?"BACKUP":"MID6";
-          parsed.push({name,team,pos:posVal,gp:Math.round(gp),g,a,pts:g+a,sog,hit,blk,tk,pim,tsa,give,
-            onIceF,onIceA,toi,
-            g_pg:+(g/gp).toFixed(4),a_pg:+(a/gp).toFixed(4),pts_pg:+((g+a)/gp).toFixed(4),
-            sog_pg:+(sog/gp).toFixed(4),hit_pg:+(hit/gp).toFixed(4),blk_pg:+(blk/gp).toFixed(4),
-            take_pg:+(tk/gp).toFixed(4),pim_pg:+(pim/gp).toFixed(4),
-            tsa_pg:+(tsa/gp).toFixed(4),give_pg:+(give/gp).toFixed(4),
-            lineRole:defRole,pGP:0,pG:0,pA:0,pSOG:0,pHIT:0,pBLK:0,pTK:0,pPIM:0,pTSA:0,pGIVE:0});
-        }
-        parsed.sort((a,b)=>a.team.localeCompare(b.team)||b.pts-a.pts);
-        // v43: preserve user-set lineRole + accumulated playoff stats across skaters.csv reloads.
-        // Without this, re-loading wipes every role tag the user has manually curated.
-        // Match by normalized name+team; if found, merge the new regular-season data on top of
-        // the existing record while keeping lineRole and pG/pA/pSOG/etc.
-        const existing = players || [];
-        if (existing.length) {
-          const normName = (s) => (s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().replace(/[^a-z0-9]/g,"");
-          const byKey = new Map(existing.map(p => [normName(p.name)+"|"+(p.team||""), p]));
-          const byNameOnly = new Map(existing.map(p => [normName(p.name), p]));
-          const PRESERVE_FIELDS = ["lineRole","pGP","pG","pA","pPts","pSOG","pHIT","pBLK","pTK","pGV","pPIM","pTOI","pTSA","pGIVE"];
-          const merged = parsed.map(np => {
-            const key = normName(np.name) + "|" + np.team;
-            let prior = byKey.get(key);
-            if (!prior) prior = byNameOnly.get(normName(np.name)); // cross-team (traded player)
-            if (!prior) return np;
-            const out = {...np};
-            for (const f of PRESERVE_FIELDS) {
-              if (prior[f] != null) out[f] = prior[f];
-            }
-            return out;
-          });
-          setPlayers(merged);
-        } else {
-          setPlayers(parsed);
-        }
-      }catch(e){setErr("Skaters parse error: "+e.message);}
-    };
-    reader.readAsText(file);
-  }
-
-  function handleGoalieFile(e){
-    const file=e.target.files[0];if(!file)return;
-    e.target.value="";
-    const reader=new FileReader();
-    reader.onload=ev=>{
-      try{
-        const text=ev.target.result;
-        if(file.name.endsWith(".json")){const d=JSON.parse(text);setGoalies(Array.isArray(d)?d:d.goalies);return;}
-        const lines=text.split("\n"),headers=lines[0].split(",");
-        const idx=h=>headers.indexOf(h);
-        const pt=new Set(["ANA","BOS","BUF","CAR","COL","DAL","EDM","LAK","MIN","MTL","OTT","PHI","PIT","TBL","UTA","VGK"]);
-        const rawGoalies=[];
-        for(let i=1;i<lines.length;i++){
-          const c=lines[i].split(",");
-          if(!c[idx("situation")]||c[idx("situation")].trim()!=="all")continue;
-          let team=c[idx("team")]?.trim();if(!pt.has(team))continue;if(team==="VGK")team="VEG";
-          const gp=parseFloat(c[idx("games_played")])||1;
-          const ongoal=parseFloat(c[idx("ongoal")])||0;
-          const goals=parseFloat(c[idx("goals")])||0;
-          const xGoals=parseFloat(c[idx("xGoals")])||goals; // v23: fall back to goals if xGoals missing
-          const saves=ongoal-goals;
-          const name=c[idx("name")]?.trim();if(!name)continue;
-          // v23: goalie quality multiplier. >1.0 = better than expected; <1.0 = worse.
-          // Applied as a MULTIPLIER on opposing skaters' scoring lambda — so when a sharp goalie faces
-          // our skater, their goal rate shrinks. Clamp to [0.75, 1.25] to avoid wild extremes from tiny samples.
-          const rawQuality = goals>0 ? xGoals/goals : 1.0;
-          const quality = Math.max(0.75, Math.min(1.25, rawQuality));
-          rawGoalies.push({name,team,gp:Math.round(gp),saves,saves_pg:+(saves/gp).toFixed(4),
-                          xGoals:+xGoals.toFixed(2),goals:+goals.toFixed(1),quality:+quality.toFixed(3)});
-        }
-        const teamGP={};
-        rawGoalies.forEach(g=>{teamGP[g.team]=(teamGP[g.team]||0)+g.gp;});
-        const parsed=rawGoalies.map(g=>({...g,starter_share:+(g.gp/Math.max(1,teamGP[g.team])).toFixed(4),pGP:0,pSaves:0}));
-        parsed.sort((a,b)=>a.team.localeCompare(b.team)||b.starter_share-a.starter_share);
-        setGoalies(parsed);
-      }catch(e){setErr("Goalies parse error: "+e.message);}
-    };
-    reader.readAsText(file);
-  }
-
-  return (
-    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20,alignItems:"start"}}>
-      {/* Hidden real file inputs — triggered by visible buttons */}
-      <input ref={playerFileRef} type="file" accept=".csv,.json" onChange={handlePlayerFile} style={{display:"none"}}/>
-      <input ref={goalieFileRef} type="file" accept=".csv,.json" onChange={handleGoalieFile} style={{display:"none"}}/>
-      <input ref={hrRosterFileRef} type="file" accept=".csv" onChange={handleHRRosterFile} style={{display:"none"}}/>
-      <div>
-        <Card style={{marginBottom:14}}>
-          <SH title="Game Stat Import" sub="Paste a Hockey Reference box score — stats are added to each player's running playoff totals"/>
-          {/* Series + Game selector */}
-          <GameStatImporter players={players} setPlayers={setPlayers} goalies={goalies} setGoalies={setGoalies} allSeries={allSeries} setAllSeries={setAllSeries} onGameUploaded={onGameUploaded}/>
-        </Card>
-        <Card style={{marginBottom:14}}>
-          <SH title="Live Playoff Totals" sub="Post-import verification — any player with pGP > 0 appears here"/>
-          <PlayoffTotalsTable players={players} dark={dark}/>
-        </Card>
-      </div>
-
-      <div>
-        <Card style={{marginBottom:14}}>
-          <SH title="Skater Base Data"/>
-          <div style={{marginBottom:8,fontSize:12,color:"var(--color-text-secondary)"}}>{players?`${players.length} skaters loaded`:"No skater data"}</div>
-          <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
-            <button onClick={()=>playerFileRef.current?.click()} style={{padding:"6px 16px",fontSize:12,borderRadius:"var(--border-radius-md)",background:"#3b82f6",color:"white",border:"none",cursor:"pointer"}}>{players?"Re-load skaters.csv":"Load skaters.csv"}</button>
-            <button onClick={()=>hrRosterFileRef.current?.click()} disabled={!players}
-              title={players?"Merge a Hockey Reference season-skater CSV (fixes diacritics, adds late-season callups, updates traded players)":"Load skaters.csv first"}
-              style={{padding:"6px 14px",fontSize:12,borderRadius:"var(--border-radius-md)",
-                background:players?"#0d9488":"var(--color-background-secondary)",
-                color:players?"white":"var(--color-text-tertiary)",border:"none",cursor:players?"pointer":"default"}}>
-              + Merge HR Roster
-            </button>
-            <button onClick={()=>{
-              if (!players) return;
-              const before = players.length;
-              const merged = dedupePlayers(players);
-              const removed = before - merged.length;
-              setPlayers(merged);
-              alert(removed > 0 ? `Merged ${removed} duplicate player record${removed===1?"":"s"} (Stutzle/Stützle, Josh/Joshua Norris, etc.). Stats summed; longer name spelling kept.` : "No duplicates found.");
-            }} disabled={!players}
-              title="Find players with same normalized name+team (handles diacritics + Josh/Joshua-style nickname variants) and merge their stats."
-              style={{padding:"6px 14px",fontSize:12,borderRadius:"var(--border-radius-md)",
-                background:players?"#a16207":"var(--color-background-secondary)",
-                color:players?"white":"var(--color-text-tertiary)",border:"none",cursor:players?"pointer":"default"}}>
-              ↻ Dedupe Names
-            </button>
-          </div>
-          {players&&<div style={{marginTop:10,display:"flex",gap:4,flexWrap:"wrap"}}>
-            {["TOP6","MID6","BOT6","ACTIVE","D1","D2","D3","STARTER","BACKUP","SCRATCHED"].map(r=>{
-              const cnt=players.filter(p=>p.lineRole===r).length;
-              if(!cnt) return null;
-              const c=roleColor(r);
-              return <div key={r} style={{fontSize:9,padding:"2px 7px",borderRadius:3,background:`${c}20`,color:c,fontWeight:500}}>{r}: {cnt}</div>;
-            })}
-          </div>}
-          {/* Or paste HR CSV directly (avoids needing to save a file) */}
-          {players && <details style={{marginTop:10}}>
-            <summary style={{fontSize:10,color:"var(--color-text-tertiary)",cursor:"pointer",userSelect:"none"}}>
-              Or paste HR roster CSV directly (no file save needed)
-            </summary>
-            <div style={{marginTop:6}}>
-              <div style={{fontSize:9,color:"var(--color-text-tertiary)",marginBottom:4,lineHeight:1.5}}>
-                From hockey-reference.com/leagues/NHL_2026_skaters.html → "Get table as CSV (for Excel)" → paste full text here.
-                Multi-team rows (2TM/3TM) auto-resolve to most recent team.
-              </div>
-              <textarea value={hrPasteText} onChange={e=>setHrPasteText(e.target.value)}
-                placeholder="Paste HR season-skater CSV (Rk,Player,Age,Team,...) here…"
-                style={{width:"100%",height:80,fontSize:9,fontFamily:"var(--font-mono)",
-                  background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
-                  borderRadius:"var(--border-radius-md)",padding:8,color:"var(--color-text-primary)",
-                  resize:"vertical",boxSizing:"border-box",marginBottom:6}}/>
-              <button onClick={handleHRRosterPaste} disabled={!hrPasteText.trim()}
-                style={{padding:"4px 12px",fontSize:11,borderRadius:"var(--border-radius-md)",border:"none",
-                  cursor:hrPasteText.trim()?"pointer":"default",
-                  background:hrPasteText.trim()?"#0d9488":"var(--color-background-secondary)",
-                  color:hrPasteText.trim()?"white":"var(--color-text-tertiary)"}}>
-                Merge from Paste
-              </button>
+          const leaderboard=[
+            {rank:1,name:'th3calm',pts:226.6,qb:'Caleb Williams',build:'3QB-6RB-9WR-2TE',players:[{name:'Caleb Williams',pos:'QB',team:'CHI',slot:'QB'},{name:'Bijan Robinson',pos:'RB',team:'ATL',slot:'RB'},{name:'Rhamondre Stevenson',pos:'RB',team:'NE',slot:'RB'},{name:'Luther Burden III',pos:'WR',team:'CLE',slot:'WR'},{name:'Chris Olave',pos:'WR',team:'NO',slot:'WR'},{name:"Wan'Dale Robinson",pos:'WR',team:'NYG',slot:'WR'},{name:'Trey McBride',pos:'TE',team:'ARI',slot:'TE'},{name:"D'Andre Swift",pos:'RB',team:'CHI',slot:'FLEX'},{name:'Dak Prescott',pos:'QB',team:'DAL',slot:'BN'},{name:'Brandin Cooks',pos:'WR',team:'DAL',slot:'BN'},{name:'Jaxon Smith-Njigba',pos:'WR',team:'SEA',slot:'BN'},{name:'KaVontae Turpin',pos:'WR',team:'DAL',slot:'BN'},{name:'Chig Okonkwo',pos:'TE',team:'TEN',slot:'BN'},{name:'George Pickens',pos:'WR',team:'PIT',slot:'BN'},{name:'Darius Slayton',pos:'WR',team:'NYG',slot:'BN'},{name:'DJ Moore',pos:'WR',team:'CHI',slot:'BN'},{name:'Najee Harris',pos:'RB',team:'PIT',slot:'BN'},{name:'Kyler Murray',pos:'QB',team:'ARI',slot:'BN'},{name:'Trey Benson',pos:'RB',team:'ARI',slot:'BN'},{name:'DJ Giddens',pos:'RB',team:'KC',slot:'BN'}]},
+            {rank:2,name:'macknova',pts:225.3,qb:'Caleb Williams',build:'3QB-5RB-10WR-2TE',players:[{name:'Caleb Williams',pos:'QB',team:'CHI',slot:'QB'},{name:'Bijan Robinson',pos:'RB',team:'ATL',slot:'RB'},{name:'Zach Charbonnet',pos:'RB',team:'SEA',slot:'RB'},{name:'Luther Burden III',pos:'WR',team:'CLE',slot:'WR'},{name:'Chris Olave',pos:'WR',team:'NO',slot:'WR'},{name:"Wan'Dale Robinson",pos:'WR',team:'NYG',slot:'WR'},{name:'Trey McBride',pos:'TE',team:'ARI',slot:'TE'},{name:'RJ Harvey',pos:'RB',team:'BUF',slot:'FLEX'},{name:'Hunter Henry',pos:'TE',team:'NE',slot:'BN'},{name:'Isaac TeSlaa',pos:'WR',team:'NE',slot:'BN'},{name:'Jaylen Warren',pos:'RB',team:'PIT',slot:'BN'},{name:'Troy Franklin',pos:'WR',team:'DEN',slot:'BN'},{name:'Ladd McConkey',pos:'WR',team:'LAC',slot:'BN'},{name:'DeMario Douglas',pos:'WR',team:'NE',slot:'BN'},{name:'Jayden Daniels',pos:'QB',team:'WAS',slot:'BN'},{name:'Rome Odunze',pos:'WR',team:'CHI',slot:'BN'},{name:'Anthony Richardson Sr.',pos:'QB',team:'IND',slot:'BN'},{name:'Jaydon Blue',pos:'RB',team:'HOU',slot:'BN'},{name:'Tory Horton',pos:'WR',team:'CAR',slot:'BN'},{name:'Jaylin Lane',pos:'WR',team:'TEN',slot:'BN'}]},
+            {rank:3,name:'swisha_house918',pts:220.8,qb:'Caleb Williams',build:'3QB-5RB-8WR-4TE',players:[{name:'Caleb Williams',pos:'QB',team:'CHI',slot:'QB'},{name:'Bijan Robinson',pos:'RB',team:'ATL',slot:'RB'},{name:'Chase Brown',pos:'RB',team:'CIN',slot:'RB'},{name:'Chris Olave',pos:'WR',team:'NO',slot:'WR'},{name:"Wan'Dale Robinson",pos:'WR',team:'NYG',slot:'WR'},{name:'Quentin Johnston',pos:'WR',team:'LAC',slot:'WR'},{name:'Trey McBride',pos:'TE',team:'ARI',slot:'TE'},{name:'Rhamondre Stevenson',pos:'RB',team:'NE',slot:'FLEX'},{name:'Colston Loveland',pos:'TE',team:'DET',slot:'BN'},{name:'Matthew Stafford',pos:'QB',team:'LAR',slot:'BN'},{name:'Jakobi Meyers',pos:'WR',team:'LV',slot:'BN'},{name:'Courtland Sutton',pos:'WR',team:'DEN',slot:'BN'},{name:'Will Dissly',pos:'TE',team:'LAC',slot:'BN'},{name:'Michael Pittman Jr.',pos:'WR',team:'IND',slot:'BN'},{name:'DJ Moore',pos:'WR',team:'CHI',slot:'BN'},{name:'Jerome Ford',pos:'RB',team:'CLE',slot:'BN'},{name:'Tyler Higbee',pos:'TE',team:'LAR',slot:'BN'},{name:'Justice Hill',pos:'RB',team:'BAL',slot:'BN'},{name:'Dyami Brown',pos:'WR',team:'WAS',slot:'BN'},{name:'Russell Wilson',pos:'QB',team:'PIT',slot:'BN'}]},
+            {rank:4,name:'SmallFry06',pts:220.72,qb:'Brock Purdy',build:'3QB-6RB-8WR-3TE'},
+            {rank:5,name:'CLOUDxCITY',pts:217.52,qb:'Tyler Shough',build:'3QB-7RB-7WR-3TE'},
+            {rank:6,name:'Popadynec',pts:216.34,qb:'Drake Maye',build:'3QB-7RB-7WR-3TE'},
+            {rank:7,name:'jwreed8305',pts:213.22,qb:'Brock Purdy',build:'3QB-7RB-7WR-3TE'},
+            {rank:8,name:'psualum',pts:210.98,qb:'Dak Prescott',build:'2QB-7RB-8WR-3TE'},
+            {rank:9,name:'Tmonty15',pts:209.72,qb:'Brock Purdy',build:'3QB-6RB-8WR-3TE'},
+            {rank:10,name:'khunt16',pts:209.54,qb:'Drake Maye',build:'3QB-6RB-8WR-3TE'},
+            {rank:11,name:'earwig',pts:208.48,qb:'Dak Prescott',build:'3QB-7RB-7WR-3TE'},
+            {rank:12,name:'davidzucker',pts:208.38,qb:'Jaxson Dart',build:'4QB-6RB-8WR-2TE'},
+            {rank:13,name:'brendenbombers',pts:207.48,qb:'Josh Allen',build:'2QB-7RB-8WR-3TE'},
+            {rank:14,name:'benstnick',pts:205.94,qb:'Drake Maye',build:'2QB-7RB-8WR-3TE'},
+            {rank:15,name:'hebba5050',pts:205.72,qb:'Trevor Lawrence',build:'3QB-4RB-10WR-3TE'},
+            {rank:16,name:'redditdfsports',pts:203.74,qb:'Cam Ward',build:'2QB-6RB-10WR-2TE'},
+            {rank:17,name:'rgilmore21',pts:202.34,qb:'Drake Maye',build:'3QB-5RB-9WR-3TE'},
+            {rank:18,name:'rickdigglerthegreat',pts:201.74,qb:'Drake Maye',build:'3QB-6RB-8WR-3TE'},
+            {rank:19,name:'paddyo18',pts:199.94,qb:'Drake Maye',build:'3QB-5RB-9WR-3TE'},
+            {rank:20,name:'feast4',pts:199.34,qb:'Drake Maye',build:'3QB-5RB-8WR-4TE'},
+            {rank:21,name:'jdub_dfs',pts:198.88,qb:'Caleb Williams',build:'3QB-6RB-8WR-3TE'},
+            {rank:22,name:'fantasy_guru99',pts:198.42,qb:'Brock Purdy',build:'3QB-5RB-9WR-3TE'},
+            {rank:23,name:'big_stacks_only',pts:197.90,qb:'Drake Maye',build:'2QB-6RB-9WR-3TE'},
+            {rank:24,name:'draftking_phil',pts:197.54,qb:'Dak Prescott',build:'3QB-7RB-7WR-3TE'},
+            {rank:25,name:'chadwick42',pts:197.12,qb:'Caleb Williams',build:'3QB-6RB-9WR-2TE'},
+          ];
+          const liftPlayers=[
+            {name:'Trey McBride',pos:'TE',field:11.7,top50:42.0,overIdx:3.6},
+            {name:'Chris Olave',pos:'WR',field:42.4,top50:78.0,overIdx:1.8},
+            {name:'Chase Brown',pos:'RB',field:11.0,top50:34.0,overIdx:3.1},
+            {name:'Brock Purdy',pos:'QB',field:15.8,top50:20.0,overIdx:1.3},
+            {name:"Wan'Dale Robinson",pos:'WR',field:11.8,top50:32.0,overIdx:2.7},
+            {name:'Rhamondre Stevenson',pos:'RB',field:11.9,top50:22.0,overIdx:1.8},
+            {name:'Stefon Diggs',pos:'WR',field:15.5,top50:36.0,overIdx:2.3},
+            {name:'Drake Maye',pos:'QB',field:15.6,top50:28.0,overIdx:1.8},
+            {name:'Christian McCaffrey',pos:'RB',field:13.6,top50:18.0,overIdx:1.3},
+            {name:'George Pickens',pos:'WR',field:14.7,top50:26.0,overIdx:1.8},
+          ];
+          const chalkTraps=[
+            {name:'Puka Nacua',pos:'WR',field:63.6,top50:28.0,bottom:77.6},
+            {name:'James Cook III',pos:'RB',field:40.4,top50:14.0,bottom:52.8},
+            {name:'Matthew Stafford',pos:'QB',field:30.7,top50:4.0,bottom:40.4},
+            {name:'Amon-Ra St. Brown',pos:'WR',field:18.8,top50:4.0,bottom:23.6},
+            {name:'Jared Goff',pos:'QB',field:14.0,top50:4.0,bottom:17.0},
+            {name:'Blake Corum',pos:'RB',field:11.2,top50:2.0,bottom:14.0},
+          ];
+          const topBuilds=[
+            {build:'3QB-4RB-10WR-3TE',avg:156.14,count:11},
+            {build:'3QB-5RB-8WR-4TE',avg:150.39,count:32},
+            {build:'2QB-6RB-10WR-2TE',avg:150.67,count:10},
+            {build:'3QB-5RB-9WR-3TE',avg:146.94,count:99},
+            {build:'2QB-7RB-8WR-3TE',avg:146.78,count:41},
+            {build:'3QB-6RB-8WR-3TE',avg:144.95,count:412},
+          ];
+          // Position count distributions across the field
+          const posDistField=[
+            {pos:'QB',counts:[{ct:1,pct:0.1},{ct:2,pct:16.0},{ct:3,pct:78.0},{ct:4,pct:5.6},{ct:5,pct:0.4}]},
+            {pos:'RB',counts:[{ct:4,pct:2.1},{ct:5,pct:19.6},{ct:6,pct:48.5},{ct:7,pct:23.2},{ct:8,pct:6.6}]},
+            {pos:'WR',counts:[{ct:6,pct:1.8},{ct:7,pct:15.3},{ct:8,pct:39.8},{ct:9,pct:27.2},{ct:10,pct:13.9},{ct:11,pct:2.0}]},
+            {pos:'TE',counts:[{ct:2,pct:18.8},{ct:3,pct:62.1},{ct:4,pct:17.3},{ct:5,pct:1.8}]}
+          ];
+          // Avg score by draft slot (1-12)
+          const slotAvgs=[{slot:1,avg:146.2},{slot:2,avg:145.1},{slot:3,avg:144.8},{slot:4,avg:145.5},{slot:5,avg:143.9},{slot:6,avg:144.2},{slot:7,avg:144.0},{slot:8,avg:145.3},{slot:9,avg:143.7},{slot:10,avg:144.6},{slot:11,avg:145.8},{slot:12,avg:143.4}];
+          // QB stacking patterns in top 25 vs bottom 25
+          const qbStacks={top25:[{qb:'Caleb Williams',count:5,pct:20},{qb:'Drake Maye',count:8,pct:32},{qb:'Brock Purdy',count:4,pct:16},{qb:'Dak Prescott',count:3,pct:12},{qb:'Tyler Shough',count:1,pct:4},{qb:'Josh Allen',count:1,pct:4},{qb:'Other',count:3,pct:12}],
+            bottom25:[{qb:'Matthew Stafford',count:7,pct:28},{qb:'Trevor Lawrence',count:5,pct:20},{qb:'Jared Goff',count:4,pct:16},{qb:'Brock Purdy',count:3,pct:12},{qb:'Bo Nix',count:2,pct:8},{qb:'Other',count:4,pct:16}]};
+          // Roster construction comparison
+          const rosterComp={top25:[{build:'3QB-6RB-8WR-3TE',ct:7},{build:'3QB-7RB-7WR-3TE',ct:5},{build:'3QB-5RB-9WR-3TE',ct:4},{build:'2QB-7RB-8WR-3TE',ct:3},{build:'3QB-5RB-8WR-4TE',ct:2},{build:'Other',ct:4}],
+            bottom25:[{build:'3QB-6RB-8WR-3TE',ct:12},{build:'3QB-7RB-7WR-3TE',ct:4},{build:'3QB-6RB-7WR-4TE',ct:3},{build:'3QB-5RB-9WR-3TE',ct:2},{build:'2QB-6RB-9WR-3TE',ct:2},{build:'Other',ct:2}]};
+          // Classify build type from build string
+          const classifyFromBuild=b=>{if(!b)return[];const tags=[];const m=b.match(/(\d+)QB-(\d+)RB-(\d+)WR-(\d+)TE/);if(!m)return[];const[,qb,rb,wr,te]=m.map(Number);
+            if(rb<=4)tags.push('Zero RB');else if(rb<=5)tags.push('Hero RB');if(rb>=7)tags.push('Robust RB');
+            if(wr>=9)tags.push('WR Heavy');if(te>=4)tags.push('TE Premium');if(qb>=4)tags.push('4QB');else if(qb<=2)tags.push('Late QB');return tags;};
+          // Build distribution across all 25
+          const buildDist={};leaderboard.forEach(e=>{const tags=classifyFromBuild(e.build);tags.forEach(t=>{buildDist[t]=(buildDist[t]||0)+1;});});
+          const buildDistArr=Object.entries(buildDist).sort((a,b)=>b[1]-a[1]);
+          return(<div style={{display:'flex',flexDirection:'column',gap:12}}>
+            {/* Build Archetype Distribution */}
+            <div><p style={{fontSize:11,color:'#f59e0b',textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:6}}>Build Archetypes — Top 25 Winners</p>
+              <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:8}}>
+                {buildDistArr.map(([tag,ct])=><div key={tag} style={{background:S.s2,borderRadius:8,padding:'6px 12px',textAlign:'center'}}>
+                  <span style={{fontSize:11,fontWeight:700,color:'#f59e0b'}}>{tag}</span>
+                  <span style={{fontSize:11,color:S.mt,marginLeft:6}}>{ct}/{leaderboard.length} ({Math.round(ct/leaderboard.length*100)}%)</span></div>)}</div></div>
+            {/* Leaderboard */}
+            <div><p style={{fontSize:11,color:'#f59e0b',textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:6}}>Leaderboard — Top 25</p>
+              <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,overflow:'hidden'}}>
+                <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+                  <thead><tr style={{background:S.s2}}>
+                    {['#','Entry','Pts','QB','Build','Type',''].map(h=><th key={h} style={{padding:'6px 8px',textAlign:h==='Entry'?'left':'center',fontWeight:700,color:S.mt,fontSize:10}}>{h}</th>)}
+                  </tr></thead>
+                  <tbody>{leaderboard.map(e=>{const tags=classifyFromBuild(e.build);return<tr key={e.rank} onClick={()=>e.players&&setMillyEntry(e)} style={{borderBottom:'1px solid #334155',background:e.rank<=3?'rgba(245,158,11,0.06)':'transparent',cursor:e.players?'pointer':'default'}}>
+                    <td style={{padding:'4px 8px',textAlign:'center',fontWeight:900,color:e.rank<=3?'#f59e0b':S.mt}}>{e.rank}</td>
+                    <td style={{padding:'4px 8px',fontWeight:700,color:e.players?'#60a5fa':S.tx}}>{e.name}</td>
+                    <td style={{padding:'4px 8px',textAlign:'center',fontWeight:800,color:'#22c55e'}}>{e.pts.toFixed(1)}</td>
+                    <td style={{padding:'4px 8px',textAlign:'center',fontSize:11}}>{e.qb}</td>
+                    <td style={{padding:'4px 8px',textAlign:'center',fontFamily:'monospace',fontSize:10,color:S.mt}}>{e.build}</td>
+                    <td style={{padding:'4px 8px',textAlign:'center'}}><div style={{display:'flex',gap:2,flexWrap:'wrap',justifyContent:'center'}}>{tags.slice(0,2).map(t=><span key={t} style={{fontSize:8,background:'rgba(245,158,11,0.2)',color:'#f59e0b',padding:'1px 4px',borderRadius:3,fontWeight:700}}>{t}</span>)}</div></td>
+                    <td style={{padding:'4px 4px',textAlign:'center'}}>{e.players?<span style={{fontSize:9,color:'#60a5fa',fontWeight:700}}>▶</span>:''}</td>
+                  </tr>;})}</tbody></table></div></div>
+            {/* Player Lift vs Chalk Traps side by side */}
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14}}>
+              <div><p style={{fontSize:10,color:'#22c55e',textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:8}}>Winners Over-Indexed These Players</p>
+                <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10}}>
+                  {liftPlayers.map((p,i)=><div key={i} style={{padding:'8px 12px',borderBottom:'1px solid #334155',display:'flex',justifyContent:'space-between',alignItems:'center',fontSize:12}}>
+                    <div style={{display:'flex',alignItems:'center',gap:6}}><Pill pos={p.pos}/><span style={{fontWeight:600}}>{p.name}</span></div>
+                    <div style={{display:'flex',gap:10,alignItems:'center'}}>
+                      <span style={{fontSize:10,color:S.mt}}>Field {p.field}%</span>
+                      <span style={{fontSize:10,color:'#22c55e',fontWeight:700}}>Top50 {p.top50}%</span>
+                      <span style={{fontSize:11,fontWeight:800,color:'#d4a017'}}>{p.overIdx}×</span></div></div>)}</div></div>
+              <div><p style={{fontSize:10,color:'#ef4444',textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:8}}>Chalk Traps — Owned More by Losers</p>
+                <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10}}>
+                  {chalkTraps.map((p,i)=><div key={i} style={{padding:'8px 12px',borderBottom:'1px solid #334155',display:'flex',justifyContent:'space-between',alignItems:'center',fontSize:12}}>
+                    <div style={{display:'flex',alignItems:'center',gap:6}}><Pill pos={p.pos}/><span style={{fontWeight:600}}>{p.name}</span></div>
+                    <div style={{display:'flex',gap:10,alignItems:'center'}}>
+                      <span style={{fontSize:10,color:S.mt}}>Field {p.field}%</span>
+                      <span style={{fontSize:10,color:'#22c55e'}}>Top50 {p.top50}%</span>
+                      <span style={{fontSize:10,color:'#ef4444',fontWeight:700}}>Bottom {p.bottom}%</span></div></div>)}</div></div>
             </div>
-          </details>}
-          {fileErr&&<div style={{marginTop:8,fontSize:11,color:fileErr.startsWith("✓")?"#10b981":"#ef4444"}}>{fileErr}</div>}
-        </Card>
+            {/* Build Performance */}
+            <div><p style={{fontSize:10,color:'#f59e0b',textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:8}}>Best Performing Builds (by Avg Pts)</p>
+              <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+                {topBuilds.map(b=><div key={b.build} style={{background:S.s2,borderRadius:8,padding:'12px 16px',flex:'1 1 160px',textAlign:'center'}}>
+                  <p style={{fontSize:12,fontWeight:800,fontFamily:'monospace',margin:0}}>{b.build}</p>
+                  <p style={{fontFamily:FONT,fontSize:18,fontWeight:900,color:'#22c55e',margin:'4px 0 0'}}>{b.avg.toFixed(1)}</p>
+                  <p style={{fontSize:9,color:S.mt,margin:0}}>{b.count} entries</p></div>)}</div></div>
+            {/* Position Count Distributions */}
+            <div><p style={{fontSize:10,color:'#3b82f6',textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:8}}>Position Count Distribution (Field)</p>
+              <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8}}>
+                {posDistField.map(pd=><div key={pd.pos} style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,padding:12}}>
+                  <p style={{fontSize:12,fontWeight:800,color:POS[pd.pos]?.accent,margin:'0 0 8px'}}>{pd.pos}</p>
+                  {pd.counts.map(c=><div key={c.ct} style={{display:'flex',justifyContent:'space-between',fontSize:11,marginBottom:4}}>
+                    <span style={{color:S.mt}}>{c.ct} {pd.pos}s</span>
+                    <div style={{display:'flex',alignItems:'center',gap:4}}>
+                      <div style={{width:Math.max(4,c.pct*1.2),height:8,borderRadius:2,background:POS[pd.pos]?.accent,opacity:0.7}}/>
+                      <span style={{fontWeight:700,fontSize:10}}>{c.pct}%</span></div></div>)}</div>)}</div></div>
+            {/* Avg Score by Draft Slot */}
+            <div><p style={{fontSize:10,color:'#d4a017',textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:8}}>Avg Score by Draft Slot</p>
+              <div style={{display:'flex',gap:4,flexWrap:'wrap'}}>
+                {slotAvgs.map(s=>{const best=Math.max(...slotAvgs.map(x=>x.avg));const worst=Math.min(...slotAvgs.map(x=>x.avg));const pct=(s.avg-worst)/(best-worst);
+                  return<div key={s.slot} style={{background:S.s2,borderRadius:8,padding:'10px 8px',flex:'1 1 60px',textAlign:'center',borderTop:`3px solid ${pct>0.7?'#22c55e':pct>0.3?'#d4a017':'#ef4444'}`}}>
+                    <p style={{fontSize:9,color:S.mt,margin:0}}>Seat {s.slot}</p>
+                    <p style={{fontFamily:FONT,fontSize:15,fontWeight:900,color:pct>0.7?'#22c55e':S.tx,margin:'4px 0 0'}}>{s.avg.toFixed(1)}</p></div>;})}</div></div>
+            {/* QB Stacking Patterns */}
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14}}>
+              <div><p style={{fontSize:10,color:'#22c55e',textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:8}}>Starting QB — Top 25</p>
+                <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10}}>
+                  {qbStacks.top25.map((q,i)=><div key={i} style={{padding:'8px 12px',borderBottom:'1px solid #334155',display:'flex',justifyContent:'space-between',fontSize:12}}>
+                    <span style={{fontWeight:600}}>{q.qb}</span>
+                    <span style={{fontWeight:700,color:'#22c55e'}}>{q.count}× ({q.pct}%)</span></div>)}</div></div>
+              <div><p style={{fontSize:10,color:'#ef4444',textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:8}}>Starting QB — Bottom 25</p>
+                <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10}}>
+                  {qbStacks.bottom25.map((q,i)=><div key={i} style={{padding:'8px 12px',borderBottom:'1px solid #334155',display:'flex',justifyContent:'space-between',fontSize:12}}>
+                    <span style={{fontWeight:600}}>{q.qb}</span>
+                    <span style={{fontWeight:700,color:'#ef4444'}}>{q.count}× ({q.pct}%)</span></div>)}</div></div>
+            </div>
+            {/* Roster Construction Comparison */}
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14}}>
+              <div><p style={{fontSize:10,color:'#22c55e',textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:8}}>Builds — Top 25</p>
+                <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10}}>
+                  {rosterComp.top25.map((b,i)=><div key={i} style={{padding:'8px 12px',borderBottom:'1px solid #334155',display:'flex',justifyContent:'space-between',fontSize:12}}>
+                    <span style={{fontWeight:600,fontFamily:'monospace'}}>{b.build}</span>
+                    <span style={{fontWeight:700,color:'#22c55e'}}>{b.ct}×</span></div>)}</div></div>
+              <div><p style={{fontSize:10,color:'#ef4444',textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:8}}>Builds — Bottom 25</p>
+                <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10}}>
+                  {rosterComp.bottom25.map((b,i)=><div key={i} style={{padding:'8px 12px',borderBottom:'1px solid #334155',display:'flex',justifyContent:'space-between',fontSize:12}}>
+                    <span style={{fontWeight:600,fontFamily:'monospace'}}>{b.build}</span>
+                    <span style={{fontWeight:700,color:'#ef4444'}}>{b.ct}×</span></div>)}</div></div>
+            </div>
+            {/* Key Insights */}
+            <div style={{background:'rgba(245,158,11,0.06)',border:'1px solid rgba(245,158,11,0.2)',borderLeft:'3px solid #d4a017',borderRadius:'0 10px 10px 0',padding:16}}>
+              <p style={{fontSize:11,fontWeight:700,color:'#d4a017',margin:'0 0 8px'}}>Key Takeaways</p>
+              <div style={{fontSize:11,color:S.tx,lineHeight:1.8}}>
+                <p>• <b>Caleb Williams</b> was the QB in 3 of the top 3 finishers — field ownership was only 7.8%</p>
+                <p>• <b>Trey McBride</b> had the highest over-index (3.6×) — 42% of top 50 vs 11.7% of the field</p>
+                <p>• <b>Puka Nacua</b> was the biggest chalk trap — 63.6% field ownership but only 28% in top 50</p>
+                <p>• <b>Bijan Robinson</b> was on all 3 winning rosters — with Bijan: avg 172.8 pts, without: 141.6 pts</p>
+                <p>• <b>Chris Olave</b> was the WR separator — 78% of top 50 had him vs 42.4% of field</p>
+                <p>• WR-heavy builds (9-10 WR) outperformed — 3QB-4RB-10WR-3TE averaged 156.1 pts</p>
+                <p>• <b>Drake Maye</b> was the most popular QB in top 25 (32%) vs Stafford leading bottom 25 (28%)</p>
+                <p>• Draft slot had minimal impact — less than 3pts separating best (Seat 1: 146.2) from worst (Seat 12: 143.4)</p>
+              </div></div>
+          </div>);
+        })()}</div>}
 
-        <Card style={{marginBottom:14}}>
-          <SH title="Goalie Data" sub="Required for Goalie Saves props in Series Pricer"/>
-          <div style={{marginBottom:8,fontSize:12,color:"var(--color-text-secondary)"}}>{goalies?`${goalies.length} goalies loaded`:"No goalie data"}</div>
-          <button onClick={()=>goalieFileRef.current?.click()} style={{padding:"6px 16px",fontSize:12,borderRadius:"var(--border-radius-md)",background:"#7c3aed",color:"white",border:"none",cursor:"pointer",marginBottom:8}}>{goalies?"Re-load goalies.csv":"Load goalies.csv"}</button>
-          <div style={{fontSize:10,color:"var(--color-text-tertiary)",lineHeight:1.7}}>
-            Upload the MoneyPuck <code style={{background:"var(--color-background-secondary)",padding:"0 3px",borderRadius:2}}>goalies.csv</code> (situation=all).<br/>
-            Saves = ongoal − goals. Starter share = GP / team total GP.
-          </div>
-          {goalies&&<div style={{marginTop:10,overflowX:"auto"}}>
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:10}}>
-              <TH cols={["Goalie","Team","GP","Sv/G","Share"]}/>
-              <tbody>{goalies.filter(g=>g.starter_share>=0.15).slice(0,16).map((g,i)=>(
-                <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
-                  <td style={{padding:"2px 6px"}}>{g.name}</td>
-                  <td style={{padding:"2px 6px",textAlign:"right"}}><span style={{fontSize:8,padding:"1px 4px",borderRadius:2,background:"rgba(124,58,237,0.15)",color:"#a78bfa"}}>{g.team}</span></td>
-                  <td style={{padding:"2px 6px",textAlign:"right",fontFamily:"var(--font-mono)"}}>{g.gp}</td>
-                  <td style={{padding:"2px 6px",textAlign:"right",fontFamily:"var(--font-mono)"}}>{g.saves_pg.toFixed(1)}</td>
-                  <td style={{padding:"2px 6px",textAlign:"right",fontFamily:"var(--font-mono)",color:"var(--color-text-secondary)"}}>{(g.starter_share*100).toFixed(0)}%</td>
-                </tr>
-              ))}</tbody>
-            </table>
-            {goalies.filter(g=>g.starter_share>=0.15).length>16&&<div style={{fontSize:9,color:"var(--color-text-tertiary)",marginTop:4}}>Showing starters only (≥15% share)</div>}
-          </div>}
-        </Card>
-
-        <Card style={{border:"0.5px solid rgba(239,68,68,0.25)"}}>
-          <SH title="Reset Playoff Data" sub="Wipe all entered game results + player playoff stats. Keeps team abbreviations, win%, and expected total inputs."/>
-          <button onClick={()=>{
-            if (!confirm("Reset all playoff stats and game results?\n\n• All player pGames arrays → empty\n• All player pG/pA/pSOG/pHIT/pBLK/pTK/pPIM/pTSA/pGIVE → 0\n• All series game results (winners, scores) → cleared\n• Team abbreviations, win%, expTotal are PRESERVED\n\nThis cannot be undone.")) return;
-            // Wipe player playoff stats
-            if (players) {
-              const wiped = players.map(p => ({
-                ...p,
-                pGames: [],
-                pGP: 0, pG: 0, pA: 0, pSOG: 0, pHIT: 0, pBLK: 0, pTK: 0, pPIM: 0, pTSA: 0, pGIVE: 0,
-              }));
-              setPlayers(wiped);
-            }
-            // Clear all series game results (keep winPct/expTotal) — round-aware
-            setAllSeries(prev => {
-              const out = {};
-              for (const r of ROUND_IDS) {
-                out[r] = (prev[r]||[]).map(sr => ({
-                  ...sr,
-                  games: (sr.games||[]).map(g => ({
-                    ...g,
-                    result: null, homeScore: null, awayScore: null, wentOT: false,
-                  })),
-                }));
-              }
-              return out;
+      {/* LAST SEASON 2025 */}
+      {tab==='lastseason'&&<div>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12,flexWrap:'wrap',gap:8}}>
+          <h2 style={{fontFamily:FONT,fontSize:16,fontWeight:900,textTransform:'uppercase'}}>2025 Stats</h2>
+          <div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
+            <div style={{display:'flex',gap:2,background:S.s2,borderRadius:6,padding:2}}>
+              {[{id:'board',l:'Draft Board'},{id:'table',l:'Full Table'},{id:'stacks25',l:'Stacks'},{id:'playoffs',l:'Playoffs'},{id:'insights',l:'Insights'},{id:'movement',l:'ADP Movement'},{id:'tendencies',l:'My Tendencies'},{id:'returning',l:'2026 Targets'}].map(v=><button key={v.id} onClick={()=>setLsView(v.id)} style={{fontSize:10,fontWeight:700,padding:'5px 10px',borderRadius:4,border:'none',cursor:'pointer',background:lsView===v.id?'#22c55e':'transparent',color:lsView===v.id?'#fff':S.mt}}>{v.l}</button>)}
+            </div>
+            <div style={{display:'flex',gap:2,background:S.s2,borderRadius:6,padding:2}}>
+              {['ALL','QB','RB','WR','TE'].map(p=><button key={p} onClick={()=>setLsPosFilter(p)} style={{fontSize:10,fontWeight:700,padding:'4px 8px',borderRadius:4,border:'none',cursor:'pointer',background:lsPosFilter===p?(p==='ALL'?'#22c55e':POS[p]?.bg):'transparent',color:lsPosFilter===p?'#fff':S.mt}}>{p}</button>)}
+            </div></div></div>
+        {!lsData?<p style={{color:S.mt,fontSize:12}}>Loading 2025 season data...</p>:(()=>{
+          const lsPlayers=lsPosFilter==='ALL'?lsData.players:lsData.players.filter(p=>p.pos===lsPosFilter);
+          const lsReturning=lsPosFilter==='ALL'?(lsData.returning||[]):(lsData.returning||[]).filter(p=>p.pos===lsPosFilter);
+          if(lsView==='board'){const top240=[...lsPlayers].filter(p=>p.adp&&p.adp<240).sort((a,b)=>a.adp-b.adp).slice(0,240);const board=Array.from({length:20},(_,r)=>Array.from({length:12},(__,c)=>{const idx=r%2===0?r*12+c:r*12+(11-c);return top240[idx]||null;}));const missingCount=240-top240.length;
+            return(<div style={{overflowX:'auto'}}><p style={{fontSize:11,color:S.mt,marginBottom:6}}>Sorted by 2025 closing ADP. <span style={{color:'#22c55e'}}>Green = beat ADP</span> <span style={{color:'#ef4444'}}>Red = missed</span> <span style={{color:S.mt}}>Gray = DNP/0 pts</span>{missingCount>0&&<span style={{color:'#f59e0b',marginLeft:8}}>⚠ {missingCount} drafted slots have no player record (likely season-ending injuries dropped from stats source — e.g. Joe Mixon)</span>}</p>
+              <div style={{display:'grid',gridTemplateColumns:'36px repeat(12,1fr)',gap:2,minWidth:12*90}}>
+                <div/>{Array.from({length:12},(_,i)=><div key={i} style={{textAlign:'center',fontSize:11,fontWeight:700,color:S.mt,padding:3}}>Pick {i+1}</div>)}
+                {board.map((row,r)=><React.Fragment key={r}><div style={{display:'flex',alignItems:'center',justifyContent:'center',fontSize:11,fontWeight:700,color:S.mt}}>R{r+1}</div>
+                  {row.map((p,c)=>{if(!p)return<div key={c} style={{background:S.s2,borderRadius:4,padding:3,minHeight:44}}/>;const hit=p.fpts>0&&p.beat>=0;const noData=!p.fpts||p.fpts<=0;
+                    return<div key={c} onClick={()=>setLsPlayer(p)} style={{cursor:'pointer',background:noData?'rgba(100,116,139,0.12)':hit?'rgba(34,197,94,0.12)':'rgba(239,68,68,0.12)',border:noData?'1px solid rgba(100,116,139,0.25)':hit?'1px solid rgba(34,197,94,0.4)':'1px solid rgba(239,68,68,0.4)',borderRadius:4,padding:'3px 4px',minHeight:44}}>
+                      <p style={{fontSize:10,fontWeight:700,margin:0,lineHeight:1.2,color:noData?S.mt:S.tx}}>{p.name}</p>
+                      <div style={{display:'flex',gap:3,alignItems:'center',marginTop:1}}><span style={{fontSize:8,color:POS[p.pos]?.accent,fontWeight:700}}>{p.pos}</span><span style={{fontSize:8,color:S.mt}}>{p.adp?.toFixed(0)}</span></div>
+                      {noData?<span style={{fontSize:9,color:'#ef4444',fontWeight:600}}>{p.gp===0||!p.gp?'DNP':'0 pts'}</span>
+                      :<div style={{display:'flex',justifyContent:'space-between',marginTop:1}}><span style={{fontSize:9,color:S.mt}}>{p.fpts.toFixed(0)}pts</span><span style={{fontSize:9,fontWeight:700,color:hit?'#22c55e':'#ef4444'}}>{p.actualFinish}</span></div>}</div>;})}
+                </React.Fragment>)}</div></div>);}
+          if(lsView==='table'){const onLsSort=f=>{if(lsSort===f)setLsSortDir(d=>d==='desc'?'asc':'desc');else{setLsSort(f);setLsSortDir(f==='name'?'asc':'desc');}};
+            // Match 2026 ADP from current adpData + add consistency %
+            const withCurAdp=lsPlayers.map(p=>{const match=adpData.players.find(a=>a.name.toLowerCase()===p.name.toLowerCase()&&a.pos===p.pos);
+              const wks=p.weekly?p.weekly.filter(v=>v!=null&&v>0):[];const consistency=wks.length?Math.round(wks.filter(v=>v>=10).length/wks.length*100):0;
+              return{...p,curAdp2026:match?.latest||null,consistency};});
+            const sorted=[...withCurAdp].sort((a,b)=>{const m=lsSortDir==='desc'?-1:1;if(lsSort==='name')return a.name.localeCompare(b.name)*m;if(lsSort==='curAdp2026'){const av=a.curAdp2026??999,bv=b.curAdp2026??999;return(av-bv)*m;}const av=a[lsSort]??999,bv=b[lsSort]??999;return(av-bv)*m;});
+            const filtered=sorted.filter(p=>p.adp&&p.adp<200&&(lsHideZero?p.fpts>0:true));
+            return(<div><div style={{display:'flex',justifyContent:'flex-end',marginBottom:6}}><label style={{fontSize:11,color:S.mt,display:'flex',alignItems:'center',gap:4,cursor:'pointer'}}><input type="checkbox" checked={lsHideZero} onChange={()=>setLsHideZero(!lsHideZero)} style={{accentColor:'#22c55e'}}/> Hide 0-point players</label></div>
+              <div style={{background:S.s1,border:'1px solid '+S.bd,borderRadius:10,overflow:'hidden'}}><div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+                <thead><tr style={{background:S.s2}}><SortTH field="name" label="Player" sortBy={lsSort} sortDir={lsSortDir} onSort={onLsSort} align="left"/><th style={{padding:'6px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10}}>Pos</th><SortTH field="adp" label="'25 ADP" sortBy={lsSort} sortDir={lsSortDir} onSort={onLsSort}/><th style={{padding:'6px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10}}>Finish</th><SortTH field="fpts" label="Pts" sortBy={lsSort} sortDir={lsSortDir} onSort={onLsSort}/><SortTH field="ppg" label="PPG" sortBy={lsSort} sortDir={lsSortDir} onSort={onLsSort}/><SortTH field="gp" label="GP" sortBy={lsSort} sortDir={lsSortDir} onSort={onLsSort}/><SortTH field="beat" label="+/-" sortBy={lsSort} sortDir={lsSortDir} onSort={onLsSort}/><SortTH field="consistency" label="Con%" sortBy={lsSort} sortDir={lsSortDir} onSort={onLsSort}/><SortTH field="curAdp2026" label="'26 ADP" sortBy={lsSort} sortDir={lsSortDir} onSort={onLsSort}/></tr></thead>
+                <tbody>{filtered.map((p,i)=>{const hit=p.fpts>0&&p.beat>=0;return<tr key={i} onClick={()=>setLsPlayer(p)} style={{borderBottom:'1px solid #3d4f6e',cursor:'pointer'}}><td style={{padding:'5px 8px',fontWeight:600}}>{p.name}</td><td style={{padding:'5px',textAlign:'center'}}><Pill pos={p.pos}/></td><td style={{padding:'5px',textAlign:'center',fontWeight:700}}>{(p.adp||0).toFixed(1)}</td><td style={{padding:'5px',textAlign:'center',fontWeight:700,fontSize:11,color:p.fpts===0?S.mt:hit?'#22c55e':'#ef4444'}}>{p.actualFinish||'\u2014'}</td><td style={{padding:'5px',textAlign:'center',fontWeight:700,color:p.fpts>=200?'#22c55e':p.fpts>0?S.tx:S.mt}}>{p.fpts>0?p.fpts.toFixed(1):'\u2014'}</td><td style={{padding:'5px',textAlign:'center',color:p.ppg>=15?'#22c55e':p.ppg>0?S.tx:S.mt}}>{p.ppg>0?p.ppg.toFixed(1):'\u2014'}</td><td style={{padding:'5px',textAlign:'center',color:p.gp>=14?S.tx:p.gp>0?'#f59e0b':S.mt}}>{p.gp||'\u2014'}</td><td style={{padding:'5px',textAlign:'center',fontWeight:700,fontSize:11,color:p.beat>0?'#22c55e':p.beat<0?'#ef4444':S.mt}}>{p.fpts>0&&p.beat!=null?(p.beat>0?'+':'')+p.beat:'\u2014'}</td><td style={{padding:'5px',textAlign:'center',fontWeight:600,color:p.consistency>=70?'#22c55e':p.consistency>=50?S.tx:p.consistency>0?'#f59e0b':S.mt}}>{p.consistency>0?p.consistency+'%':'\u2014'}</td><td style={{padding:'5px',textAlign:'center',fontWeight:700,color:p.curAdp2026?'#60a5fa':S.mt}}>{p.curAdp2026?p.curAdp2026.toFixed(1):'\u2014'}</td></tr>;})}</tbody></table></div></div></div>);}
+          if(lsView==='stacks25'){
+            // Build QB-WR/TE correlation stacks from weekly data
+            const qbs=lsData.players.filter(p=>p.pos==='QB'&&p.gp>=8&&p.weekly&&p.weekly.length>=17);
+            const pass=lsData.players.filter(p=>(p.pos==='WR'||p.pos==='TE')&&p.gp>=8&&p.weekly&&p.weekly.length>=17);
+            const stacks=[];
+            qbs.forEach(qb=>{
+              const teammates=pass.filter(r=>r.team===qb.team);
+              teammates.forEach(wr=>{
+                // Calculate correlation of weekly scores
+                const pairs=[];
+                for(let w=0;w<18;w++){const qv=qb.weekly[w],rv=wr.weekly[w];if(qv!=null&&qv>0&&rv!=null&&rv>0)pairs.push({q:qv,r:rv});}
+                if(pairs.length<6)return;
+                const qm=pairs.reduce((s,p)=>s+p.q,0)/pairs.length;const rm=pairs.reduce((s,p)=>s+p.r,0)/pairs.length;
+                const num=pairs.reduce((s,p)=>s+(p.q-qm)*(p.r-rm),0);
+                const d1=Math.sqrt(pairs.reduce((s,p)=>s+Math.pow(p.q-qm,2),0));
+                const d2=Math.sqrt(pairs.reduce((s,p)=>s+Math.pow(p.r-rm,2),0));
+                const corr=d1>0&&d2>0?num/(d1*d2):0;
+                // Co-boom weeks (both 20+)
+                const coBooms=pairs.filter(p=>p.q>=20&&p.r>=15).length;
+                const combined=pairs.reduce((s,p)=>s+p.q+p.r,0);
+                stacks.push({qb:qb.name,wr:wr.name,wrPos:wr.pos,team:qb.team,corr:Math.round(corr*100)/100,coBooms,weeks:pairs.length,
+                  qbPpg:qb.ppg,wrPpg:wr.ppg,combinedPpg:pairs.length?Math.round(combined/pairs.length*10)/10:0});
+              });
             });
-          }} style={{padding:"6px 14px",fontSize:12,borderRadius:"var(--border-radius-md)",background:"#ef4444",color:"white",border:"none",cursor:"pointer",fontWeight:500}}>
-            Wipe All Playoff Stats
-          </button>
-        </Card>
+            stacks.sort((a,b)=>b.corr-a.corr);
+            // Positional scarcity — PPG dropoff by position (item #5)
+            const scarcity=['QB','RB','WR','TE'].map(pos=>{
+              const ranked=lsData.players.filter(p=>p.pos===pos&&p.ppg>0&&p.gp>=8).sort((a,b)=>b.ppg-a.ppg);
+              const tiers=[1,6,12,24].map(n=>{const p=ranked[n-1];return{rank:n,name:p?.name||'—',ppg:p?.ppg||0};});
+              const drop1to12=tiers[0].ppg-tiers[2].ppg;
+              return{pos,tiers,drop1to12,total:ranked.length};
+            });
+            return(<div style={{display:'flex',flexDirection:'column',gap:12}}>
+              {/* Positional Scarcity */}
+              <div><p style={{fontSize:11,color:'#f59e0b',textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:6}}>Positional Scarcity — 2025 PPG Dropoff</p>
+                <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8}}>
+                  {scarcity.map(s=><div key={s.pos} style={{background:S.s1,border:'1px solid '+S.bd,borderRadius:10,overflow:'hidden'}}>
+                    <div style={{background:POS[s.pos].bg,padding:'5px 10px',fontSize:11,fontWeight:700,color:'#fff'}}>{s.pos} — {s.drop1to12.toFixed(1)} ppg drop (1→12)</div>
+                    {s.tiers.map(t=><div key={t.rank} style={{padding:'4px 10px',borderBottom:'1px solid #3d4f6e',display:'flex',justifyContent:'space-between',fontSize:11}}>
+                      <span style={{color:S.mt}}>#{t.rank} <span style={{color:S.tx,fontWeight:600}}>{t.name}</span></span>
+                      <span style={{fontWeight:700,color:t.ppg>=18?'#22c55e':t.ppg>=12?S.tx:'#f59e0b'}}>{t.ppg.toFixed(1)}</span></div>)}</div>)}</div></div>
+              {/* Correlation Stacks */}
+              <div><p style={{fontSize:11,color:'#a78bfa',textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:6}}>QB-Pass Catcher Correlation Stacks (2025 weekly)</p>
+                <p style={{fontSize:10,color:S.mt,marginBottom:6}}>Higher correlation = their scores move together. Co-booms = weeks where QB scored 20+ and pass catcher scored 15+.</p>
+                <div style={{background:S.s1,border:'1px solid '+S.bd,borderRadius:10,overflow:'hidden'}}>
+                  <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+                    <thead><tr style={{background:S.s2}}>
+                      {['Team','QB','Target','Pos','Corr','Co-Booms','Wks','Combined PPG'].map(h=><th key={h} style={{padding:'5px 8px',textAlign:h==='QB'||h==='Target'?'left':'center',fontWeight:700,color:S.mt,fontSize:10}}>{h}</th>)}
+                    </tr></thead>
+                    <tbody>{stacks.slice(0,30).map((s,i)=><tr key={i} style={{borderBottom:'1px solid #3d4f6e'}}>
+                      <td style={{padding:'4px 8px',fontWeight:700,color:S.mt,fontSize:11}}>{s.team}</td>
+                      <td style={{padding:'4px 8px',fontWeight:600}}>{s.qb}</td>
+                      <td style={{padding:'4px 8px',fontWeight:600}}>{s.wr}</td>
+                      <td style={{padding:'4px',textAlign:'center'}}><Pill pos={s.wrPos}/></td>
+                      <td style={{padding:'4px',textAlign:'center',fontWeight:800,color:s.corr>=0.5?'#22c55e':s.corr>=0.3?'#f59e0b':s.corr>=0?S.tx:'#ef4444'}}>{s.corr.toFixed(2)}</td>
+                      <td style={{padding:'4px',textAlign:'center',fontWeight:700,color:s.coBooms>=4?'#22c55e':s.coBooms>=2?'#f59e0b':S.mt}}>{s.coBooms}</td>
+                      <td style={{padding:'4px',textAlign:'center',color:S.mt}}>{s.weeks}</td>
+                      <td style={{padding:'4px',textAlign:'center',fontWeight:700,color:s.combinedPpg>=35?'#22c55e':S.tx}}>{s.combinedPpg.toFixed(1)}</td>
+                    </tr>)}</tbody></table></div></div>
+            </div>);}
+          if(lsView==='insights'){const allP=lsData.players.filter(p=>p.adp&&p.adp<200&&p.posRank);
+            const rrData=[{l:'Rd 1-3',s:1,e:3},{l:'Rd 4-6',s:4,e:6},{l:'Rd 7-10',s:7,e:10},{l:'Rd 11-15',s:11,e:15},{l:'Rd 16-20',s:16,e:20}].map(rr=>{const g=allP.filter(p=>p.round&&p.round>=rr.s&&p.round<=rr.e);const h=g.filter(p=>p.beat>=0&&p.fpts>0).length;return{...rr,hits:h,total:g.length,pct:g.length?Math.round(h/g.length*100):0};});
+            const posHit=['QB','RB','WR','TE'].map(pos=>{const g=allP.filter(p=>p.pos===pos);const h=g.filter(p=>p.beat>=0&&p.fpts>0).length;return{pos,hits:h,total:g.length,pct:g.length?Math.round(h/g.length*100):0};});
+            const busts=lsData.players.filter(p=>p.round&&p.round<=3&&(p.fpts<180||p.gp<10)).sort((a,b)=>(a.adp||999)-(b.adp||999));
+            const steals=lsData.players.filter(p=>p.adp&&p.adp>60&&p.fpts>150).sort((a,b)=>b.fpts-a.fpts).slice(0,15);
+            const beats=lsData.players.filter(p=>p.beat&&p.beat>5&&p.fpts>0).sort((a,b)=>b.beat-a.beat).slice(0,12);
+            const misses=lsData.players.filter(p=>p.beat&&p.beat<-5&&p.fpts>0).sort((a,b)=>a.beat-b.beat).slice(0,12);
+            return(<div style={{display:'flex',flexDirection:'column',gap:16}}>
+              <div><p style={{fontSize:10,color:S.mt,textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:8}}>ADP Hit Rate by Round</p><div style={{display:'flex',gap:8,flexWrap:'wrap'}}>{rrData.map(r=><div key={r.l} style={{background:S.s2,borderRadius:10,padding:'12px 16px',flex:'1 1 100px',textAlign:'center',minWidth:90}}><p style={{fontSize:9,color:S.mt,margin:0,textTransform:'uppercase',fontWeight:600}}>{r.l}</p><p style={{fontFamily:FONT,fontSize:22,fontWeight:900,color:r.pct>=40?'#22c55e':r.pct>=30?'#d4a017':'#ef4444',margin:'4px 0 0'}}>{r.pct}%</p><p style={{fontSize:9,color:S.mt,margin:0}}>{r.hits}/{r.total} hit</p></div>)}</div></div>
+              <div><p style={{fontSize:10,color:S.mt,textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:8}}>Hit Rate by Position</p><div style={{display:'flex',gap:8,flexWrap:'wrap'}}>{posHit.map(p=><div key={p.pos} style={{background:S.s2,borderRadius:10,padding:'12px 16px',flex:'1 1 100px',textAlign:'center'}}><p style={{fontSize:9,color:POS[p.pos]?.accent,margin:0,fontWeight:700}}>{p.pos}</p><p style={{fontFamily:FONT,fontSize:22,fontWeight:900,color:p.pct>=40?'#22c55e':p.pct>=30?'#d4a017':'#ef4444',margin:'4px 0 0'}}>{p.pct}%</p><p style={{fontSize:9,color:S.mt,margin:0}}>{p.hits}/{p.total} hit</p></div>)}</div></div>
+              {/* Boom/Doom Rate by Position */}
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14}}>
+                <div><p style={{fontSize:10,color:'#22c55e',textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:8}}>Boom Rate (20+ pts/wk)</p>
+                  <div style={{background:S.s1,border:'1px solid '+S.bd,borderRadius:10}}>
+                    {['QB','RB','WR','TE'].map(pos=>{const gp=lsData.players.filter(p=>p.pos===pos&&p.weekly&&p.weekly.length>0);
+                      const totalWeeks=gp.reduce((s,p)=>s+p.weekly.filter(v=>v!=null).length,0);
+                      const booms=gp.reduce((s,p)=>s+p.weekly.filter(v=>v!=null&&v>=20).length,0);
+                      const rate=totalWeeks>0?Math.round(booms/totalWeeks*100):0;
+                      return<div key={pos} style={{padding:'8px 12px',borderBottom:'1px solid '+S.bd,display:'flex',justifyContent:'space-between',alignItems:'center',fontSize:12}}>
+                        <div style={{display:'flex',alignItems:'center',gap:6}}><Pill pos={pos}/><span style={{fontWeight:600}}>{pos}</span></div>
+                        <div style={{display:'flex',gap:10,alignItems:'center'}}><span style={{fontSize:10,color:S.mt}}>{booms}/{totalWeeks} wks</span>
+                          <span style={{fontWeight:800,color:rate>=20?'#22c55e':rate>=10?'#d4a017':'#ef4444'}}>{rate}%</span></div></div>;})}</div></div>
+                <div><p style={{fontSize:10,color:'#ef4444',textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:6}}>Doom Rate ({'<'}5 pts/wk)</p>
+                  <div style={{background:S.s1,border:'1px solid '+S.bd,borderRadius:10}}>
+                    {['QB','RB','WR','TE'].map(pos=>{const gp=lsData.players.filter(p=>p.pos===pos&&p.weekly&&p.weekly.length>0);
+                      const totalWeeks=gp.reduce((s,p)=>s+p.weekly.filter(v=>v!=null&&v>0).length,0);
+                      const doomCt=gp.reduce((s,p)=>s+p.weekly.filter(v=>v!=null&&v>0&&v<5).length,0);
+                      const rate=totalWeeks>0?Math.round(doomCt/totalWeeks*100):0;
+                      return<div key={pos} style={{padding:'6px 10px',borderBottom:'1px solid '+S.bd,display:'flex',justifyContent:'space-between',alignItems:'center',fontSize:12}}>
+                        <div style={{display:'flex',alignItems:'center',gap:6}}><Pill pos={pos}/><span style={{fontWeight:600}}>{pos}</span></div>
+                        <div style={{display:'flex',gap:10,alignItems:'center'}}><span style={{fontSize:10,color:S.mt}}>{doomCt}/{totalWeeks} wks</span>
+                          <span style={{fontWeight:800,color:rate>=30?'#ef4444':rate>=15?'#d4a017':'#22c55e'}}>{rate}%</span></div></div>;})}</div></div>
+              </div>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+                <div><p style={{fontSize:10,color:'#ef4444',textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:6}}>Rd 1-3 Dooms</p><div style={{background:S.s1,border:'1px solid '+S.bd,borderRadius:10}}>{busts.map((p,i)=><div key={i} onClick={()=>setLsPlayer(p)} style={{padding:'5px 10px',borderBottom:'1px solid #334155',display:'flex',justifyContent:'space-between',alignItems:'center',fontSize:12,cursor:'pointer'}}><div style={{display:'flex',alignItems:'center',gap:5}}><Pill pos={p.pos}/><div><p style={{fontWeight:600,margin:0}}>{p.name}</p><p style={{fontSize:10,color:S.mt,margin:0}}>ADP {(p.adp||0).toFixed(0)} • {p.adpPosRank||p.posRank} → {p.actualFinish||'—'}</p></div></div><div style={{textAlign:'right'}}><p style={{fontWeight:700,color:'#ef4444',margin:0,fontSize:11}}>{p.fpts>0?p.fpts.toFixed(0)+'pts':'DNP'}</p><p style={{fontSize:9,color:S.mt,margin:0}}>{p.gp} GP</p></div></div>)}</div></div>
+                <div><p style={{fontSize:10,color:'#22c55e',textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:6}}>Late Round Steals (ADP 60+)</p><div style={{background:S.s1,border:'1px solid '+S.bd,borderRadius:10}}>{steals.map((p,i)=><div key={i} onClick={()=>setLsPlayer(p)} style={{padding:'5px 10px',borderBottom:'1px solid #334155',display:'flex',justifyContent:'space-between',alignItems:'center',fontSize:12,cursor:'pointer'}}><div style={{display:'flex',alignItems:'center',gap:5}}><Pill pos={p.pos}/><div><p style={{fontWeight:600,margin:0}}>{p.name}</p><p style={{fontSize:10,color:S.mt,margin:0}}>ADP {(p.adp||0).toFixed(0)} • {p.adpPosRank||p.posRank} → {p.actualFinish}</p></div></div><div style={{textAlign:'right'}}><p style={{fontWeight:700,color:'#22c55e',margin:0,fontSize:11}}>{p.fpts.toFixed(0)}pts</p></div></div>)}</div></div></div>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+                <div><p style={{fontSize:10,color:'#22c55e',textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:6}}>Biggest ADP Beats</p><div style={{background:S.s1,border:'1px solid '+S.bd,borderRadius:10}}>{beats.map((p,i)=><div key={i} onClick={()=>setLsPlayer(p)} style={{padding:'5px 10px',borderBottom:'1px solid #334155',display:'flex',justifyContent:'space-between',alignItems:'center',fontSize:12,cursor:'pointer'}}><div style={{display:'flex',alignItems:'center',gap:5}}><Pill pos={p.pos}/><div><p style={{fontWeight:600,margin:0,fontSize:12}}>{p.name}</p><p style={{fontSize:10,color:S.mt,margin:0}}>{p.adpPosRank||p.posRank} → {p.actualFinish}</p></div></div><span style={{fontFamily:FONT,fontWeight:900,color:'#22c55e',fontSize:15}}>+{p.beat}</span></div>)}</div></div>
+                <div><p style={{fontSize:10,color:'#ef4444',textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:6}}>Biggest ADP Misses</p><div style={{background:S.s1,border:'1px solid '+S.bd,borderRadius:10}}>{misses.map((p,i)=><div key={i} onClick={()=>setLsPlayer(p)} style={{padding:'5px 10px',borderBottom:'1px solid #334155',display:'flex',justifyContent:'space-between',alignItems:'center',fontSize:12,cursor:'pointer'}}><div style={{display:'flex',alignItems:'center',gap:5}}><Pill pos={p.pos}/><div><p style={{fontWeight:600,margin:0,fontSize:12}}>{p.name}</p><p style={{fontSize:10,color:S.mt,margin:0}}>{p.adpPosRank||p.posRank} → {p.actualFinish}</p></div></div><span style={{fontFamily:FONT,fontWeight:900,color:'#ef4444',fontSize:15}}>{p.beat}</span></div>)}</div></div></div>
+            </div>);}
+          if(lsView==='movement'){
+            const dates=lsData.adpHistoryDates||[];
+            const withHist=lsPlayers.filter(p=>p.adpHistory&&p.adpHistory.filter(v=>v!=null).length>=2&&p.adp);
+            const movers=withHist.map(p=>{const valid=p.adpHistory.filter(v=>v!=null);const open=valid[0];const close=valid[valid.length-1];return{...p,openAdp:open,closeAdp:close,move:open-close,beat:p.beat};}).filter(m=>Math.abs(m.move)>=5);
+            const risers=[...movers].sort((a,b)=>b.move-a.move).slice(0,15);
+            const fallers=[...movers].sort((a,b)=>a.move-b.move).slice(0,15);
+            const RowM=(p,sign)=>(<div onClick={()=>setLsPlayer(p)} style={{padding:'6px 10px',borderBottom:'1px solid #334155',display:'flex',justifyContent:'space-between',alignItems:'center',fontSize:12,cursor:'pointer'}}>
+              <div style={{display:'flex',alignItems:'center',gap:6,flex:1}}><Pill pos={p.pos}/><div style={{flex:1}}><p style={{fontWeight:600,margin:0,fontSize:12}}>{p.name}</p><p style={{fontSize:10,color:S.mt,margin:0}}>ADP {p.openAdp.toFixed(0)} → {p.closeAdp.toFixed(0)}{p.fpts>0&&<span style={{marginLeft:6,color:p.beat>0?'#22c55e':p.beat<0?'#ef4444':S.mt}}>Finish {p.actualFinish||'—'}</span>}{p.fpts===0&&<span style={{marginLeft:6,color:'#ef4444'}}>DNP</span>}</p></div></div>
+              <span style={{fontFamily:FONT,fontWeight:900,color:sign>0?'#22c55e':'#ef4444',fontSize:15}}>{sign>0?'↑':'↓'}{Math.abs(p.move).toFixed(0)}</span></div>);
+            return(<div>
+              <p style={{fontSize:11,color:S.mt,marginBottom:10}}>How player ADP moved from {dates[0]||'opening'} to {dates[dates.length-1]||'closing'} 2025. Did the rises and falls pay off?</p>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+                <div><p style={{fontSize:10,color:'#22c55e',textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:6}}>Biggest Risers (ADP went UP)</p><div style={{background:S.s1,border:'1px solid '+S.bd,borderRadius:10}}>{risers.map((p,i)=><div key={i}>{RowM(p,1)}</div>)}</div></div>
+                <div><p style={{fontSize:10,color:'#ef4444',textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:6}}>Biggest Fallers (ADP went DOWN)</p><div style={{background:S.s1,border:'1px solid '+S.bd,borderRadius:10}}>{fallers.map((p,i)=><div key={i}>{RowM(p,-1)}</div>)}</div></div>
+              </div>
+              <div style={{marginTop:14,padding:12,background:S.s1,border:'1px solid '+S.bd,borderRadius:10}}>
+                <p style={{fontSize:10,color:S.mt,textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:8}}>Risers Who Paid Off (top 15 risers)</p>
+                {(()=>{const hit=risers.filter(p=>p.fpts>0&&p.beat>=0).length;const miss=risers.filter(p=>p.fpts>0&&p.beat<0).length;const dnp=risers.filter(p=>p.fpts===0).length;const pct=risers.length?Math.round(hit/risers.length*100):0;
+                  return<p style={{fontSize:13,color:S.tx,margin:0}}>{hit} hit ADP, {miss} missed, {dnp} DNP — <span style={{color:pct>=50?'#22c55e':'#ef4444',fontWeight:700}}>{pct}% paid off</span></p>;})()}
+                <p style={{fontSize:10,color:S.mt,textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginTop:10,marginBottom:8}}>Fallers Who Were Right Calls (top 15 fallers)</p>
+                {(()=>{const hit=fallers.filter(p=>p.fpts>0&&p.beat>=0).length;const miss=fallers.filter(p=>p.fpts>0&&p.beat<0).length;const dnp=fallers.filter(p=>p.fpts===0).length;const pct=fallers.length?Math.round((miss+dnp)/fallers.length*100):0;
+                  return<p style={{fontSize:13,color:S.tx,margin:0}}>{miss} missed ADP, {dnp} DNP, {hit} actually hit — <span style={{color:pct>=50?'#22c55e':'#ef4444',fontWeight:700}}>{pct}% market was right to fade</span></p>;})()}
+              </div>
+            </div>);}
+          if(lsView==='tendencies'){
+            // Aggregate "my drafts" — count exposures from current drafts that overlap with 2025 players
+            const my={};drafts.forEach(d=>d.picks.forEach(p=>{const key=(p.fullName||p.name)+'|'+p.pos;if(!my[key])my[key]={name:p.fullName||p.name,pos:p.pos,count:0};my[key].count++;}));
+            // Match with lsData
+            const tend=lsPlayers.filter(p=>p.draftedCount&&p.draftedCount>0).map(p=>{const myKey=p.name+'|'+p.pos;const myCount=my[myKey]?.count||0;return{...p,sheetCount:p.draftedCount,sheetPct:p.draftedPct,myCount};}).sort((a,b)=>b.sheetCount-a.sheetCount);
+            const top=tend.slice(0,30);
+            const totalDrafts=top.length?Math.max(...top.map(p=>p.sheetCount/(p.sheetPct||1)*100)):0;
+            return(<div>
+              <p style={{fontSize:11,color:S.mt,marginBottom:10}}>Players you drafted most often in 2025 (from your spreadsheet) — and how they actually finished. Self-coaching for 2026.</p>
+              <div style={{background:S.s1,border:'1px solid '+S.bd,borderRadius:10,overflow:'hidden'}}>
+                <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+                  <thead><tr style={{background:S.s2}}>
+                    <th style={{padding:'6px 10px',textAlign:'left',fontWeight:700,color:S.mt,fontSize:10}}>Player</th>
+                    <th style={{padding:'6px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10}}>Pos</th>
+                    <th style={{padding:'6px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10}}>'25 ADP</th>
+                    <th style={{padding:'6px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10}}>You Drafted</th>
+                    <th style={{padding:'6px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10}}>%</th>
+                    <th style={{padding:'6px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10}}>Finish</th>
+                    <th style={{padding:'6px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10}}>Pts</th>
+                    <th style={{padding:'6px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10}}>+/-</th>
+                    <th style={{padding:'6px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10}}>Verdict</th>
+                  </tr></thead>
+                  <tbody>{top.map((p,i)=>{const verdict=p.fpts===0?{l:'BUST',c:'#ef4444'}:p.beat>=10?{l:'NAILED',c:'#22c55e'}:p.beat>=0?{l:'OK',c:S.tx}:p.beat>=-20?{l:'MEH',c:'#f59e0b'}:{l:'MISS',c:'#ef4444'};
+                    return<tr key={i} onClick={()=>setLsPlayer(p)} style={{borderBottom:'1px solid #334155',cursor:'pointer'}}>
+                      <td style={{padding:'5px 10px',fontWeight:600}}>{p.name}</td>
+                      <td style={{padding:'5px',textAlign:'center'}}><Pill pos={p.pos}/></td>
+                      <td style={{padding:'5px',textAlign:'center',fontWeight:700}}>{p.adp?.toFixed(1)}</td>
+                      <td style={{padding:'5px',textAlign:'center',fontWeight:700,color:'#60a5fa'}}>{p.sheetCount}</td>
+                      <td style={{padding:'5px',textAlign:'center',color:S.mt}}>{p.sheetPct?p.sheetPct+'%':'—'}</td>
+                      <td style={{padding:'5px',textAlign:'center',fontWeight:700,color:p.fpts===0?'#ef4444':S.tx}}>{p.actualFinish||'—'}</td>
+                      <td style={{padding:'5px',textAlign:'center'}}>{p.fpts>0?p.fpts.toFixed(0):'0'}</td>
+                      <td style={{padding:'5px',textAlign:'center',fontWeight:700,color:p.beat>0?'#22c55e':p.beat<0?'#ef4444':S.mt}}>{p.beat!=null?(p.beat>0?'+':'')+p.beat:'—'}</td>
+                      <td style={{padding:'5px',textAlign:'center',fontWeight:700,fontSize:10,color:verdict.c}}>{verdict.l}</td>
+                    </tr>;})}</tbody>
+                </table>
+              </div>
+              <div style={{marginTop:12,display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8}}>
+                {(()=>{const stats={NAILED:0,OK:0,MEH:0,MISS:0,BUST:0};top.forEach(p=>{const v=p.fpts===0?'BUST':p.beat>=10?'NAILED':p.beat>=0?'OK':p.beat>=-20?'MEH':'MISS';stats[v]++;});
+                  return Object.entries(stats).map(([k,v])=>{const c=k==='NAILED'?'#22c55e':k==='OK'?'#60a5fa':k==='MEH'?'#f59e0b':'#ef4444';return<div key={k} style={{background:S.s1,border:'1px solid '+S.bd,borderRadius:10,padding:10,textAlign:'center'}}><p style={{fontSize:9,color:S.mt,textTransform:'uppercase',letterSpacing:1,fontWeight:700,margin:0}}>{k}</p><p style={{fontSize:22,fontFamily:FONT,fontWeight:900,color:c,margin:'4px 0 0'}}>{v}</p></div>;});})()}
+              </div>
+            </div>);}
+          if(lsView==='returning'){
+            // Build 2026 targets from 2025 data — players who beat/missed ADP and have ADP data
+            const withAdp=lsData.players.filter(p=>p.adp&&p.adp<200&&p.fpts>0);
+            const smashers=withAdp.filter(p=>p.beat>=5).sort((a,b)=>b.beat-a.beat).slice(0,15);
+            const disappointers=withAdp.filter(p=>p.beat<=-5).sort((a,b)=>a.beat-b.beat).slice(0,15);
+            const highCeiling=withAdp.filter(p=>p.weekly&&p.weekly.length>0).map(p=>{
+              const wks=p.weekly.filter(v=>v!=null&&v>0);const booms=wks.filter(v=>v>=20).length;
+              return{...p,boomRate:wks.length?Math.round(booms/wks.length*100):0,booms};
+            }).filter(p=>p.boomRate>=25).sort((a,b)=>b.boomRate-a.boomRate).slice(0,15);
+            const consistent=withAdp.filter(p=>p.weekly&&p.weekly.length>0&&p.gp>=14).map(p=>{
+              const wks=p.weekly.filter(v=>v!=null&&v>0);const dooms=wks.filter(v=>v<5).length;
+              return{...p,doomRate:wks.length?Math.round(dooms/wks.length*100):0,dooms};
+            }).filter(p=>p.doomRate<=10&&p.ppg>=10).sort((a,b)=>b.ppg-a.ppg).slice(0,15);
+            const TargetCard=({title,data,color,renderRight})=>(<div><p style={{fontSize:11,color,textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:6}}>{title}</p><div style={{background:S.s1,border:'1px solid '+S.bd,borderRadius:10}}>{data.length===0?<p style={{padding:12,color:S.mt,fontSize:12}}>No players match criteria</p>:data.map((p,i)=><div key={i} onClick={()=>setLsPlayer(p)} style={{padding:'5px 10px',borderBottom:'1px solid #334155',display:'flex',justifyContent:'space-between',alignItems:'center',fontSize:12,cursor:'pointer'}}><div style={{display:'flex',alignItems:'center',gap:5}}><Pill pos={p.pos}/><div><p style={{fontWeight:600,margin:0}}>{p.name}</p><p style={{fontSize:10,color:S.mt,margin:0}}>{p.adpPosRank||p.posRank} → {p.actualFinish} • {p.fpts.toFixed(0)}pts</p></div></div>{renderRight(p)}</div>)}</div></div>);
+            return(<div style={{display:'flex',flexDirection:'column',gap:12}}>
+              <p style={{fontSize:11,color:S.mt}}>Players to target or avoid in 2026 based on 2025 performance vs ADP.</p>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+                <TargetCard title="ADP Smashers — Draft Again" data={smashers} color="#22c55e" renderRight={p=><span style={{fontFamily:FONT,fontWeight:900,color:'#22c55e',fontSize:15}}>+{p.beat}</span>}/>
+                <TargetCard title="High Ceiling — Boom Targets" data={highCeiling} color="#f59e0b" renderRight={p=><span style={{fontFamily:FONT,fontWeight:900,color:'#f59e0b',fontSize:14}}>{p.boomRate}% boom</span>}/>
+              </div>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+                <TargetCard title="Consistent Producers — Safe Picks" data={consistent} color="#3b82f6" renderRight={p=><span style={{fontFamily:FONT,fontWeight:900,color:'#3b82f6',fontSize:14}}>{p.ppg.toFixed(1)} ppg</span>}/>
+                <TargetCard title="ADP Busters — Avoid / Fade" data={disappointers} color="#ef4444" renderRight={p=><span style={{fontFamily:FONT,fontWeight:900,color:'#ef4444',fontSize:15}}>{p.beat}</span>}/>
+              </div>
+            </div>);}
+          if(lsView==='playoffs'){
+            const playoffWeeks=[15,16,17];
+            const weekLabels={15:'Wild Card',16:'Divisional',17:'Championship'};
+            const allWithWeekly=lsData.players.filter(p=>p.weekly&&p.weekly.length>=17&&p.fpts>0);
+            const weekData=playoffWeeks.map(w=>{
+              const scored=allWithWeekly.filter(p=>p.weekly[w-1]!=null&&p.weekly[w-1]>0)
+                .map(p=>({name:p.name,pos:p.pos,team:p.team,adp:p.adp||999,pts:p.weekly[w-1],total:p.fpts}))
+                .sort((a,b)=>b.pts-a.pts);
+              return{week:w,label:weekLabels[w],players:scored};
+            });
+            // Combined playoff total
+            const playoffTotals=allWithWeekly.map(p=>{
+              const pts=playoffWeeks.map(w=>p.weekly[w-1]).filter(v=>v!=null&&v>0);
+              return{name:p.name,pos:p.pos,team:p.team,adp:p.adp||999,weeks:pts.length,total:pts.reduce((s,v)=>s+v,0),avg:pts.length?pts.reduce((s,v)=>s+v,0)/pts.length:0,
+                w15:p.weekly[14]||0,w16:p.weekly[15]||0,w17:p.weekly[16]||0};
+            }).filter(p=>p.weeks>0).sort((a,b)=>b.total-a.total);
+            const posFilter=lsPosFilter;
+            const filteredTotals=posFilter==='ALL'?playoffTotals:playoffTotals.filter(p=>p.pos===posFilter);
+            return(<div style={{display:'flex',flexDirection:'column',gap:16}}>
+              <p style={{fontSize:10,color:S.mt}}>Best Ball playoff weeks — the scores that decided championships. W15-17 are the money weeks in DraftKings Best Ball.</p>
+              {/* Combined Playoff Leaderboard */}
+              <div><p style={{fontSize:10,color:'#22c55e',textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:8}}>Playoff Total — Top 40</p>
+                <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,overflow:'hidden'}}><div style={{overflowX:'auto'}}>
+                  <table style={{width:'100%',borderCollapse:'collapse',fontSize:11}}>
+                    <thead><tr style={{background:S.s2}}>
+                      {['#','Player','Pos','ADP','W15','W16','W17','Total','Avg'].map(h=><th key={h} style={{padding:'6px 8px',textAlign:h==='Player'?'left':'center',fontWeight:700,color:S.mt,fontSize:10}}>{h}</th>)}
+                    </tr></thead>
+                    <tbody>{filteredTotals.slice(0,40).map((p,i)=><tr key={i} onClick={()=>{const full=lsData.players.find(x=>x.name===p.name);if(full)setLsPlayer(full);}} style={{borderBottom:'1px solid #334155',cursor:'pointer',background:i<3?'rgba(34,197,94,0.06)':'transparent'}}>
+                      <td style={{padding:'5px 8px',textAlign:'center',fontWeight:700,color:i<3?'#22c55e':S.mt}}>{i+1}</td>
+                      <td style={{padding:'5px 8px',fontWeight:600}}>{p.name}</td>
+                      <td style={{padding:'5px',textAlign:'center'}}><Pill pos={p.pos}/></td>
+                      <td style={{padding:'5px',textAlign:'center',color:S.mt,fontSize:11}}>{p.adp<900?p.adp.toFixed(0):'—'}</td>
+                      <td style={{padding:'5px',textAlign:'center',fontWeight:p.w15>=20?700:400,color:p.w15>=20?'#22c55e':p.w15>=10?S.tx:p.w15>0?'#d4a017':S.mt}}>{p.w15>0?p.w15.toFixed(1):'—'}</td>
+                      <td style={{padding:'5px',textAlign:'center',fontWeight:p.w16>=20?700:400,color:p.w16>=20?'#22c55e':p.w16>=10?S.tx:p.w16>0?'#d4a017':S.mt}}>{p.w16>0?p.w16.toFixed(1):'—'}</td>
+                      <td style={{padding:'5px',textAlign:'center',fontWeight:p.w17>=20?700:400,color:p.w17>=20?'#22c55e':p.w17>=10?S.tx:p.w17>0?'#d4a017':S.mt}}>{p.w17>0?p.w17.toFixed(1):'—'}</td>
+                      <td style={{padding:'5px',textAlign:'center',fontWeight:800,color:'#22c55e'}}>{p.total.toFixed(1)}</td>
+                      <td style={{padding:'5px',textAlign:'center',color:p.avg>=15?'#22c55e':S.tx}}>{p.avg.toFixed(1)}</td>
+                    </tr>)}</tbody></table></div></div></div>
+              {/* Individual Week Breakdowns */}
+              <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:12}}>
+                {weekData.map(wd=>{const filtered=posFilter==='ALL'?wd.players:wd.players.filter(p=>p.pos===posFilter);
+                  return<div key={wd.week}><p style={{fontSize:10,color:'#d4a017',textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:6}}>Week {wd.week} — {wd.label}</p>
+                    <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10}}>
+                      {filtered.slice(0,15).map((p,i)=><div key={i} onClick={()=>{const full=lsData.players.find(x=>x.name===p.name);if(full)setLsPlayer(full);}} style={{padding:'6px 10px',borderBottom:'1px solid #334155',display:'flex',justifyContent:'space-between',alignItems:'center',fontSize:11,cursor:'pointer'}}>
+                        <div style={{display:'flex',alignItems:'center',gap:5}}>
+                          <span style={{fontWeight:700,color:i<3?'#22c55e':S.mt,fontSize:10,width:16}}>{i+1}</span>
+                          <Pill pos={p.pos}/><span style={{fontWeight:600}}>{p.name}</span></div>
+                        <span style={{fontWeight:800,color:p.pts>=25?'#22c55e':p.pts>=15?S.tx:'#d4a017'}}>{p.pts.toFixed(1)}</span>
+                      </div>)}</div></div>;})}
+              </div>
+              {/* Boom Rate in Playoffs */}
+              <div><p style={{fontSize:10,color:'#f59e0b',textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:8}}>Playoff Boom Rate (20+ pts in W15-17)</p>
+                <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+                  {['QB','RB','WR','TE'].map(pos=>{
+                    const posP=allWithWeekly.filter(p=>p.pos===pos);
+                    const boomable=posP.length*3;
+                    const booms=posP.reduce((s,p)=>s+playoffWeeks.filter(w=>p.weekly[w-1]!=null&&p.weekly[w-1]>=20).length,0);
+                    const rate=boomable>0?Math.round(booms/boomable*100):0;
+                    return<div key={pos} style={{background:S.s2,borderRadius:10,padding:'12px 16px',flex:'1 1 100px',textAlign:'center'}}>
+                      <p style={{fontSize:9,color:POS[pos]?.accent,margin:0,fontWeight:700}}>{pos}</p>
+                      <p style={{fontFamily:FONT,fontSize:22,fontWeight:900,color:rate>=20?'#22c55e':rate>=10?'#d4a017':'#ef4444',margin:'4px 0 0'}}>{rate}%</p>
+                      <p style={{fontSize:9,color:S.mt,margin:0}}>{booms}/{boomable} booms</p></div>;})}
+                </div></div>
+            </div>);}
+          return null;
+        })()}</div>}
 
-        <Card>
-          <SH title="JSON Backup" sub="Export state to copy-paste, or paste a backup below to restore"/>
-          <ExportImportPanel exportState={exportState} importState={importState}/>
-        </Card>
-      </div>
-    </div>
-  );
-}
+      {/* MOVERS */}
+      {tab==='movers'&&<div>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12,flexWrap:'wrap',gap:8}}>
+          <h2 style={{fontFamily:FONT,fontSize:16,fontWeight:900,textTransform:'uppercase'}}>ADP Movers</h2>
+          {adpData.dates.length>1&&<div style={{display:'flex',gap:6,alignItems:'center',fontSize:11}}>
+            <span style={{color:S.mt}}>From:</span><select value={moverFrom} onChange={e=>setMoverFrom(+e.target.value)} style={{fontSize:11,padding:'4px 6px',background:S.s2,border:`1px solid ${S.bd}`,borderRadius:4,color:S.tx}}>{adpData.dates.map((d,i)=><option key={i} value={i}>{d}</option>)}</select>
+            <span style={{color:S.mt}}>To:</span><select value={moverTo<0?adpData.dates.length-1:moverTo} onChange={e=>setMoverTo(+e.target.value)} style={{fontSize:11,padding:'4px 6px',background:S.s2,border:`1px solid ${S.bd}`,borderRadius:4,color:S.tx}}>{adpData.dates.map((d,i)=><option key={i} value={i}>{d}</option>)}</select></div>}</div>
+        {filteredMovers.up.length===0&&filteredMovers.down.length===0&&<p style={{color:S.mt,fontSize:12}}>Need 2+ ADP snapshots.</p>}
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14}}>
+          {[{t:'Rising',d:filteredMovers.up,c:'#22c55e'},{t:'Falling',d:filteredMovers.down,c:'#ef4444'}].map(s=>(
+            <div key={s.t}><h3 style={{fontSize:11,color:s.c,textTransform:'uppercase',fontWeight:700,marginBottom:8}}>{s.t}</h3>
+              <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10}}>
+                {s.d.map((p,i)=><div key={i} style={{padding:'10px 12px',borderBottom:'1px solid #334155',display:'flex',justifyContent:'space-between',fontSize:12}}>
+                  <div style={{display:'flex',alignItems:'center',gap:6}}><Pill pos={p.pos}/><div><p style={{fontWeight:600,margin:0}}>{p.name}</p>
+                    <p style={{fontSize:10,color:S.mt,margin:0}}>{p.adp[moverFrom]>=240?'UD':p.adp[moverFrom]?.toFixed(0)} → {(()=>{const v=p.adp[moverTo<0?p.adp.length-1:moverTo];return v>=240?'UD':v?.toFixed(0);})()}</p></div></div>
+                  <span style={{fontFamily:FONT,fontWeight:900,color:s.c,fontSize:14}}>{p.rc>0?'+':''}{p.rc.toFixed(0)}</span></div>)}</div></div>))}</div></div>}
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// ROLES TAB
-// ═══════════════════════════════════════════════════════════════════════════════
-// ═══════════════════════════════════════════════════════════════════════════════
-// PLAYER STATS TAB (v20)
-// Per-game stats history, editable. Round tabs, team filter, search.
-// Click a cell to open edit modal with all 8 stat inputs.
-// ═══════════════════════════════════════════════════════════════════════════════
-function PlayerStatsTab({players,setPlayers,dark}) {
-  const [round,setRound]=useState(1);
-  const [filterTeam,setFilterTeam]=useState("ALL");
-  const [search,setSearch]=useState("");
-  const [showZeros,setShowZeros]=useState(false);
-  const [editing,setEditing]=useState(null); // {player, round, game}
 
-  // Active roster: everyone except SCRATCHED/STARTER/BACKUP
-  const roster = useMemo(()=>{
-    if(!players) return [];
-    return players
-      .map(migratePlayer)
-      .filter(p=>p.lineRole!=="SCRATCHED"&&p.lineRole!=="STARTER"&&p.lineRole!=="BACKUP")
-      .filter(p=>filterTeam==="ALL"||p.team===filterTeam)
-      .filter(p=>!search||p.name.toLowerCase().includes(search.toLowerCase()));
-  },[players,filterTeam,search]);
+      {/* ADP */}
+      {tab==='adp'&&<div><h2 style={{fontFamily:FONT,fontSize:16,fontWeight:900,textTransform:'uppercase',marginBottom:6}}>ADP Database</h2>
+        <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,padding:14,marginBottom:12}}>
+          <p style={{fontSize:10,color:S.mt,textTransform:'uppercase',letterSpacing:2,fontWeight:700,marginBottom:8}}>{adpData.dates.length} Snapshots</p>
+          <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>{adpData.dates.map((d,i)=><div key={i} style={{background:S.s2,borderRadius:6,padding:'8px 14px',textAlign:'center'}}><span style={{fontSize:12,fontWeight:700,color:'#22c55e'}}>{d}</span></div>)}</div></div>
+        <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,overflow:'hidden'}}><div style={{overflowX:'auto'}}>
+          <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+            <thead><tr style={{background:S.s2}}>
+              <th onClick={()=>{setAdpSortBy('name');setAdpSortDir(d=>d==='asc'?'desc':'asc');}} style={{padding:'8px 10px',textAlign:'left',fontWeight:700,color:S.mt,fontSize:10,cursor:'pointer'}}>Player{adpSortBy==='name'?(adpSortDir==='desc'?' ↓':' ↑'):''}</th>
+              <th style={{padding:'8px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10}}>Pos</th><th style={{padding:'8px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10}}>Tm</th>
+              {adpData.dates.map(d=><th key={d} style={{padding:'8px 6px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:9}}>{d}</th>)}
+              <th onClick={()=>{setAdpSortBy('latest');setAdpSortDir(d=>d==='asc'?'desc':'asc');}} style={{padding:'8px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10,cursor:'pointer'}}>Current{adpSortBy==='latest'?(adpSortDir==='desc'?' ↓':' ↑'):''}</th>
+              <th onClick={()=>{setAdpSortBy('change');setAdpSortDir(d=>d==='asc'?'desc':'asc');}} style={{padding:'8px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10,cursor:'pointer'}}>Δ{adpSortBy==='change'?(adpSortDir==='desc'?' ↓':' ↑'):''}</th></tr></thead>
+            <tbody>{[...adpData.players].filter(p=>p.latest<240).sort((a,b)=>{const m=adpSortDir==='desc'?-1:1;if(adpSortBy==='name')return a.name.localeCompare(b.name)*m;return((a[adpSortBy]||0)-(b[adpSortBy]||0))*m;}).slice(0,300).map((p,i)=>(
+              <tr key={i} style={{borderBottom:'1px solid #334155'}}><td style={{padding:'6px 10px',fontWeight:600}}>{p.name}</td><td style={{padding:'6px',textAlign:'center'}}><Pill pos={p.pos}/></td><td style={{padding:'6px',textAlign:'center',color:S.mt,fontSize:11}}>{p.team}</td>
+                {p.adp.map((a,j)=><td key={j} style={{padding:'6px',textAlign:'center',fontSize:11,color:a>=240?S.mt:S.tx}}>{a<240?a.toFixed(1):'—'}</td>)}
+                <td style={{padding:'6px',textAlign:'center',fontWeight:700,fontSize:11}}>{p.latest.toFixed(1)}</td>
+                <td style={{padding:'6px',textAlign:'center',fontWeight:700,fontSize:11,color:p.change>0?'#22c55e':p.change<0?'#ef4444':S.mt}}>{p.adp.length>1?(p.change>0?'+':'')+p.change.toFixed(1):'—'}</td></tr>))}</tbody></table></div></div></div>}
 
-  // Per-round view
-  const rows = useMemo(()=>{
-    return roster.map(p=>{
-      const games={};
-      let rGP=0,rG=0,rA=0,rSOG=0,rHIT=0,rBLK=0,rTK=0,rPIM=0,rGIVE=0;
-      for (const e of (p.pGames||[])) {
-        if (e.round===round) {
-          games[e.game]=e;
-          rGP++;
-          rG += e.g||0; rA += e.a||0; rSOG += e.sog||0;
-          rHIT += e.hit||0; rBLK += e.blk||0; rTK += e.tk||0;
-          rPIM += e.pim||0; rGIVE += e.give||0;
-        }
-      }
-      return {p, games, rGP, rG, rA, rPts:rG+rA, rSOG, rHIT, rBLK, rTK, rPIM, rGIVE};
-    })
-    .filter(r=>showZeros||r.rGP>0)
-    .sort((a,b)=>b.rPts-a.rPts||b.rG-a.rG||a.p.name.localeCompare(b.p.name));
-  },[roster,round,showZeros]);
+      {/* DRAFTS */}
+      {tab==='drafts'&&<div>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14}}><h2 style={{fontFamily:FONT,fontSize:16,fontWeight:900,textTransform:'uppercase'}}>Drafts</h2><ContestSel/></div>
+        {draftValues.best.length>0&&<div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14,marginBottom:20}}>
+          {[{t:'Best Value Teams',d:draftValues.best,c:'#22c55e'},{t:'Worst Value Teams',d:draftValues.worst,c:'#ef4444'}].map(s=>(
+            <div key={s.t}><p style={{fontSize:10,color:s.c,textTransform:'uppercase',fontWeight:700,marginBottom:6}}>{s.t}</p>
+              <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,overflow:'hidden'}}>
+                {s.d.map((d,i)=><div key={i} onClick={()=>{if(d.mine&&d.draft)setSelD(d.draft);else if(d.fieldTeam)setSelFieldTeam(d.fieldTeam);}} style={{padding:'7px 12px',borderBottom:'1px solid #334155',display:'flex',justifyContent:'space-between',fontSize:12,cursor:'pointer'}}>
+                  <div><span style={{fontWeight:600,color:d.mine?S.tx:S.mt}}>{d.name}</span>{d.mine&&<span style={{fontSize:8,color:'#22c55e',marginLeft:4}}>YOU</span>}<span style={{fontSize:10,color:S.mt,marginLeft:6}}>Seat {d.seat}</span>{d.draftName&&<span style={{fontSize:9,color:S.mt,marginLeft:4}}>in {d.draftName}</span>}</div>
+                  <span style={{fontWeight:700,color:s.c}}>{d.value>0?'+':''}{d.value.toFixed(0)}</span></div>)}</div></div>))}</div>}
+        <div style={{display:'flex',flexDirection:'column',gap:4}}>{[...filteredDraftsAll].reverse().map((d,i)=>{const c=d._cls||{counts:{QB:0,RB:0,WR:0,TE:0},tags:[]};
+          const tv=d.picks.reduce((s,p)=>{const adp=matchADP(p.name,p.pos,p.team,p.pick,adpData.players);return s+(adp&&adp.latest<240?p.pick-adp.latest:0);},0);
+          return<div key={d.id||i} style={{background:S.s2,borderRadius:8,padding:'10px 14px',cursor:'pointer'}} onClick={()=>setSelD(d)}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:4}}>
+              <div><p style={{fontWeight:700,fontSize:12,margin:0}}>{d.name} <span style={{fontSize:10,color:tv>=0?'#22c55e':'#ef4444',fontWeight:700}}>Net {tv>0?'+':''}{tv.toFixed(0)}</span></p>
+                <p style={{fontSize:10,color:S.mt,margin:'2px 0 0'}}>Seat {d.draftPosition} • {d.tournament||'—'} • {(d.date||'').replace(/2026-?/g,'')}{d.phase&&<span style={{marginLeft:6,padding:'1px 6px',background:d.phase==='pre'?'rgba(96,165,250,0.2)':d.phase==='post'?'rgba(34,197,94,0.2)':'rgba(168,85,247,0.2)',color:d.phase==='pre'?'#60a5fa':d.phase==='post'?'#22c55e':'#a855f7',borderRadius:3,fontSize:9,fontWeight:700,textTransform:'uppercase'}}>{d.phase}</span>}</p></div>
+              <div style={{display:'flex',gap:3,alignItems:'center',flexWrap:'wrap'}}>
+                {['QB','RB','WR','TE'].map(pos=><span key={pos} style={{background:POS[pos].bg,color:'#fff',padding:'2px 6px',borderRadius:4,fontSize:9,fontWeight:700}}>{pos}{c.counts[pos]}</span>)}
+                <button onClick={e=>{e.stopPropagation();setEditD(d);}} style={{fontSize:10,padding:'2px 6px',background:S.s3,color:S.mt,border:`1px solid ${S.bd}`,borderRadius:4,cursor:'pointer'}}>Edit</button></div></div>
+            <div style={{display:'flex',gap:6,marginTop:6}}>{d.picks.slice(0,3).map((p,j)=><span key={j} style={{fontSize:10,color:S.mt}}><span style={{color:POS[p.pos]?.accent,fontWeight:700,fontSize:9}}>{p.pos}</span> {p.name}</span>)}</div>
+          </div>;})}</div></div>}
 
-  const teams = useMemo(()=>{
-    if(!players) return [];
-    return [...new Set(players
-      .filter(p=>p.lineRole!=="SCRATCHED"&&p.lineRole!=="STARTER"&&p.lineRole!=="BACKUP")
-      .map(p=>p.team))].sort();
-  },[players]);
+      {/* IMPORT */}
+      {tab==='import'&&<div>
+        <h2 style={{fontFamily:FONT,fontSize:16,fontWeight:900,textTransform:'uppercase',marginBottom:16}}>Import</h2>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16,marginBottom:20}}>
+          <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,padding:20}}>
+            <h3 style={{fontSize:13,fontWeight:700,marginBottom:8}}>Upload ADP CSV</h3>
+            <input ref={adpFileRef} type="file" accept=".csv,.txt" onChange={handleAdpUpload} style={{display:'none'}}/>
+            <button onClick={()=>adpFileRef.current?.click()} style={{fontSize:11,padding:'8px 14px',background:'#3b82f6',color:'#fff',border:'none',borderRadius:6,fontWeight:700,cursor:'pointer'}}>Upload ADP CSV</button>
+            {adpData.players.length>0&&<p style={{fontSize:10,color:'#22c55e',marginTop:8}}>{adpData.players.length} players, {adpData.dates.length} snapshots</p>}
+            <button onClick={()=>{if(window.confirm('Reset ADP?')){localStorage.removeItem('bb_adp_history');localStorage.removeItem('bb_adp_extra');window.location.reload();}}} style={{fontSize:10,padding:'6px 10px',background:S.s2,color:'#ef4444',border:`1px solid ${S.bd}`,borderRadius:6,cursor:'pointer',marginTop:8,display:'block'}}>Reset ADP</button></div>
+          <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,padding:20}}>
+            <h3 style={{fontSize:13,fontWeight:700,marginBottom:8}}>Backup / Restore</h3>
+            <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+              <button onClick={handleExport} style={{fontSize:11,padding:'8px 14px',background:'#22c55e',color:'#fff',border:'none',borderRadius:6,fontWeight:700,cursor:'pointer'}}>Export All</button>
+              <label style={{fontSize:11,padding:'8px 14px',background:S.s2,color:S.tx,border:`1px solid ${S.bd}`,borderRadius:6,fontWeight:700,cursor:'pointer'}}>Import Backup<input type="file" accept=".json" onChange={handleImport} style={{display:'none'}}/></label>
+              <button onClick={()=>{if(window.confirm('Delete ALL drafts?'))saveDrafts([]);}} style={{fontSize:11,padding:'8px 14px',background:'#ef4444',color:'#fff',border:'none',borderRadius:6,fontWeight:700,cursor:'pointer'}}>Clear Drafts</button></div></div></div>
+        <h3 style={{fontSize:14,fontWeight:700,marginBottom:6}}>Import Draft</h3>
+        <p style={{fontSize:11,color:S.mt,marginBottom:12}}>Open draft on DraftKings, <b style={{color:S.tx}}>Ctrl+A</b> then <b style={{color:S.tx}}>Ctrl+C</b>, paste below</p>
+        {!parseResult?(<div>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:12}}>
+            <input value={importName} onChange={e=>setImportName(e.target.value)} placeholder="Draft Name" style={{fontSize:12,padding:'8px 12px',background:S.s2,border:`1px solid ${S.bd}`,borderRadius:6,color:S.tx}}/>
+            <div><select value={importTournament} onChange={e=>setImportTournament(e.target.value)} style={{fontSize:12,padding:'8px 12px',background:S.s2,border:`1px solid ${S.bd}`,borderRadius:6,color:S.tx,width:'100%'}}>
+              <option value="">Select Contest...</option>{allContests.filter(c=>c!=='ALL').map(c=><option key={c} value={c}>{c}</option>)}<option value="_new">+ New Contest</option>
+            </select>{importTournament==='_new'&&<input onChange={e=>setImportTournament(e.target.value)} placeholder="Contest name" style={{fontSize:12,padding:'8px 12px',background:S.s2,border:`1px solid ${S.bd}`,borderRadius:6,color:S.tx,width:'100%',marginTop:4}}/>}</div></div>
+          <div style={{display:'flex',gap:10,marginBottom:12,alignItems:'center',flexWrap:'wrap'}}>
+            <div style={{display:'flex',gap:2,background:S.s2,borderRadius:6,padding:2}}>{['fast','slow'].map(t=><button key={t} onClick={()=>setImportDraftType(t)} style={{fontSize:11,fontWeight:700,padding:'6px 14px',borderRadius:4,border:'none',cursor:'pointer',background:importDraftType===t?'#22c55e':'transparent',color:importDraftType===t?'#fff':S.mt,textTransform:'capitalize'}}>{t}</button>)}</div>
+            <div style={{display:'flex',gap:2,background:S.s2,borderRadius:6,padding:2}}>{[{id:'pre',l:'Pre'},{id:'post',l:'Post'},{id:'regular',l:'Regular'}].map(ph=><button key={ph.id} onClick={()=>setImportPhase(ph.id)} style={{fontSize:11,fontWeight:700,padding:'6px 12px',borderRadius:4,border:'none',cursor:'pointer',background:importPhase===ph.id?'#60a5fa':'transparent',color:importPhase===ph.id?'#fff':S.mt}}>{ph.l}</button>)}</div>
+            <input type="date" value={importDate} onChange={e=>setImportDate(e.target.value)} style={{fontSize:12,padding:'8px 12px',background:S.s2,border:`1px solid ${S.bd}`,borderRadius:6,color:S.tx}}/>
+            <input value={importFee} onChange={e=>setImportFee(e.target.value)} placeholder="Buy-in $" type="number" style={{fontSize:12,padding:'8px 12px',background:S.s2,border:`1px solid ${S.bd}`,borderRadius:6,color:S.tx,width:90}}/>
+            <input value={importMaxEntries} onChange={e=>setImportMaxEntries(e.target.value)} placeholder="Max entries" type="number" style={{fontSize:12,padding:'8px 12px',background:S.s2,border:`1px solid ${S.bd}`,borderRadius:6,color:S.tx,width:100}}/>
+          </div>
+          <textarea value={pasteText} onChange={e=>setPasteText(e.target.value)} placeholder="Paste draftboard here..." style={{width:'100%',minHeight:200,fontSize:11,padding:14,background:S.s2,border:`1px solid ${S.bd}`,borderRadius:10,color:S.tx,resize:'vertical',fontFamily:'monospace'}}/>
+          <div style={{display:'flex',gap:10,marginTop:12}}>
+            <button onClick={()=>{if(!pasteText.trim())return;let r=parseDraftText(pasteText);if(adpData.players.length>0)r=resolveNames(r,adpData.players);setParseResult(r);}} style={{fontSize:13,padding:'10px 24px',background:'#22c55e',color:'#fff',border:'none',borderRadius:8,fontWeight:700,cursor:'pointer'}}>Process</button>
+            <button onClick={()=>{setPasteText('');setParseResult(null);}} style={{fontSize:12,padding:'10px 16px',background:S.s2,color:S.mt,border:`1px solid ${S.bd}`,borderRadius:8,cursor:'pointer'}}>Clear</button></div></div>
+        ):(<div>
+          <div style={{background:parseResult.valid?'rgba(34,197,94,0.1)':'rgba(239,68,68,0.1)',border:`1px solid ${parseResult.valid?'#22c55e':'#ef4444'}`,borderRadius:10,padding:16,marginBottom:16}}>
+            <h3 style={{fontSize:14,fontWeight:700,color:parseResult.valid?'#22c55e':'#ef4444',marginBottom:8}}>{parseResult.valid?'Parsed!':'Issues'} — {parseResult.totalTeams} teams, {parseResult.totalPicks} picks</h3>
+            {parseResult.errors.map((e,i)=><p key={i} style={{fontSize:11,color:'#ef4444',margin:'2px 0'}}>{e}</p>)}
+            {/* Duplicate detection */}
+            {parseResult.myTeam&&drafts.some(d=>d.draftPosition===parseResult.myTeam.seat&&d.picks.length===parseResult.myTeam.picks.length&&d.picks[0]?.name===(parseResult.myTeam.picks[0]?.fullName||parseResult.myTeam.picks[0]?.name))&&
+              <p style={{fontSize:12,color:'#d4a017',fontWeight:700,marginTop:8}}>⚠ This draft may already be imported! Check your drafts before saving.</p>}
+          </div>
+          {parseResult.myTeam&&<div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,overflow:'hidden',marginBottom:16}}>
+            <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}><tbody>{parseResult.myTeam.picks.map((p,i)=><tr key={i} style={{borderBottom:'1px solid #334155'}}>
+              <td style={{padding:'5px 10px',fontWeight:700,color:S.mt}}>{p.round}</td><td style={{padding:'5px 8px',color:S.mt}}>{p.pick}</td><td style={{padding:'5px 8px',fontWeight:600}}>{p.fullName||p.name}</td><td style={{padding:'5px 8px'}}><Pill pos={p.pos}/></td><td style={{padding:'5px 8px',color:S.mt}}>{p.team}</td></tr>)}</tbody></table></div>}
+          <div style={{display:'flex',gap:10}}>
+            <button onClick={()=>{try{const stored=convertToStorageFormat(parseResult,{name:importName||`Draft ${drafts.length+1}`,tournament:importTournament==='_new'?'':importTournament,draftType:importDraftType,date:importDate||new Date().toISOString().split('T')[0],fee:parseFloat(importFee)||0,maxEntries:parseInt(importMaxEntries)||0,phase:importPhase});stored.phase=importPhase;saveDrafts([...drafts,stored]);setPasteText('');setParseResult(null);setImportName('');setTab('drafts');}catch(e){alert('Error: '+e.message);}}} style={{fontSize:13,padding:'10px 24px',background:'#22c55e',color:'#fff',border:'none',borderRadius:8,fontWeight:700,cursor:'pointer'}} disabled={!parseResult.myTeam}>Save Draft</button>
+            <button onClick={()=>setParseResult(null)} style={{fontSize:12,padding:'10px 16px',background:S.s2,color:S.mt,border:`1px solid ${S.bd}`,borderRadius:8,cursor:'pointer'}}>Back</button></div></div>)}</div>}
 
-  function saveEntry(playerName, playerTeam, round, game, statsPatch) {
-    setPlayers(prev=>prev.map(p=>{
-      if (p.name!==playerName || p.team!==playerTeam) return p;
-      const base = migratePlayer(p);
-      const existingGames = base.pGames || [];
-      // Remove any existing entry for this round+game
-      const others = existingGames.filter(e=>!(e.round===round && e.game===game));
-      // Build new entry (empty stats default to 0)
-      const newEntry = {round, game,
-        g:+statsPatch.g||0, a:+statsPatch.a||0, sog:+statsPatch.sog||0,
-        hit:+statsPatch.hit||0, blk:+statsPatch.blk||0, tk:+statsPatch.tk||0,
-        pim:+statsPatch.pim||0, give:+statsPatch.give||0,
-        _source:"manual_edit",
-      };
-      // If all stats are 0 AND user didn't explicitly set _keep, remove entry entirely
-      const hasAnyStat = Object.values(newEntry).some(v=>typeof v==="number"&&v>0);
-      const finalGames = (hasAnyStat || statsPatch._keep) ? [...others, newEntry] : others;
-      return withRollups({...base, pGames:finalGames});
-    }));
-  }
-
-  function deleteEntry(playerName, playerTeam, round, game) {
-    setPlayers(prev=>prev.map(p=>{
-      if (p.name!==playerName || p.team!==playerTeam) return p;
-      if (!p.pGames) return p;
-      const filtered = p.pGames.filter(e=>!(e.round===round && e.game===game));
-      if (filtered.length===p.pGames.length) return p;
-      return withRollups({...p, pGames:filtered});
-    }));
-  }
-
-  if (!players) {
-    return <Card><div style={{color:"var(--color-text-secondary)",fontSize:12}}>Load skaters.csv on the Upload Stats tab first.</div></Card>;
-  }
-
-  return <div>
-    <Card style={{marginBottom:12}}>
-      <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
-        <SH title="Player Stats" sub={`Round ${round} · ${rows.length} players`}/>
-        <Seg options={[{id:1,label:"R1"},{id:2,label:"R2"},{id:3,label:"R3"},{id:4,label:"R4"}]} value={round} onChange={setRound} accent="#3b82f6"/>
-        <select value={filterTeam} onChange={e=>setFilterTeam(e.target.value)}
-          style={{fontSize:11,padding:"4px 8px",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:4,color:"var(--color-text-primary)"}}>
-          <option value="ALL">All Teams</option>
-          {teams.map(t=><option key={t} value={t}>{t}</option>)}
-        </select>
-        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search player…"
-          style={{fontSize:11,padding:"4px 8px",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:4,color:"var(--color-text-primary)",width:160}}/>
-        <label style={{fontSize:11,color:"var(--color-text-secondary)",display:"flex",gap:5,alignItems:"center",cursor:"pointer"}}>
-          <input type="checkbox" checked={showZeros} onChange={e=>setShowZeros(e.target.checked)}/>
-          Show zero-GP
-        </label>
-        <span style={{marginLeft:"auto",fontSize:10,color:"var(--color-text-tertiary)"}}>Click any G1-G7 cell to edit</span>
-      </div>
-    </Card>
-
-    <Card>
-      <div style={{overflowX:"auto"}}>
-        <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-          <thead>
-            <tr style={{borderBottom:"0.5px solid var(--color-border-secondary)"}}>
-              <th style={{padding:"5px 8px",textAlign:"left",fontSize:10,fontWeight:500,color:"var(--color-text-secondary)"}}>Player</th>
-              <th style={{padding:"5px 4px",textAlign:"center",fontSize:10,fontWeight:500,color:"var(--color-text-secondary)"}}>Team</th>
-              <th style={{padding:"5px 4px",textAlign:"center",fontSize:10,fontWeight:500,color:"var(--color-text-secondary)"}}>Role</th>
-              {[1,2,3,4,5,6,7].map(g=>(
-                <th key={g} style={{padding:"5px 4px",textAlign:"center",fontSize:10,fontWeight:500,color:"var(--color-text-secondary)",minWidth:64}}>G{g}</th>
-              ))}
-              <th style={{padding:"5px 8px",textAlign:"center",fontSize:10,fontWeight:500,color:"var(--color-text-primary)",background:"rgba(59,130,246,0.08)",borderLeft:"0.5px solid var(--color-border-tertiary)"}}>R{round} Totals</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.length===0 && (
-              <tr><td colSpan={11} style={{padding:"20px",textAlign:"center",fontSize:11,color:"var(--color-text-tertiary)"}}>
-                {players.length===0 ? "No players loaded." : showZeros ? "No players match the filter." : "No players with R"+round+" game data yet. Import via Upload Stats tab, or toggle 'Show zero-GP' to edit players without entries."}
-              </td></tr>
-            )}
-            {rows.map((r,i)=>{
-              const p=r.p;
-              return <tr key={p.name+p.team} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.015)":"rgba(0,0,0,0.01)")}}>
-                <td style={{padding:"4px 8px",fontSize:11}}>{p.name}</td>
-                <td style={{padding:"4px 4px",textAlign:"center"}}><span style={{fontSize:9,padding:"1px 5px",borderRadius:2,background:"rgba(59,130,246,0.12)",color:"#60a5fa"}}>{p.team}</span></td>
-                <td style={{padding:"4px 4px",textAlign:"center"}}><RoleBadge role={p.lineRole}/></td>
-                {[1,2,3,4,5,6,7].map(g=>{
-                  const e = r.games[g];
-                  const hasEntry = !!e;
-                  const hasStats = hasEntry && ((e.g||0)+(e.a||0)+(e.sog||0)+(e.hit||0)+(e.blk||0)+(e.tk||0)+(e.pim||0)+(e.give||0)) > 0;
-                  const summary = hasEntry ? (
-                    (e.g?`${e.g}G `:"") + (e.a?`${e.a}A `:"") + (!e.g&&!e.a&&e.sog?`${e.sog}SOG`:"") + (!e.g&&!e.a&&!e.sog&&(e.hit||e.blk||e.pim)?"✓":"") || "—"
-                  ) : "";
-                  return <td key={g}
-                    onClick={()=>setEditing({name:p.name,team:p.team,round,game:g,existing:e})}
-                    style={{
-                      padding:"4px 4px",textAlign:"center",cursor:"pointer",
-                      fontFamily:"var(--font-mono)",fontSize:10,
-                      background:hasStats?"rgba(16,185,129,0.08)":hasEntry?"rgba(100,116,139,0.05)":"transparent",
-                      color:hasStats?"#10b981":"var(--color-text-tertiary)",
-                      border:hasEntry?"0.5px solid rgba(16,185,129,0.2)":"0.5px dashed var(--color-border-tertiary)",
-                      minWidth:56,
-                    }}
-                    title={hasEntry?`G:${e.g} A:${e.a} SOG:${e.sog} HIT:${e.hit} BLK:${e.blk} TK:${e.tk} GIVE:${e.give}`:"Click to add stats"}>
-                    {summary || "+"}
-                  </td>;
-                })}
-                <td style={{padding:"4px 8px",textAlign:"center",fontFamily:"var(--font-mono)",fontSize:10,background:"rgba(59,130,246,0.04)",borderLeft:"0.5px solid var(--color-border-tertiary)"}}>
-                  {r.rGP>0 ? <div>
-                    <div style={{fontWeight:500}}>{r.rG}G {r.rA}A · {r.rPts}P</div>
-                    <div style={{fontSize:9,color:"var(--color-text-tertiary)"}}>{r.rSOG}SOG · {r.rHIT}H · {r.rBLK}B</div>
-                  </div> : <span style={{color:"var(--color-text-tertiary)"}}>—</span>}
-                </td>
-              </tr>;
-            })}
-          </tbody>
-        </table>
-      </div>
-    </Card>
-
-    {editing && <PlayerStatEditModal
-      editing={editing}
-      onSave={(patch)=>{saveEntry(editing.name,editing.team,editing.round,editing.game,patch);setEditing(null);}}
-      onDelete={()=>{deleteEntry(editing.name,editing.team,editing.round,editing.game);setEditing(null);}}
-      onClose={()=>setEditing(null)}
-      dark={dark}/>}
-  </div>;
-}
-
-// Edit modal for a single game entry
-function PlayerStatEditModal({editing,onSave,onDelete,onClose,dark}) {
-  const init = editing.existing || {g:0,a:0,sog:0,hit:0,blk:0,tk:0,pim:0,give:0};
-  const [v,setV]=useState({
-    g:init.g||0, a:init.a||0, sog:init.sog||0,
-    hit:init.hit||0, blk:init.blk||0, tk:init.tk||0,
-    pim:init.pim||0, give:init.give||0,
-  });
-  const update=(k,x)=>setV(prev=>({...prev,[k]:x}));
-
-  const overlay={position:"fixed",inset:0,zIndex:9999,background:"rgba(0,0,0,0.7)",display:"flex",alignItems:"center",justifyContent:"center",padding:"40px 16px"};
-  const panel={background:dark?"#131625":"#fff",borderRadius:"var(--border-radius-lg)",padding:"18px 20px",maxWidth:440,width:"100%",border:"0.5px solid var(--color-border-secondary)"};
-  const row={display:"grid",gridTemplateColumns:"90px 1fr",gap:8,alignItems:"center",marginBottom:8};
-  const label={fontSize:11,color:"var(--color-text-secondary)"};
-  const inp={padding:"5px 8px",fontSize:12,fontFamily:"var(--font-mono)",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:4,color:"var(--color-text-primary)",width:"100%",boxSizing:"border-box"};
-
-  return <div style={overlay} onClick={onClose}>
-    <div style={panel} onClick={e=>e.stopPropagation()}>
-      <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",marginBottom:14}}>
-        <div>
-          <div style={{fontSize:14,fontWeight:500}}>{editing.name}</div>
-          <div style={{fontSize:11,color:"var(--color-text-secondary)"}}>{editing.team} · R{editing.round} G{editing.game}</div>
+      {/* SEASON */}
+      {tab==='season'&&<div>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14,flexWrap:'wrap',gap:8}}>
+          <h2 style={{fontFamily:FONT,fontSize:16,fontWeight:900,textTransform:'uppercase'}}>Season Tracker</h2>
+          <div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
+            {allContests.length>1&&<select value={seasonContest} onChange={e=>setSeasonContest(e.target.value)} style={{fontSize:11,padding:'5px 8px',background:S.s2,border:`1px solid ${S.bd}`,borderRadius:6,color:S.tx}}>{allContests.map(c=><option key={c} value={c}>{c==='ALL'?'All Contests':c}</option>)}</select>}
+            <div style={{display:'flex',gap:2,background:S.s2,borderRadius:6,padding:2}}>
+              {[{id:'scoreboard',l:'Scoreboard'},{id:'players',l:'Players'},{id:'lineups',l:'Lineups'},{id:'standings',l:'Standings'}].map(v=><button key={v.id} onClick={()=>setSeasonView(v.id)} style={{fontSize:10,fontWeight:700,padding:'5px 10px',borderRadius:4,border:'none',cursor:'pointer',background:seasonView===v.id?'#22c55e':'transparent',color:seasonView===v.id?'#fff':S.mt}}>{v.l}</button>)}
+            </div>
+          </div>
         </div>
-        <button onClick={onClose} style={{border:"none",background:"transparent",color:"var(--color-text-tertiary)",fontSize:16,cursor:"pointer"}}>×</button>
-      </div>
-      {[
-        ["Goals","g"],["Assists","a"],["SOG","sog"],["Hits","hit"],
-        ["Blocks","blk"],["Takeaways","tk"],["Giveaways","give"],
-      ].map(([lab,k])=>(
-        <div key={k} style={row}>
-          <span style={label}>{lab}</span>
-          <input type="number" min={0} max={99} step={1} value={v[k]}
-            onChange={e=>update(k,parseInt(e.target.value)||0)}
-            style={inp}/>
+        {/* Grade Week — Auto fetch or manual paste */}
+        <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,padding:16,marginBottom:16}}>
+          <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:10,flexWrap:'wrap'}}>
+            <h3 style={{fontSize:13,fontWeight:700,margin:0}}>Grade Week</h3>
+            <select value={seasonWeek} onChange={e=>setSeasonWeek(+e.target.value)} style={{fontSize:12,padding:'6px 10px',background:S.s2,border:`1px solid ${S.bd}`,borderRadius:6,color:S.tx}}>
+              {Array.from({length:18},(_,i)=><option key={i+1} value={i+1}>Week {i+1}</option>)}</select>
+            <button onClick={async()=>{
+              try{
+                // Fetch player map from Sleeper (cache in localStorage)
+                let playerMap=null;const cached=localStorage.getItem('bb_sleeper_players');const cacheTime=localStorage.getItem('bb_sleeper_ts');
+                if(cached&&cacheTime&&Date.now()-parseInt(cacheTime)<86400000){playerMap=JSON.parse(cached);}
+                else{const pRes=await fetch('https://api.sleeper.app/v1/players/nfl');if(!pRes.ok)throw new Error('Failed to fetch players');playerMap=await pRes.json();
+                  localStorage.setItem('bb_sleeper_players',JSON.stringify(playerMap));localStorage.setItem('bb_sleeper_ts',String(Date.now()));}
+                // Fetch week stats
+                const sRes=await fetch(`https://api.sleeper.app/v1/stats/nfl/regular/2025/${seasonWeek}`);
+                if(!sRes.ok)throw new Error('Stats not available yet for Week '+seasonWeek);
+                const stats=await sRes.json();
+                // Build name->id map from Sleeper players
+                const nameToId={};Object.entries(playerMap).forEach(([id,p])=>{if(p&&p.full_name&&(p.position==='QB'||p.position==='RB'||p.position==='WR'||p.position==='TE'))nameToId[p.full_name.toLowerCase()]=id;});
+                // Calculate DK best ball scoring for each player
+                const ns={...scores};let count=0;
+                // Get all unique player names from drafts
+                const allNames=[...new Set(drafts.flatMap(d=>d.picks.map(p=>p.name)))];
+                allNames.forEach(name=>{const pid=nameToId[name.toLowerCase()];if(!pid)return;const s=stats[pid];if(!s)return;
+                  // DK Best Ball scoring
+                  let pts=0;
+                  pts+=(s.pass_yd||0)*0.04;pts+=(s.pass_td||0)*4;pts+=(s.pass_int||0)*-1;pts+=(s.pass_2pt||0)*2;
+                  pts+=(s.rush_yd||0)*0.1;pts+=(s.rush_td||0)*6;pts+=(s.rush_2pt||0)*2;
+                  pts+=(s.rec_yd||0)*0.1;pts+=(s.rec_td||0)*6;pts+=(s.rec||0)*1;pts+=(s.rec_2pt||0)*2;
+                  pts+=(s.fum_lost||0)*-1;
+                  // Bonuses
+                  if((s.pass_yd||0)>=300)pts+=3;if((s.rush_yd||0)>=100)pts+=3;if((s.rec_yd||0)>=100)pts+=3;
+                  if(pts>0||s.gp>0){if(!ns[name])ns[name]={};ns[name]['w'+seasonWeek]=Math.round(pts*100)/100;count++;}
+                });
+                saveScores(ns);alert(`Week ${seasonWeek} graded! ${count} players scored.`);
+              }catch(err){alert('Error: '+err.message+'. You can still paste scores manually below.');}
+            }} style={{fontSize:12,padding:'8px 18px',background:'linear-gradient(135deg,#3b82f6,#f59e0b)',color:'#fff',border:'none',borderRadius:6,fontWeight:700,cursor:'pointer'}}>
+              Fetch Week {seasonWeek} Scores
+            </button>
+            {Object.keys(scores).length>0&&<span style={{fontSize:10,color:'#22c55e'}}>{Object.keys(scores).length} players, {Math.max(...Object.values(scores).flatMap(s=>Object.keys(s).map(k=>parseInt(k.replace('w','')))))||0} weeks</span>}
+          </div>
+          <details style={{marginTop:8}}>
+            <summary style={{fontSize:11,color:S.mt,cursor:'pointer',marginBottom:8}}>Manual paste (backup method)</summary>
+            <p style={{fontSize:10,color:S.mt,marginBottom:6}}>Format: <b style={{color:S.tx}}>Player Name, Points</b> (one per line)</p>
+            <textarea value={scoresPaste} onChange={e=>setScoresPaste(e.target.value)} placeholder={"Bijan Robinson, 24.3\nJahmyr Gibbs, 18.1"} style={{width:'100%',minHeight:100,fontSize:11,padding:12,background:S.s2,border:`1px solid ${S.bd}`,borderRadius:8,color:S.tx,resize:'vertical',fontFamily:'monospace'}}/>
+            <div style={{display:'flex',gap:10,marginTop:8}}>
+              <button onClick={()=>{if(!scoresPaste.trim())return;const ns={...scores};const lines=scoresPaste.trim().split('\n');let count=0;
+                lines.forEach(line=>{const parts=line.split(',');if(parts.length>=2){const name=parts[0].trim();const pts=parseFloat(parts[1]);if(name&&!isNaN(pts)){if(!ns[name])ns[name]={};ns[name]['w'+seasonWeek]=pts;count++;}}});
+                saveScores(ns);setScoresPaste('');alert(`Loaded ${count} scores for Week ${seasonWeek}`);}} style={{fontSize:11,padding:'6px 14px',background:'#22c55e',color:'#fff',border:'none',borderRadius:6,fontWeight:700,cursor:'pointer'}}>Load Manual Scores</button>
+              <button onClick={()=>setScoresPaste('')} style={{fontSize:11,padding:'6px 14px',background:S.s2,color:S.mt,border:`1px solid ${S.bd}`,borderRadius:6,cursor:'pointer'}}>Clear</button>
+            </div>
+          </details>
+          {Object.keys(scores).length>0&&<button onClick={()=>{if(window.confirm('Clear ALL scores?')){saveScores({});}}} style={{fontSize:10,padding:'4px 10px',background:S.s2,color:'#ef4444',border:`1px solid ${S.bd}`,borderRadius:4,cursor:'pointer',marginTop:8}}>Reset All Scores</button>}
         </div>
-      ))}
-      <div style={{display:"flex",gap:8,marginTop:14,paddingTop:12,borderTop:"0.5px solid var(--color-border-tertiary)"}}>
-        <button onClick={()=>onSave(v)}
-          style={{padding:"7px 18px",fontSize:12,fontWeight:500,borderRadius:"var(--border-radius-md)",border:"none",background:"#10b981",color:"white",cursor:"pointer"}}>
-          Save
-        </button>
-        {editing.existing && <button onClick={onDelete}
-          style={{padding:"7px 14px",fontSize:12,fontWeight:500,borderRadius:"var(--border-radius-md)",border:"0.5px solid rgba(239,68,68,0.3)",background:"rgba(239,68,68,0.08)",color:"#ef4444",cursor:"pointer"}}>
-          Delete entry
-        </button>}
-        <button onClick={onClose}
-          style={{marginLeft:"auto",padding:"7px 14px",fontSize:12,borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-secondary)",background:"var(--color-background-secondary)",color:"var(--color-text-secondary)",cursor:"pointer"}}>
-          Cancel
-        </button>
-      </div>
-      {editing.existing && editing.existing._migrated && <div style={{marginTop:10,fontSize:10,color:"#f59e0b",padding:"6px 8px",background:"rgba(245,158,11,0.08)",borderRadius:4}}>
-        ⚠ This entry was migrated from legacy totals. Edit to split into real per-game entries.
+
+        {(()=>{
+          const maxWeek=Math.max(0,...Object.values(scores).flatMap(s=>Object.keys(s).map(k=>parseInt(k.replace('w','')))));
+          const weeks=Array.from({length:maxWeek},(_,i)=>i+1);
+          const seasonDrafts=seasonContest==='ALL'?drafts:drafts.filter(d=>d.tournament===seasonContest);
+          if(maxWeek===0)return <p style={{color:S.mt,fontSize:12}}>No scores loaded yet. Paste player scores above and click "Grade Week" to get started.</p>;
+
+          // SCOREBOARD: each draft team's weekly totals
+          if(seasonView==='scoreboard'){
+            const teamScores=seasonDrafts.map(d=>{const weekTotals={};let seasonTotal=0;
+              weeks.forEach(w=>{const wk='w'+w;
+                // Best ball: pick the best lineup — 1QB, 2RB, 3WR, 1TE, 1FLEX
+                const playerScores=d.picks.map(p=>({...p,pts:scores[p.name]?.[wk]||0}));
+                const byPos={QB:playerScores.filter(p=>p.pos==='QB').sort((a,b)=>b.pts-a.pts),RB:playerScores.filter(p=>p.pos==='RB').sort((a,b)=>b.pts-a.pts),
+                  WR:playerScores.filter(p=>p.pos==='WR').sort((a,b)=>b.pts-a.pts),TE:playerScores.filter(p=>p.pos==='TE').sort((a,b)=>b.pts-a.pts)};
+                const starters=[...byPos.QB.slice(0,1),...byPos.RB.slice(0,2),...byPos.WR.slice(0,3),...byPos.TE.slice(0,1)];
+                const flexPool=[...byPos.RB.slice(2),...byPos.WR.slice(3),...byPos.TE.slice(1)].sort((a,b)=>b.pts-a.pts);
+                if(flexPool.length>0)starters.push(flexPool[0]);
+                const total=starters.reduce((s,p)=>s+p.pts,0);weekTotals[w]=total;seasonTotal+=total;});
+              return{name:d.name,id:d.id,seat:d.draftPosition,tournament:d.tournament,weekTotals,seasonTotal};}).sort((a,b)=>b.seasonTotal-a.seasonTotal);
+            return(<div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,overflow:'hidden'}}><div style={{overflowX:'auto'}}>
+              <table style={{width:'100%',borderCollapse:'collapse',fontSize:11}}>
+                <thead><tr style={{background:S.s2}}><th style={{padding:'6px 10px',textAlign:'left',fontWeight:700,color:S.mt,fontSize:10,position:'sticky',left:0,background:S.s2}}>Team</th>
+                  {weeks.map(w=><th key={w} style={{padding:'6px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:9}}>W{w}</th>)}
+                  <th style={{padding:'6px 10px',textAlign:'center',fontWeight:700,color:'#22c55e',fontSize:10}}>Total</th></tr></thead>
+                <tbody>{teamScores.map((ts,i)=><tr key={i} onClick={()=>{const d=drafts.find(x=>x.id===ts.id);if(d)setSelD(d);}} style={{borderBottom:'1px solid #334155',cursor:'pointer'}}>
+                  <td style={{padding:'5px 10px',fontWeight:600,fontSize:11,position:'sticky',left:0,background:S.s1,whiteSpace:'nowrap'}}>{ts.name}<span style={{fontSize:9,color:S.mt,marginLeft:4}}>S{ts.seat}</span></td>
+                  {weeks.map(w=><td key={w} style={{padding:'5px',textAlign:'center',fontSize:10,color:ts.weekTotals[w]>100?'#22c55e':ts.weekTotals[w]>0?S.tx:S.mt}}>{ts.weekTotals[w]>0?ts.weekTotals[w].toFixed(1):'—'}</td>)}
+                  <td style={{padding:'5px 10px',textAlign:'center',fontWeight:800,color:'#22c55e',fontSize:12}}>{ts.seasonTotal.toFixed(1)}</td>
+                </tr>)}</tbody></table></div></div>);
+          }
+
+          // PLAYERS: individual player weekly scores + boom/doom
+          if(seasonView==='players'){
+            const allMyPlayers=[...new Set(seasonDrafts.flatMap(d=>d.picks.map(p=>p.name)))];
+            const playerData=allMyPlayers.map(name=>{const pick=seasonDrafts.flatMap(d=>d.picks).find(p=>p.name===name);
+              const weekPts=weeks.map(w=>scores[name]?.['w'+w]||0);const total=weekPts.reduce((s,v)=>s+v,0);const gp=weekPts.filter(v=>v>0).length;
+              const avg=gp>0?total/gp:0;const booms=weekPts.filter(v=>v>=20).length;const dooms=weekPts.filter(v=>v>0&&v<5).length;
+              return{name,pos:pick?.pos||'?',team:pick?.team||'?',weekPts,total,avg,gp,booms,dooms};}).filter(p=>p.gp>0).sort((a,b)=>b.total-a.total);
+            return(<div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,overflow:'hidden'}}><div style={{overflowX:'auto'}}>
+              <table style={{width:'100%',borderCollapse:'collapse',fontSize:11}}>
+                <thead><tr style={{background:S.s2}}>
+                  <th style={{padding:'6px 10px',textAlign:'left',fontWeight:700,color:S.mt,fontSize:10,position:'sticky',left:0,background:S.s2}}>Player</th>
+                  <th style={{padding:'6px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10}}>Pos</th>
+                  {weeks.map(w=><th key={w} style={{padding:'6px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:9}}>W{w}</th>)}
+                  <th style={{padding:'6px',textAlign:'center',fontWeight:700,color:'#22c55e',fontSize:10}}>Tot</th>
+                  <th style={{padding:'6px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10}}>Avg</th>
+                  <th style={{padding:'6px',textAlign:'center',fontWeight:700,color:'#22c55e',fontSize:10}}>Boom</th>
+                  <th style={{padding:'6px',textAlign:'center',fontWeight:700,color:'#ef4444',fontSize:10}}>Doom</th>
+                </tr></thead>
+                <tbody>{playerData.slice(0,100).map((p,i)=><tr key={i} style={{borderBottom:'1px solid #334155'}}>
+                  <td style={{padding:'4px 10px',fontWeight:600,fontSize:10,position:'sticky',left:0,background:S.s1,whiteSpace:'nowrap'}}>{p.name}</td>
+                  <td style={{padding:'4px',textAlign:'center'}}><Pill pos={p.pos}/></td>
+                  {p.weekPts.map((pts,w)=><td key={w} style={{padding:'4px',textAlign:'center',fontSize:10,fontWeight:pts>=20?700:400,
+                    color:pts>=20?'#22c55e':pts>=10?S.tx:pts>0?'#d4a017':S.mt}}>{pts>0?pts.toFixed(1):'—'}</td>)}
+                  <td style={{padding:'4px',textAlign:'center',fontWeight:700,color:'#22c55e'}}>{p.total.toFixed(1)}</td>
+                  <td style={{padding:'4px',textAlign:'center',color:S.mt}}>{p.avg.toFixed(1)}</td>
+                  <td style={{padding:'4px',textAlign:'center',color:'#22c55e',fontWeight:700}}>{p.booms}</td>
+                  <td style={{padding:'4px',textAlign:'center',color:'#ef4444',fontWeight:700}}>{p.dooms}</td>
+                </tr>)}</tbody></table></div></div>);
+          }
+
+          // LINEUPS: for a selected week, show the auto-optimal best ball lineup per team
+          if(seasonView==='lineups'){
+            return(<div>
+              <div style={{display:'flex',gap:6,marginBottom:12,alignItems:'center'}}>
+                <span style={{fontSize:11,color:S.mt}}>Show lineups for:</span>
+                <select value={seasonWeek} onChange={e=>setSeasonWeek(+e.target.value)} style={{fontSize:12,padding:'6px 10px',background:S.s2,border:`1px solid ${S.bd}`,borderRadius:6,color:S.tx}}>
+                  {weeks.map(w=><option key={w} value={w}>Week {w}</option>)}</select>
+              </div>
+              <div style={{display:'flex',flexDirection:'column',gap:8}}>
+                {seasonDrafts.map((d,di)=>{const wk='w'+seasonWeek;
+                  const playerScores=d.picks.map(p=>({...p,pts:scores[p.name]?.[wk]||0}));
+                  const byPos2={QB:playerScores.filter(p=>p.pos==='QB').sort((a,b)=>b.pts-a.pts),RB:playerScores.filter(p=>p.pos==='RB').sort((a,b)=>b.pts-a.pts),
+                    WR:playerScores.filter(p=>p.pos==='WR').sort((a,b)=>b.pts-a.pts),TE:playerScores.filter(p=>p.pos==='TE').sort((a,b)=>b.pts-a.pts)};
+                  const starters=new Set();
+                  byPos2.QB.slice(0,1).forEach(p=>starters.add(p.name));byPos2.RB.slice(0,2).forEach(p=>starters.add(p.name));
+                  byPos2.WR.slice(0,3).forEach(p=>starters.add(p.name));byPos2.TE.slice(0,1).forEach(p=>starters.add(p.name));
+                  const flexPool=[...byPos2.RB.slice(2),...byPos2.WR.slice(3),...byPos2.TE.slice(1)].sort((a,b)=>b.pts-a.pts);
+                  if(flexPool.length>0)starters.add(flexPool[0].name);
+                  const total=playerScores.filter(p=>starters.has(p.name)).reduce((s,p)=>s+p.pts,0);
+                  return<div key={di} style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,padding:12}}>
+                    <div style={{display:'flex',justifyContent:'space-between',marginBottom:8}}>
+                      <span style={{fontWeight:700,fontSize:12}}>{d.name} <span style={{color:S.mt,fontSize:10}}>Seat {d.draftPosition}</span></span>
+                      <span style={{fontWeight:800,color:'#22c55e',fontSize:14}}>{total.toFixed(1)} pts</span></div>
+                    <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:4}}>
+                      {playerScores.sort((a,b)=>b.pts-a.pts).map((p,i)=><div key={i} style={{padding:'4px 6px',borderRadius:4,fontSize:10,
+                        background:starters.has(p.name)?'rgba(34,197,94,0.1)':'rgba(0,0,0,0.2)',border:starters.has(p.name)?'1px solid rgba(34,197,94,0.3)':`1px solid ${S.bd}`,opacity:starters.has(p.name)?1:0.5}}>
+                        <div style={{display:'flex',justifyContent:'space-between'}}><span><Pill pos={p.pos}/> <span style={{fontWeight:600}}>{p.name}</span></span>
+                          <span style={{fontWeight:700,color:p.pts>=20?'#22c55e':p.pts>0?S.tx:S.mt}}>{p.pts>0?p.pts.toFixed(1):'—'}</span></div>
+                        {starters.has(p.name)&&<span style={{fontSize:7,color:'#22c55e',fontWeight:700}}>STARTED</span>}
+                      </div>)}</div></div>;})}
+              </div></div>);
+          }
+
+          // STANDINGS: rank teams across all contests
+          if(seasonView==='standings'){
+            const allTeamScores=seasonDrafts.map(d=>{let total=0;
+              weeks.forEach(w=>{const wk='w'+w;const ps=d.picks.map(p=>({...p,pts:scores[p.name]?.[wk]||0}));
+                const bp={QB:ps.filter(p=>p.pos==='QB').sort((a,b)=>b.pts-a.pts),RB:ps.filter(p=>p.pos==='RB').sort((a,b)=>b.pts-a.pts),WR:ps.filter(p=>p.pos==='WR').sort((a,b)=>b.pts-a.pts),TE:ps.filter(p=>p.pos==='TE').sort((a,b)=>b.pts-a.pts)};
+                const st=[...bp.QB.slice(0,1),...bp.RB.slice(0,2),...bp.WR.slice(0,3),...bp.TE.slice(0,1)];
+                const fx=[...bp.RB.slice(2),...bp.WR.slice(3),...bp.TE.slice(1)].sort((a,b)=>b.pts-a.pts);if(fx.length>0)st.push(fx[0]);
+                total+=st.reduce((s,p)=>s+p.pts,0);});
+              return{name:d.name,tournament:d.tournament,seat:d.draftPosition,total,weekAvg:total/(maxWeek||1)};}).sort((a,b)=>b.total-a.total);
+            return(<div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,overflow:'hidden'}}>
+              <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+                <thead><tr style={{background:S.s2}}>
+                  <th style={{padding:'8px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10}}>Rank</th>
+                  <th style={{padding:'8px 10px',textAlign:'left',fontWeight:700,color:S.mt,fontSize:10}}>Team</th>
+                  <th style={{padding:'8px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10}}>Contest</th>
+                  <th style={{padding:'8px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10}}>Seat</th>
+                  <th style={{padding:'8px',textAlign:'center',fontWeight:700,color:'#22c55e',fontSize:10}}>Total Pts</th>
+                  <th style={{padding:'8px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:10}}>Wk Avg</th>
+                </tr></thead>
+                <tbody>{allTeamScores.map((ts,i)=><tr key={i} onClick={()=>{const d=drafts.find(x=>x.name===ts.name);if(d)setSelD(d);}} style={{borderBottom:'1px solid #334155',cursor:'pointer',background:i<3?'rgba(34,197,94,0.05)':'transparent'}}>
+                  <td style={{padding:'6px',textAlign:'center',fontWeight:700,color:i<3?'#22c55e':S.mt}}>{i+1}</td>
+                  <td style={{padding:'6px 10px',fontWeight:600}}>{ts.name}</td>
+                  <td style={{padding:'6px',textAlign:'center',color:S.mt,fontSize:11}}>{ts.tournament||'—'}</td>
+                  <td style={{padding:'6px',textAlign:'center'}}>{ts.seat}</td>
+                  <td style={{padding:'6px',textAlign:'center',fontWeight:800,color:'#22c55e'}}>{ts.total.toFixed(1)}</td>
+                  <td style={{padding:'6px',textAlign:'center',color:S.mt}}>{ts.weekAvg.toFixed(1)}</td>
+                </tr>)}</tbody></table></div>);
+          }
+          return null;
+        })()}
+      </div>}
+
+      {/* SETTINGS */}
+      {tab==='settings'&&<div><h2 style={{fontFamily:FONT,fontSize:16,fontWeight:900,textTransform:'uppercase',marginBottom:16}}>Settings</h2>
+        <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,padding:20,maxWidth:500,marginBottom:16}}>
+          <div style={{fontSize:12,color:S.mt,lineHeight:2}}>
+            <p>Drafts: <b style={{color:S.tx}}>{drafts.length}</b></p><p>Players drafted: <b style={{color:S.tx}}>{an.players.length}</b></p>
+            <p>ADP: <b style={{color:S.tx}}>{adpData.players.length} players, {adpData.dates.length} snapshots ({adpData.dates.join(', ')})</b></p></div></div>
+        {/* P&L Collapsible */}
+        <div style={{background:S.s1,border:`1px solid ${S.bd}`,borderRadius:10,overflow:'hidden',maxWidth:700}}>
+          <button onClick={()=>setShowPnl(!showPnl)} style={{width:'100%',padding:'14px 20px',background:'none',border:'none',display:'flex',justifyContent:'space-between',alignItems:'center',cursor:'pointer',color:S.tx}}>
+            <span style={{fontSize:13,fontWeight:700}}>P&L Tracker</span>
+            <span style={{fontSize:12,color:S.mt}}>{showPnl?'▲':'▼'}</span></button>
+          {showPnl&&<div style={{padding:'0 20px 20px'}}>
+            <p style={{fontSize:10,color:S.mt,marginBottom:12}}>Edit each draft to add entry fees and winnings.</p>
+            <div style={{display:'flex',gap:10,marginBottom:16,flexWrap:'wrap'}}>
+              {[{l:'Total Fees',v:`$${pnl.totalFees.toFixed(0)}`,c:'#ef4444'},{l:'Winnings',v:`$${pnl.totalWin.toFixed(0)}`,c:'#22c55e'},
+                {l:'Net P&L',v:`${pnl.net>=0?'+':''}$${pnl.net.toFixed(0)}`,c:pnl.net>=0?'#22c55e':'#ef4444'},{l:'ROI',v:pnl.totalFees>0?`${((pnl.net/pnl.totalFees)*100).toFixed(0)}%`:'—',c:pnl.net>=0?'#22c55e':'#ef4444'}
+              ].map(s=><div key={s.l} style={{background:S.s2,borderRadius:10,padding:'10px 14px',flex:'1 1 100px',textAlign:'center'}}>
+                <p style={{fontSize:8,color:S.mt,margin:0,textTransform:'uppercase',letterSpacing:1,fontWeight:600}}>{s.l}</p>
+                <p style={{fontFamily:FONT,fontSize:18,fontWeight:900,color:s.c,margin:'4px 0 0'}}>{s.v}</p></div>)}</div>
+            {pnl.byContest.length>0&&<div style={{border:`1px solid ${S.bd}`,borderRadius:8,overflow:'hidden'}}>
+              <table style={{width:'100%',borderCollapse:'collapse',fontSize:11}}>
+                <thead><tr style={{background:S.s2}}><th style={{padding:'6px 10px',textAlign:'left',fontWeight:700,color:S.mt,fontSize:9}}>Contest</th><th style={{padding:'6px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:9}}>#</th><th style={{padding:'6px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:9}}>Fees</th><th style={{padding:'6px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:9}}>Won</th><th style={{padding:'6px',textAlign:'center',fontWeight:700,color:S.mt,fontSize:9}}>Net</th></tr></thead>
+                <tbody>{pnl.byContest.map(([name,d])=>{const net=d.win-d.fees;return<tr key={name} style={{borderBottom:'1px solid #334155'}}>
+                  <td style={{padding:'5px 10px',fontWeight:600}}>{name}</td><td style={{padding:'5px',textAlign:'center'}}>{d.count}</td>
+                  <td style={{padding:'5px',textAlign:'center',color:'#ef4444'}}>${d.fees.toFixed(0)}</td><td style={{padding:'5px',textAlign:'center',color:'#22c55e'}}>${d.win.toFixed(0)}</td>
+                  <td style={{padding:'5px',textAlign:'center',fontWeight:700,color:net>=0?'#22c55e':'#ef4444'}}>{net>=0?'+':''}${net.toFixed(0)}</td></tr>;})}</tbody></table></div>}
+          </div>}
+        </div>
       </div>}
     </div>
-  </div>;
+
+    {selP&&<PlayerModal p={selP} drafts={drafts} pairs={an.pairs} adpDates={adpData.dates} onClose={()=>setSelP(null)} onOpenDraft={d=>setSelD(d)}/>}
+    {selD&&<DraftModal d={selD} adpPl={adpData.players} onClose={()=>setSelD(null)}/>}
+    {editD&&<EditModal d={editD} onSave={handleEditSave} onDelete={handleDeleteDraft} onClose={()=>setEditD(null)}/>}
+    {selFieldTeam&&<FieldTeamModal team={selFieldTeam} adpPl={adpData.players} onClose={()=>setSelFieldTeam(null)}/>}
+    {showBoard&&<MockDraftBoard adpPl={adpData.players} drafts={drafts} fieldPairs={an.fieldPairs} onClose={()=>setShowBoard(false)}/>}
+    {lsPlayer&&<LastSeasonPlayerModal p={lsPlayer} onClose={()=>setLsPlayer(null)}/>}
+    {millyEntry&&<MillyEntryModal entry={millyEntry} onClose={()=>setMillyEntry(null)}/>}
+  </div>);
 }
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// ROLES TAB
-// ═══════════════════════════════════════════════════════════════════════════════
-function RolesTab({players,setPlayers,dark}) {
-  const [filterTeam,setFilterTeam]=useState("ALL");
-  const [search,setSearch]=useState("");
-  const teams=players?[...new Set(players.map(p=>p.team))].sort():[];
-  const displayed=players?players.filter(p=>(filterTeam==="ALL"||p.team===filterTeam)&&(!search||p.name.toLowerCase().includes(search.toLowerCase()))):[];
-
-  function setRole(name,team,role){setPlayers(prev=>prev.map(p=>p.name===name&&p.team===team?{...p,lineRole:role}:p));}
-  function bulkSet(role){if(!filterTeam||filterTeam==="ALL")return;setPlayers(prev=>prev.map(p=>p.team===filterTeam?{...p,lineRole:role}:p));}
-
-  if(!players) return <Card><div style={{color:"var(--color-text-secondary)",fontSize:12,padding:8}}>Load player data first</div></Card>;
-
-  const ALL_ROLES=["TOP6","MID6","BOT6","ACTIVE","D1","D2","D3","STARTER","BACKUP","SCRATCHED"];
-
-  return <div>
-    <Card style={{marginBottom:12}}>
-      <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
-        <input placeholder="Search…" value={search} onChange={e=>setSearch(e.target.value)}
-          style={{padding:"5px 10px",fontSize:12,background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",color:"var(--color-text-primary)",width:180}}/>
-        <select value={filterTeam} onChange={e=>setFilterTeam(e.target.value)} style={SEL}>
-          <option value="ALL" style={{background:dark?"#131625":"#fff",color:dark?"#e7e9ee":"#0f172a"}}>All Teams</option>
-          {teams.map(t=><option key={t} value={t} style={{background:dark?"#131625":"#fff",color:dark?"#e7e9ee":"#0f172a"}}>{t} – {TEAM_NAMES[t]}</option>)}
-        </select>
-        {filterTeam!=="ALL"&&<>
-          <span style={{fontSize:10,color:"var(--color-text-secondary)"}}>Bulk (all positions):</span>
-          {["SCRATCHED"].map(r=><button key={r} onClick={()=>bulkSet(r)} style={{padding:"3px 8px",fontSize:9,borderRadius:3,border:"none",cursor:"pointer",fontWeight:500,background:`${roleColor(r)}20`,color:roleColor(r)}}>→{r}</button>)}
-        </>}
-        <div style={{marginLeft:"auto",display:"flex",gap:4,flexWrap:"wrap"}}>
-          {ALL_ROLES.map(r=>{const cnt=players.filter(p=>p.lineRole===r).length;if(!cnt)return null;const c=roleColor(r);return <div key={r} style={{fontSize:9,padding:"2px 7px",borderRadius:3,background:`${c}20`,color:c,fontWeight:500}}>{r}: {cnt}</div>;})}
-        </div>
-      </div>
-      <div style={{marginTop:8,fontSize:10,color:"var(--color-text-tertiary)"}}>
-        <strong style={{color:"#10b981"}}>F:</strong> TOP6 ×1.2, BOT6 ×0.75 &nbsp;|&nbsp;
-        <strong style={{color:"#3b82f6"}}>D:</strong> D1 ×1.15, D2 ×1.0, D3 ×0.75 &nbsp;|&nbsp;
-        <strong style={{color:"#a78bfa"}}>G:</strong> STARTER/BACKUP excluded from skater markets &nbsp;|&nbsp;
-        SCRATCHED ×0
-      </div>
-    </Card>
-
-    <Card>
-      <div style={{overflowX:"auto"}}>
-        <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-          <TH cols={["Player","Team","Pos","GP","G","A","PTS","SOG","HIT","BLK","Role","pGP","pG","pA","pSOG","pHIT","pBLK","pTK","pTSA","pGV"]}/>
-          <tbody>{displayed.slice(0,300).map((p,i)=>{
-            const roles=rolesForPos(p.pos);
-            const curRole=p.lineRole||roles[0];
-            return (
-            <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",
-              background:p.lineRole==="SCRATCHED"?(dark?"rgba(239,68,68,0.06)":"rgba(239,68,68,0.04)"):i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)")}}>
-              <td style={{padding:"3px 8px",opacity:p.lineRole==="SCRATCHED"?0.45:1}}>
-                {p.name}
-                {(p.pG||p.pA) ? <span style={{marginLeft:8,fontSize:9,padding:"1px 5px",borderRadius:3,background:"rgba(34,197,94,0.15)",color:"#4ade80",fontFamily:"var(--font-mono)"}} title="Current playoff G-A-Pts">
-                  {p.pG||0}G-{p.pA||0}A
-                </span> : null}
-              </td>
-              <td style={{padding:"3px 8px",textAlign:"right"}}><span style={{fontSize:9,padding:"1px 4px",borderRadius:2,background:"rgba(59,130,246,0.12)",color:"#60a5fa"}}>{p.team}</span></td>
-              <td style={{padding:"3px 8px",textAlign:"right",color:"var(--color-text-secondary)"}}>{p.pos}</td>
-              {["gp","g","a","pts","sog","hit","blk"].map(f=><td key={f} style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{Math.round(p[f]||0)}</td>)}
-              <td style={{padding:"3px 6px",textAlign:"right"}}>
-                <select value={curRole} onChange={e=>setRole(p.name,p.team,e.target.value)}
-                  style={{fontSize:9,padding:"2px 4px",background:`${roleColor(curRole)}18`,border:`0.5px solid ${roleColor(curRole)}`,borderRadius:3,color:roleColor(curRole),fontWeight:500}}>
-                  {roles.map(r=><option key={r} value={r} style={{background:dark?"#131625":"#fff",color:dark?"#e7e9ee":"#0f172a"}}>{r}</option>)}
-                </select>
-              </td>
-              {["pGP","pG","pA","pSOG","pHIT","pBLK","pTK","pTSA","pGIVE"].map(f=>(
-                <td key={f} style={{padding:"1px 3px"}}>
-                  <input type="number" value={p[f]||0} min={0} step={1}
-                    onChange={e=>setPlayers(prev=>prev.map(q=>q.name===p.name&&q.team===p.team?{...q,[f]:parseInt(e.target.value)||0}:q))}
-                    style={{width:32,fontSize:9,textAlign:"center",padding:"2px 2px",fontFamily:"var(--font-mono)",
-                      background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-primary)"}}/>
-                </td>
-              ))}
-            </tr>
-            );
-          })}
-          {displayed.length>300&&<tr><td colSpan={20} style={{padding:8,textAlign:"center",color:"var(--color-text-tertiary)",fontSize:10}}>Showing 300/{displayed.length} — filter by team</td></tr>}
-          </tbody>
-        </table>
-      </div>
-    </Card>
-  </div>;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// SETTINGS TAB
-// ═══════════════════════════════════════════════════════════════════════════════
-function SettingsTab({globals,setGlobals,margins,setMargins,showTrue,setShowTrue,showDec,setShowDec,doPush,doPull,doVerify,lastPushedAt,lastPulledAt,cloudInfo,syncStatus,dark}) {
-  // v52: Cloud sync config (URL, key, device label) lives in localStorage via getSbConfig/setSbConfig.
-  const [cfg, setCfg] = useState(() => getSbConfig());
-  const [status, setStatus] = useState(null);
-  const [verifyReport, setVerifyReport] = useState(null);
-  const saveCfg = (patch) => { const next = {...cfg, ...patch}; setCfg(next); setSbConfig(next); };
-  const pushNow = async () => {
-    setStatus({kind:"info",msg:"Pushing…"});
-    const r = await doPush();
-    if (r.ok && r.sizes) {
-      const total = Object.values(r.sizes).reduce((a,b)=>a+(b||0),0);
-      setStatus({kind:"ok",msg:`Pushed at ${new Date(r.at).toLocaleTimeString()} · ${(total/1024).toFixed(1)} KB total`});
-    } else {
-      setStatus(r.ok ? {kind:"ok",msg:`Pushed at ${new Date(r.at).toLocaleTimeString()}`} : {kind:"err",msg:r.error});
-    }
-  };
-  const pullNow = async () => {
-    if (!window.confirm("Pull from cloud will OVERWRITE your current local state with the latest cloud copy. Continue?")) return;
-    setStatus({kind:"info",msg:"Pulling…"});
-    const r = await doPull();
-    if (r.ok && r.diag) {
-      // Show a compact report of what was pulled
-      const missing = Object.entries(r.diag).filter(([_,v])=>v.includes("missing")||v.includes("null")).map(([k])=>k);
-      let msg = `Pulled from ${r.device||"?"} (${r.cloudAt?new Date(r.cloudAt).toLocaleString():"unknown time"})`;
-      if (missing.length>0) msg += ` · ⚠ MISSING: ${missing.join(", ")}`;
-      setStatus({kind: missing.length>0 ? "err" : "ok", msg});
-      setVerifyReport(r.diag);
-    } else {
-      setStatus(r.ok ? {kind:"ok",msg:`Pulled cloud state`} : {kind:"err",msg:r.error});
-    }
-  };
-  const verifyNow = async () => {
-    setStatus({kind:"info",msg:"Verifying cloud contents…"});
-    const r = await doVerify();
-    if (r.ok) {
-      setVerifyReport(r.report);
-      setStatus({kind:"ok",msg:"Cloud inspection complete — see report below"});
-    } else {
-      setStatus({kind:"err",msg:r.error});
-    }
-  };
-  const fmtTime = (iso) => {
-    if (!iso) return "never";
-    try { const d = new Date(iso); return d.toLocaleString(); } catch { return "?"; }
-    };
-  const minutesAgo = (iso) => {
-    if (!iso) return null;
-    try { return Math.round((Date.now() - new Date(iso).getTime()) / 60000); } catch { return null; }
-  };
-  const cloudNewer = cloudInfo && lastPulledAt && new Date(cloudInfo.updated_at) > new Date(lastPulledAt);
-  const enabled = isSbEnabled();
-  return (
-    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:16,alignItems:"start"}}>
-      <Card>
-        <SH title="Global Controls"/>
-        {[{k:"overroundR1",l:"R1 Leader Overround",min:1,max:1.5,step:0.01},{k:"overroundFull",l:"Full Playoff Overround",min:1,max:1.5,step:0.01},{k:"powerFactor",l:"Power Factor",min:0.5,max:2,step:0.05},{k:"rateDiscount",l:"Rate Discount",min:0.5,max:1,step:0.01},{k:"dispersion",l:"NB Dispersion (r)",min:1,max:5,step:0.1}].map(({k,l,min,max,step})=>(
-          <div key={k} style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-            <label style={{fontSize:11,color:"var(--color-text-secondary)"}}>{l}</label>
-            <LazyNI value={globals[k]} onCommit={v=>setGlobals(g=>({...g,[k]:v}))} min={min} max={max} step={step}/>
-          </div>
-        ))}
-        <div style={{marginTop:14,paddingTop:12,borderTop:"0.5px solid var(--color-border-tertiary)"}}>
-          <SH title="Display"/>
-          <div style={{display:"flex",flexDirection:"column",gap:8}}>
-            <Toggle label="Show true probabilities" checked={showTrue} onChange={setShowTrue}/>
-            <Toggle label="Show decimal odds" checked={showDec} onChange={setShowDec}/>
-          </div>
-        </div>
-      </Card>
-
-      <Card>
-        <SH title="Market Margins"/>
-        {Object.entries(margins).map(([k,v])=>(
-          <div key={k} style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-            <label style={{fontSize:11,color:"var(--color-text-secondary)",textTransform:"capitalize"}}>{k.replace(/([A-Z])/g," $1")}</label>
-            <LazyNI value={v} onCommit={nv=>setMargins(m=>({...m,[k]:nv}))} min={1} max={3} step={0.01} style={{width:58}}/>
-          </div>
-        ))}
-      </Card>
-
-      <Card>
-        <SH title="Cloud Sync (Push / Pull)"/>
-        {/* Config */}
-        <div style={{marginBottom:10}}>
-          <label style={{fontSize:10,color:"var(--color-text-secondary)",display:"block",marginBottom:2}}>Supabase URL</label>
-          <input type="text" value={cfg.url||""} onChange={e=>saveCfg({url:e.target.value})} placeholder="https://xxxxx.supabase.co"
-            style={{width:"100%",padding:"5px 8px",fontSize:11,fontFamily:"var(--font-mono)",background:"var(--color-background-secondary)",
-              border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",color:"var(--color-text-primary)",boxSizing:"border-box"}}/>
-        </div>
-        <div style={{marginBottom:10}}>
-          <label style={{fontSize:10,color:"var(--color-text-secondary)",display:"block",marginBottom:2}}>Anon Public Key</label>
-          <input type="password" value={cfg.key||""} onChange={e=>saveCfg({key:e.target.value})} placeholder="eyJhbGc..."
-            style={{width:"100%",padding:"5px 8px",fontSize:11,fontFamily:"var(--font-mono)",background:"var(--color-background-secondary)",
-              border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",color:"var(--color-text-primary)",boxSizing:"border-box"}}/>
-        </div>
-        <div style={{marginBottom:12}}>
-          <label style={{fontSize:10,color:"var(--color-text-secondary)",display:"block",marginBottom:2}}>Device Label (e.g. "laptop", "phone")</label>
-          <input type="text" value={cfg.device||""} onChange={e=>saveCfg({device:e.target.value})} placeholder="laptop"
-            style={{width:"100%",padding:"5px 8px",fontSize:11,background:"var(--color-background-secondary)",
-              border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",color:"var(--color-text-primary)",boxSizing:"border-box"}}/>
-        </div>
-
-        {/* Actions */}
-        <div style={{display:"flex",gap:8,marginBottom:10}}>
-          <button onClick={pushNow} disabled={!enabled||syncStatus==="syncing"}
-            style={{flex:1,padding:"8px 12px",fontSize:12,fontWeight:500,borderRadius:"var(--border-radius-md)",border:"none",
-              background:enabled?"#1d4ed8":"rgba(100,116,139,0.2)",color:enabled?"#fff":"var(--color-text-tertiary)",
-              cursor:enabled&&syncStatus!=="syncing"?"pointer":"not-allowed"}}>
-            ⬆ Push to Cloud
-          </button>
-          <button onClick={pullNow} disabled={!enabled||syncStatus==="syncing"}
-            style={{flex:1,padding:"8px 12px",fontSize:12,fontWeight:500,borderRadius:"var(--border-radius-md)",border:"none",
-              background:enabled?"#7c3aed":"rgba(100,116,139,0.2)",color:enabled?"#fff":"var(--color-text-tertiary)",
-              cursor:enabled&&syncStatus!=="syncing"?"pointer":"not-allowed"}}>
-            ⬇ Pull from Cloud
-          </button>
-        </div>
-        <div style={{marginBottom:10}}>
-          <button onClick={verifyNow} disabled={!enabled||syncStatus==="syncing"}
-            style={{width:"100%",padding:"6px 12px",fontSize:11,fontWeight:500,borderRadius:"var(--border-radius-md)",
-              background:"transparent",border:`0.5px solid ${enabled?"#6b7280":"rgba(100,116,139,0.2)"}`,
-              color:enabled?"var(--color-text-secondary)":"var(--color-text-tertiary)",
-              cursor:enabled&&syncStatus!=="syncing"?"pointer":"not-allowed"}}>
-            🔍 Verify (check what's in cloud without overwriting)
-          </button>
-        </div>
-
-        {/* Verify/Pull report */}
-        {verifyReport && <div style={{padding:"8px 10px",fontSize:10,borderRadius:"var(--border-radius-md)",marginBottom:8,
-          background:"var(--color-background-secondary)",fontFamily:"var(--font-mono)"}}>
-          <div style={{fontSize:10,color:"var(--color-text-secondary)",marginBottom:4,fontFamily:"var(--font-sans)",fontWeight:500}}>Cloud contents report:</div>
-          {Object.entries(verifyReport).map(([k,v])=>(
-            <div key={k} style={{display:"flex",gap:6,marginBottom:2,
-              color:v.includes("MISSING")||v.includes("null")||v.includes("len=0")||v.includes("keys=0")?"#f87171":"var(--color-text-tertiary)"}}>
-              <span style={{minWidth:80,color:"var(--color-text-secondary)"}}>{k}:</span>
-              <span>{v}</span>
-            </div>
-          ))}
-        </div>}
-
-        {/* Status lines */}
-        {status && <div style={{padding:"6px 10px",fontSize:11,borderRadius:"var(--border-radius-md)",marginBottom:8,
-          background:status.kind==="ok"?"rgba(34,197,94,0.12)":status.kind==="err"?"rgba(239,68,68,0.12)":"rgba(59,130,246,0.12)",
-          color:status.kind==="ok"?"#4ade80":status.kind==="err"?"#f87171":"#60a5fa"}}>{status.msg}</div>}
-
-        <div style={{fontSize:10,color:"var(--color-text-tertiary)",lineHeight:1.7,padding:"8px 10px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",marginBottom:10}}>
-          <div><strong style={{color:"var(--color-text-secondary)"}}>Last pushed:</strong> {fmtTime(lastPushedAt)}{minutesAgo(lastPushedAt)!=null?` (${minutesAgo(lastPushedAt)}m ago)`:""}</div>
-          <div><strong style={{color:"var(--color-text-secondary)"}}>Last pulled:</strong> {fmtTime(lastPulledAt)}{minutesAgo(lastPulledAt)!=null?` (${minutesAgo(lastPulledAt)}m ago)`:""}</div>
-          {cloudInfo && <div><strong style={{color:"var(--color-text-secondary)"}}>Cloud latest:</strong> {fmtTime(cloudInfo.updated_at)} from <em>{cloudInfo.device||"?"}</em></div>}
-          {cloudNewer && <div style={{marginTop:4,color:"#f59e0b",fontWeight:500}}>⚠ Cloud is newer than your last Pull — consider pulling</div>}
-        </div>
-
-        {/* Setup notes */}
-        <details style={{marginTop:8}}>
-          <summary style={{cursor:"pointer",fontSize:10,color:"var(--color-text-tertiary)"}}>One-time setup instructions</summary>
-          <div style={{fontSize:10,color:"var(--color-text-tertiary)",lineHeight:1.9,padding:"8px 10px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",marginTop:6}}>
-            <div style={{marginBottom:4}}>1. Create a free project at <strong>supabase.com</strong></div>
-            <div style={{marginBottom:4}}>2. SQL Editor → run:</div>
-            <pre style={{margin:"4px 0 8px",padding:"6px 8px",background:"var(--color-background-primary)",borderRadius:4,fontSize:9,overflowX:"auto",border:"0.5px solid var(--color-border-tertiary)"}}>
-{`CREATE TABLE pricer_state (
-  key TEXT PRIMARY KEY,
-  value JSONB,
-  device TEXT,
-  updated_at TIMESTAMPTZ
-);
-ALTER TABLE pricer_state ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "anon_rw" ON pricer_state
-  FOR ALL TO anon USING (true) WITH CHECK (true);`}
-            </pre>
-            <div style={{marginBottom:4}}>3. Settings → API → copy <strong>Project URL</strong> and <strong>anon public</strong> key</div>
-            <div style={{marginBottom:4}}>4. Paste into the fields above. Device label is optional — helps identify which device last pushed.</div>
-            <div style={{marginTop:8,paddingTop:8,borderTop:"0.5px solid var(--color-border-tertiary)",color:"#60a5fa"}}>
-              <strong>Roadmap:</strong> Auto-sync (cloud-first with conflict resolution) is a future goal once the Push/Pull workflow is validated in practice.
-            </div>
-          </div>
-        </details>
-      </Card>
-    </div>
-  );
-}
-
-export default AppRoot;
