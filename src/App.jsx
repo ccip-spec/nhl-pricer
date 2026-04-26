@@ -876,15 +876,23 @@ function dispersionFor(stat, globalDispersion) {
 
 function applyMargin(trueProbs, or) {
   const s = trueProbs.reduce((a, b) => a + b, 0);
-  // v59: if the market has collapsed to essentially a single outcome (others are 0),
-  //      don't inflate that outcome to full OR — that produces impossible probabilities.
-  //      Instead, apply a minimal juice: cap the surviving outcome at some reasonable edge
-  //      over true probability. This matches reality: when a market is "lock-in," books
-  //      offer roughly -5000 to -20000 (94-99.5%) for near-certain outcomes, not impossibilities.
+  // v64: apply per-outcome juice (rather than total-overround spread) in cases where
+  //      the standard p/sum × OR formula misprices reduced markets.
+  //      Two triggers, both meaning "this market is heavily concentrated / reduced":
+  //        (a) Single surviving outcome — overround would push prob to OR > 1
+  //        (b) One outcome > 50% — overround inflates the favorite past true prob
+  //        (c) Market collapsed: <= 1/3 of original outcomes survive (e.g., series-clinch
+  //            reduces a 70-way market to a single path; series partial-clinch reduces to
+  //            a handful). Forces per-outcome juice rather than artificial concentration.
+  //      Per-outcome juice: each surviving prob × (1 + edge), capped at 0.995.
+  //      Aligns prices across markets that resolve to the same underlying event (length=N,
+  //      exact-score, win-order matching path, spread covering one outcome).
   const surviving = trueProbs.filter(p => p > 0.001);
-  if (surviving.length === 1 && s > 0) {
-    // Single outcome — price at true prob × small juice (cap at 0.995 to avoid division-by-zero in toDec)
-    const edge = Math.min(or - 1, 0.05);  // 5% juice cap on single-outcome markets
+  const maxProb = Math.max(0, ...surviving);
+  const heavyReduction = trueProbs.length > 0 && surviving.length > 0 && surviving.length <= Math.max(1, Math.ceil(trueProbs.length / 3));
+  const useJuice = s > 0 && (surviving.length === 1 || maxProb > 0.50 || heavyReduction);
+  if (useJuice) {
+    const edge = Math.min(or - 1, 0.05);
     return trueProbs.map(p => p > 0.001 ? Math.min(0.995, p * (1 + edge)) : 0);
   }
   return trueProbs.map(p => s > 0 ? (p / s) * or : 0);
@@ -894,7 +902,11 @@ function applyMargin(trueProbs, or) {
 // Problem with naive (p/sum * or): if favorite has raw 0.7, OR=1.5 → 1.05 (impossible).
 // Solution: cap each player at MAX_PROB, redistribute any overflow proportionally to the remaining field.
 // This mimics how books actually juice leader markets: favorite moves a little, the tail pays the margin.
-function applyLeaderOverround(rawProbs, powerFactor, overround, MAX_PROB = 0.90) {
+function applyLeaderOverround(rawProbs, powerFactor, overround, MAX_PROB = 0.95) {
+  // v65: bumped MAX_PROB from 0.90 → 0.95. The cap exists to prevent impossible-probability outputs
+  //      when overround pushes a favorite past 1.0, but 0.90 was too tight — high temp values would
+  //      hit the cap and become "inert" (changing temp didn't move the favorite). 0.95 gives the
+  //      knob more travel room while still preventing genuinely impossible probabilities.
   const pf = powerFactor || 1.0;
   const or = overround || 1.0;
   const powered = rawProbs.map(p => Math.pow(Math.max(0, p), pf));
@@ -2804,7 +2816,7 @@ function AppInner() {
           leaderMarket={leaderMarket} STATS={STATS} lStat={lStat} setLStat={setLStat}
           lScope={lScope} setLScope={setLScope} lTopN={lTopN} setLTopN={setLTopN}
           showTrue={showTrue} setShowTrue={setShowTrue} showDec={showDec} dark={dark}
-          allSeries={seriesForRound} simResultsBySeries={simResultsBySeries}
+          allSeries={seriesForRound} allSeriesByRound={allSeries} simResultsBySeries={simResultsBySeries}
           autoR1ByTeam={autoR1ByTeam} autoConfByTeam={autoConfByTeamFinal} autoCupByTeam={autoCupByTeamFinal}
           currentRound={currentRound} setCurrentRound={setCurrentRound}
           linemates={linemates}/>}
@@ -3284,7 +3296,7 @@ function LazyNI({value, onCommit, min, max, step=0.01, style={}, tabIndex, showS
   </span>;
 }
 
-function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdvancement,globals,setGlobals,leaderMarket,STATS,lStat,setLStat,lScope,setLScope,lTopN,setLTopN,showTrue,setShowTrue,showDec,dark,allSeries,simResultsBySeries,autoR1ByTeam,autoConfByTeam,autoCupByTeam,currentRound,setCurrentRound,linemates}) {
+function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdvancement,globals,setGlobals,leaderMarket,STATS,lStat,setLStat,lScope,setLScope,lTopN,setLTopN,showTrue,setShowTrue,showDec,dark,allSeries,allSeriesByRound,simResultsBySeries,autoR1ByTeam,autoConfByTeam,autoCupByTeam,currentRound,setCurrentRound,linemates}) {
   const [showR1,setShowR1]=useState(false);
   const [showAdv,setShowAdv]=useState(false);
   // v39: advancement table entry mode — "prob" (0..1) or "decimal" (decimal odds, 1.01..)
@@ -3292,6 +3304,45 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
   const [filterTeam,setFilterTeam]=useState("ALL");
   const teams=[...new Set(leaderMarket.map(p=>p.team))].sort();
   const displayed=filterTeam==="ALL"?leaderMarket:leaderMarket.filter(p=>p.team===filterTeam);
+
+  // v63: derive elimination state from played series across all rounds.
+  // A team is "eliminated" if any of their series in any round shows the OTHER team reaching 4 wins.
+  const eliminatedTeams = useMemo(()=>{
+    const out = new Set();
+    if (!allSeriesByRound) return out;
+    for (const round of ["r1","r2","r3","f"]) {
+      const arr = allSeriesByRound[round] || [];
+      for (const s of arr) {
+        if (!s || !s.homeAbbr || !s.awayAbbr) continue;
+        let hw = 0, aw = 0;
+        for (const g of (s.games||[])) {
+          if (g.result === "home") hw++;
+          else if (g.result === "away") aw++;
+        }
+        if (hw === 4) out.add(s.awayAbbr);
+        else if (aw === 4) out.add(s.homeAbbr);
+      }
+    }
+    return out;
+  }, [allSeriesByRound]);
+
+  // v63: when a team gets eliminated, zero their advancement probs and lock them as MANUAL=true
+  // so downstream consumers (full-playoff leader markets, etc.) treat them as cup=conf=R1=0.
+  useEffect(()=>{
+    if (!eliminatedTeams || eliminatedTeams.size === 0) return;
+    setAdvancement(prev => {
+      let changed = false;
+      const next = {...prev};
+      for (const t of eliminatedTeams) {
+        const cur = prev[t] || {winR1:0.5,winConf:0.25,winCup:0.1,manualR1:false,manualConf:false,manualCup:false};
+        // Already zeroed and locked? skip
+        if (cur.winR1 === 0 && cur.winConf === 0 && cur.winCup === 0 && cur.manualR1 && cur.manualConf && cur.manualCup) continue;
+        next[t] = {...cur, winR1: 0, winConf: 0, winCup: 0, manualR1: true, manualConf: true, manualCup: true};
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [eliminatedTeams, setAdvancement]);
 
   function updM(idx,f,v){setMatchups(prev=>{const u=[...prev];u[idx]={...u[idx],[f]:v};
     if(f==="homeWinPct"){const hw=v,aw=1-v;const p4=Math.pow(hw,4)+Math.pow(aw,4),p5=4*(Math.pow(hw,4)*aw+Math.pow(aw,4)*hw),p6=10*(Math.pow(hw,4)*aw*aw+Math.pow(aw,4)*hw*hw),p7=20*(Math.pow(hw,4)*aw*aw*aw+Math.pow(aw,4)*hw*hw*hw),tot=p4+p5+p6+p7;u[idx].expGames=tot>0?+((4*p4+5*p5+6*p6+7*p7)/tot).toFixed(2):5.82;}return u;});}
@@ -3446,11 +3497,26 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
               );
             };
             return (
-            <tr key={t} style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
-              <td style={{padding:"4px 8px",fontWeight:500}}>{t} <span style={{color:"var(--color-text-secondary)",fontWeight:400}}>{TEAM_NAMES[t]}</span></td>
-              <td style={{padding:"3px 6px",textAlign:"right"}}>{renderCell(r1Prob, autoR1!=null, useManR1, "winR1", "manualR1", "auto from Series Pricer", tabR1)}</td>
-              <td style={{padding:"3px 6px",textAlign:"right"}}>{renderCell(confProb, autoConf!=null, useManConf, "winConf", "manualConf", "chained R1 → R2 → R3 (sim or xG)", tabConf)}</td>
-              <td style={{padding:"3px 6px",textAlign:"right"}}>{renderCell(cupProb, autoCup!=null, useManCup, "winCup", "manualCup", "chained R1 → R2 → R3 → F (sim or xG)", tabCup)}</td>
+            <tr key={t} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",
+              background: eliminatedTeams.has(t) ? (dark?"rgba(239,68,68,0.06)":"rgba(239,68,68,0.04)") : "transparent",
+              opacity: eliminatedTeams.has(t) ? 0.6 : 1}}>
+              <td style={{padding:"4px 8px",fontWeight:500}}>
+                {t} <span style={{color:"var(--color-text-secondary)",fontWeight:400}}>{TEAM_NAMES[t]}</span>
+                {eliminatedTeams.has(t) && <span style={{marginLeft:8,fontSize:9,padding:"1px 6px",borderRadius:3,background:"rgba(239,68,68,0.18)",color:"#f87171",fontWeight:500,letterSpacing:0.3}}>ELIMINATED</span>}
+              </td>
+              {eliminatedTeams.has(t) ? (
+                <>
+                  <td colSpan={3} style={{padding:"3px 6px",textAlign:"right",fontSize:10,color:"var(--color-text-tertiary)",fontStyle:"italic"}}>
+                    Lost series · all advancement = 0
+                  </td>
+                </>
+              ) : (
+                <>
+                  <td style={{padding:"3px 6px",textAlign:"right"}}>{renderCell(r1Prob, autoR1!=null, useManR1, "winR1", "manualR1", "auto from Series Pricer", tabR1)}</td>
+                  <td style={{padding:"3px 6px",textAlign:"right"}}>{renderCell(confProb, autoConf!=null, useManConf, "winConf", "manualConf", "chained R1 → R2 → R3 (sim or xG)", tabConf)}</td>
+                  <td style={{padding:"3px 6px",textAlign:"right"}}>{renderCell(cupProb, autoCup!=null, useManCup, "winCup", "manualCup", "chained R1 → R2 → R3 → F (sim or xG)", tabCup)}</td>
+                </>
+              )}
             </tr>);})}</tbody>
         </table>
       </Card>}
@@ -3641,6 +3707,37 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
     gameEquivalents += p * scale;
   }
 
+  // v62: Realized scoring multiplier — adjust future player lambdas based on actual goals scored vs expected so far.
+  //   "off"      → no adjustment (default)
+  //   "combined" → uniform multiplier = realized_total/game ÷ expected_total/game (same for both teams)
+  //   "perTeam"  → separate multipliers for home and away teams, computed from each team's actual goals
+  // Multipliers clamped to [0.6, 1.4] to avoid wild swings on small samples (1-2 played games).
+  // Helps adapt to environments where goalies are hot/cold, or one team is shooting/converting unusually.
+  const realizedAdjMode = s.realizedAdjMode || "off";
+  const realizedAdj = useMemo(()=>{
+    if (realizedAdjMode === "off") return { home: 1.0, away: 1.0, combined: 1.0, gp: 0 };
+    let realizedHome = 0, realizedAway = 0, expectedTotal = 0, expectedHomeGoals = 0, expectedAwayGoals = 0, gp = 0;
+    for (const g of effG) {
+      if (!g.result) continue;
+      gp += 1;
+      realizedHome += Number(g.homeScore) || 0;
+      realizedAway += Number(g.awayScore) || 0;
+      // Expected per-game uses input expTotal split by goal-share formula
+      const total = g.expTotal || 5.82;
+      const goalShare = 0.5 + (g.winPct - 0.5) * 0.60;
+      expectedHomeGoals += total * goalShare;
+      expectedAwayGoals += total * (1 - goalShare);
+      expectedTotal += total;
+    }
+    if (gp === 0) return { home: 1.0, away: 1.0, combined: 1.0, gp: 0 };
+    const clamp = (x) => Math.max(0.6, Math.min(1.4, x));
+    const realizedTotal = realizedHome + realizedAway;
+    const home = expectedHomeGoals > 0 ? clamp(realizedHome / expectedHomeGoals) : 1.0;
+    const away = expectedAwayGoals > 0 ? clamp(realizedAway / expectedAwayGoals) : 1.0;
+    const combined = expectedTotal > 0 ? clamp(realizedTotal / expectedTotal) : 1.0;
+    return { home, away, combined, gp, realizedHome, realizedAway, expectedHomeGoals, expectedAwayGoals };
+  }, [effKey, realizedAdjMode]);
+
   // v23: player-team-aware gameEquivalents function.
   // For scoring stats, applies the per-game goalie-quality-faced multiplier.
   // For non-scoring, returns the scalar gameEquivalents.
@@ -3655,7 +3752,14 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
       const goalieMult = playerTeam===s.homeAbbr ? goalieQualityFaced[i].faceByHome
                        : playerTeam===s.awayAbbr ? goalieQualityFaced[i].faceByAway
                        : 1.0;
-      total += p * scale * goalieMult;
+      // v62: apply realized-scoring adjustment for player's team
+      let realizedMult = 1.0;
+      if (realizedAdjMode === "perTeam") {
+        realizedMult = playerTeam === s.homeAbbr ? realizedAdj.home : playerTeam === s.awayAbbr ? realizedAdj.away : 1.0;
+      } else if (realizedAdjMode === "combined") {
+        realizedMult = realizedAdj.combined;
+      }
+      total += p * scale * goalieMult * realizedMult;
     }
     return total;
   };
@@ -3788,9 +3892,17 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
     //      already sum to 1 naturally — pre-normalizing was redundant and broke single-outcome-collapse
     //      pricing (e.g., at 3-0, "4-0 exact" should be priced the same as "length = 4 games").
     //      Settled outcomes (impossible given realized games) get zeroed before applyMargin handles them.
+    // v64: when series is OVER, every row except the realized final score is impossible.
     const annotated = rows.map(o => {
       const [hw, aw] = o.k.split("-").map(Number);
-      const impossible = realized.hw > hw || realized.aw > aw;
+      let impossible;
+      if (realized.seriesOver) {
+        // Series done — only the actual final score row is alive
+        impossible = !(realized.hw === hw && realized.aw === aw);
+      } else {
+        // Series in progress — only impossible if we've already exceeded the win count for that side
+        impossible = realized.hw > hw || realized.aw > aw;
+      }
       return {...o, _settled: impossible, tp: impossible ? 0 : o.tp};
     });
     const adj=applyMargin(annotated.map(o=>o.tp),margins.eightWay);
@@ -4117,9 +4229,22 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
           nextContext = `Game ${gp+1} next · ${HOME_PATTERN[gp+1]?s.homeAbbr:s.awayAbbr} hosts`;
         }
         return <div style={{display:"flex",alignItems:"center",gap:14,padding:"10px 16px",marginBottom:14,
-          background:`${statusColor}14`, border:`0.5px solid ${statusColor}44`, borderRadius:"var(--border-radius-md)"}}>
+          background:`${statusColor}14`, border:`0.5px solid ${statusColor}44`, borderRadius:"var(--border-radius-md)",flexWrap:"wrap"}}>
           <div style={{fontSize:15,fontWeight:600,color:statusColor,letterSpacing:"0.02em"}}>{statusText}</div>
           <div style={{fontSize:11,color:"var(--color-text-tertiary)"}}>· {nextContext}</div>
+          {gp > 0 && (
+            <div style={{fontSize:11,color:"var(--color-text-tertiary)",marginLeft:"auto"}}>
+              <span style={{color:"var(--color-text-secondary)"}}>{s.homeAbbr} {realized.goalsH}</span>
+              <span style={{margin:"0 4px"}}>·</span>
+              <span style={{color:"var(--color-text-secondary)"}}>{s.awayAbbr} {realized.goalsA}</span>
+              <span style={{margin:"0 6px"}}>·</span>
+              <span>Total: <span style={{color:"var(--color-text-secondary)",fontFamily:"var(--font-mono)"}}>{realized.goalsH + realized.goalsA}</span> ({((realized.goalsH+realized.goalsA)/gp).toFixed(2)}/g)</span>
+              {realized.shutouts>0 && <span style={{margin:"0 6px"}}>·</span>}
+              {realized.shutouts>0 && <span>Shutouts: {realized.shutouts}</span>}
+              {realized.otGames>0 && <span style={{margin:"0 6px"}}>·</span>}
+              {realized.otGames>0 && <span>OT: {realized.otGames}</span>}
+            </div>
+          )}
         </div>;
       })()}
 
@@ -4274,6 +4399,22 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
                 <label style={{color:"var(--color-text-secondary)",display:"flex",gap:4,alignItems:"center"}}>
                   Goal shift: <LazyNI value={s.winnerGoalShift??0.15} onCommit={v=>updS("winnerGoalShift",v)} min={0} max={0.4} step={0.01} style={{width:44}} showSpinner={false}/>
                 </label>
+                {/* v62: Realized-scoring adjustment toggle */}
+                <label style={{color:"var(--color-text-secondary)",display:"flex",gap:4,alignItems:"center"}} title="Adjusts future player goal lambdas based on realized scoring vs expected so far. Helps match book lines when goalies are hot/cold or scoring is way off baseline.">
+                  Realized adj:
+                  <select value={s.realizedAdjMode||"off"} onChange={e=>updS("realizedAdjMode",e.target.value)}
+                    style={{fontSize:10,padding:"2px 4px",borderRadius:3,background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",color:"var(--color-text-primary)"}}>
+                    <option value="off">Off</option>
+                    <option value="combined">Combined</option>
+                    <option value="perTeam">Per-team</option>
+                  </select>
+                </label>
+                {realizedAdjMode!=="off" && realizedAdj.gp>0 && (
+                  <span style={{fontSize:9,color:"var(--color-text-tertiary)",fontFamily:"var(--font-mono)"}}>
+                    {realizedAdjMode==="combined" ? `×${realizedAdj.combined.toFixed(2)}` :
+                      `${s.homeAbbr||"H"}×${realizedAdj.home.toFixed(2)} ${s.awayAbbr||"A"}×${realizedAdj.away.toFixed(2)}`}
+                  </span>
+                )}
                 <button onClick={()=>setAllSeries(p=>{const u=[...p];u[safeSi]={...u[safeSi],games:u[safeSi].games.map(g=>({...g,pOT_manual:false,pOT:null}))};return u;})}
                   style={{fontSize:9,padding:"3px 8px",background:"transparent",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-secondary)",cursor:"pointer"}}
                   title="Reset all games' OT% to auto-computed values from expTotal and winPct">
@@ -4391,6 +4532,13 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
               background:mkt===m.id?"#1d4ed8":"var(--color-background-secondary)",color:mkt===m.id?"white":"var(--color-text-secondary)"}}>{m.l}</button>)}
           </div>
 
+          {/* v64: series-over banner — most series markets are no longer tradeable once a team has 4 wins */}
+          {realized.seriesOver && mkt!=="props" && mkt!=="binary" && mkt!=="goaliesaves" && mkt!=="playerdetail" && mkt!=="seriesleader" && (
+            <div style={{padding:"10px 14px",marginBottom:12,background:"rgba(34,197,94,0.10)",border:"0.5px solid rgba(34,197,94,0.3)",borderRadius:"var(--border-radius-md)",fontSize:12,color:"#4ade80",fontWeight:500}}>
+              ✓ SERIES COMPLETE — {realized.hw>=4 ? (s.homeTeam||s.homeAbbr||"Home") : (s.awayTeam||s.awayAbbr||"Away")} won {Math.max(realized.hw,realized.aw)}-{Math.min(realized.hw,realized.aw)}. Series-level markets are settled; player props remain available.
+            </div>
+          )}
+
           {mkt==="winner"&&<Card><SH title="Series Winner" sub={`OR: ${margins.winner}x`}/>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><TH cols={["Team",...(showTrue?["True%"]:[]),"Adj%","American","Decimal"]}/>
             <tbody><OR label={s.homeTeam||"Home"} tp={hwp} ap={adjH} showTrue={showTrue}/><OR label={s.awayTeam||"Away"} tp={awp} ap={adjA} showTrue={showTrue}/></tbody></table>
@@ -4489,6 +4637,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
                 <SH title="Win Order (70-Way)" sub={`OR: ${margins.winOrder}x — sequences show game-by-game winner`}/>
                 <button onClick={copyAll} style={{marginLeft:"auto",padding:"3px 10px",fontSize:10,borderRadius:"var(--border-radius-md)",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",color:"var(--color-text-secondary)",cursor:"pointer"}}>Copy All</button>
               </div>
+              {realized.seriesOver && <div style={{padding:"6px 10px",marginBottom:8,background:"rgba(34,197,94,0.10)",border:"0.5px solid rgba(34,197,94,0.3)",borderRadius:"var(--border-radius-md)",fontSize:10,color:"#4ade80"}}>SERIES OVER — market settled</div>}
               <div style={{maxHeight:1000,overflowY:"auto"}}>
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
                   <TH cols={["Sequence","Winner","Games",...(showTrue?["True%"]:[]),"Adj%","American","Dec"]}/>
@@ -5257,7 +5406,7 @@ const SERIES_LEADER_STATS = [
   {id:"g",    label:"Goals",     temp:1.1, kMax:12},
   {id:"a",    label:"Assists",   temp:1.3, kMax:15},
   {id:"pts",  label:"Points",    temp:1.3, kMax:20},
-  {id:"sog",  label:"SOG",       temp:2.0, kMax:40},
+  {id:"sog",  label:"SOG",       temp:1.3, kMax:40},  // v65: lowered from 2.0 — was over-concentrating into 90% cap, defeating the temp control
   {id:"hit",  label:"Hits",      temp:1.5, kMax:50},
   {id:"blk",  label:"Blocks",    temp:1.5, kMax:40},
   {id:"tk",   label:"TK",        temp:1.5, kMax:20},
@@ -5351,7 +5500,10 @@ function SeriesLeaderPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalen
             <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{p.lambda.toFixed(2)}</td>
             {showTrue&&<><td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(p.trueProb*100).toFixed(2)}%</td>
             <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(Math.pow(p.trueProb,temp)*100).toFixed(2)}%</td></>}
-            <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{(p.adjProb*100).toFixed(2)}%</td>
+            <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>
+              {(p.adjProb*100).toFixed(2)}%
+              {p.adjProb >= 0.949 && <span title="Hit MAX_PROB cap (0.95) — increasing temp won't move this row further. Lower temp instead." style={{marginLeft:4,fontSize:8,padding:"0px 3px",background:"rgba(245,158,11,0.18)",color:"#f59e0b",borderRadius:2}}>CAP</span>}
+            </td>
             <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500,color:a<0?"#4ade80":"var(--color-text-primary)"}}>{a>0?`+${a}`:a}</td>
             <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{toDec(p.adjProb).toFixed(2)}</td>
           </tr>;
