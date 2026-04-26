@@ -433,7 +433,9 @@ function buildSimInputs(effG, homeAbbr, awayAbbr, players, globals, goalieQualit
       // v53: role multiplier is stat-aware now (TOP6 +bump for scoring, -penalty for hits)
       const rm = roleMultiplier(p.lineRole, stat);
       const shrunk = shrinkRate(p[pgKey(stat)], p.gp, stat);
-      const rr = shrunk * rm * globals.rateDiscount * statRateMultiplier(stat);
+      // v66: blend with playoff per-game rate (scoring stats only; weight ramps up to 0.30 by pGP=6)
+      const blended = blendedRate(p, stat, shrunk);
+      const rr = blended * rm * globals.rateDiscount * statRateMultiplier(stat);
       const actual = p[actKey(stat)] || 0;
       // Per-game future lambda for game i (if game played already -> 0; else rr × scale × goalieMult)
       const perGameFuture = [];
@@ -1061,6 +1063,25 @@ function shrinkRate(rawRate, gp, stat) {
   if (gp >= SHRINK_THRESHOLD_GP) return rawRate || 0;
   // Small sample: shrink toward prior
   return (gp * (rawRate||0) + SHRINK_K * prior) / (gp + SHRINK_K);
+}
+// v66: recent-form blending. Blends regular-season rate with realized playoff per-game rate,
+// weighted by playoff sample size. Formula: effective = (1-w) × season + w × playoff,
+// where w = min(0.30, pGP × 0.05). At pGP=6+, w hits 0.30 cap.
+// Rationale: playoffs have meaningfully different scoring environments (tighter D, hotter goalies,
+// PP1 concentration). Hot players in playoffs get small bump; cold players get slight haircut.
+// Cap at 0.30 prevents overfitting to noisy ~3-game samples.
+// Only applies to scoring stats (g/a/sog) where reg→playoff signal transfers cleanly.
+// Physical stats (hit/blk/tk) already drift up via statRateMultiplier; pim/give too noisy.
+const BLEND_STATS = new Set(["g","a","sog"]);
+function blendedRate(p, stat, seasonRate) {
+  if (!BLEND_STATS.has(stat)) return seasonRate;
+  const pGP = p.pGP || 0;
+  if (pGP <= 0) return seasonRate;
+  // Map stat → playoff field
+  const poTotal = stat==="g" ? (p.pG||0) : stat==="a" ? (p.pA||0) : (p.pSOG||0);
+  const poRate = poTotal / pGP;
+  const w = Math.min(0.30, pGP * 0.05);
+  return (1 - w) * seasonRate + w * poRate;
 }
 function fmt(p) { const a = toAmer(p); return a > 0 ? `+${a}` : `${a}`; }
 
@@ -2053,7 +2074,8 @@ function roleMultiplier(r, stat) {
   if (BASE[r] === undefined) return 1.0;  // unknown role, assume active
   if (stat == null) return 1.0;
   if (scoringStats) {
-    return {TOP6:1.08, MID6:1.00, BOT6:0.90, ACTIVE:0.92, ON_ROSTER:0.92,
+    // v66: TOP6 bumped 1.08 → 1.12 (playoff TOI compression + PP1 concentration concentrate scoring on top-6 forwards)
+    return {TOP6:1.12, MID6:1.00, BOT6:0.90, ACTIVE:0.92, ON_ROSTER:0.92,
       D1:1.03, D2:1.00, D3:0.85}[r] ?? 1.0;
   }
   if (physicalStats) {
@@ -2655,8 +2677,10 @@ function AppInner() {
     const pgKey=stat==="tk"?"take_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
     // v13: shrink rate with Bayesian prior for <20 GP (shrinkRate handles threshold internally)
     const shrunk = shrinkRate(p[pgKey], p.gp, stat);
+    // v66: blend with playoff per-game rate (scoring stats only)
+    const blended = blendedRate(p, stat, shrunk);
     // v21: stat-category rate adjustment (scoring = raw discount; physical stats go up; neutral stats mild up)
-    const rr = shrunk * rm * globals.rateDiscount * statRateMultiplier(stat);
+    const rr = blended * rm * globals.rateDiscount * statRateMultiplier(stat);
     let expTotal,actualGP;
     if(scope==="r1"){expTotal=teamExpGR1[p.team]||5.82;actualGP=p.pGP||0;}
     else{
@@ -4980,8 +5004,10 @@ function PropsPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,p
       const pgKey=stat==="tk"?"take_pg":stat==="pim"?"pim_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
       // v13: shrink rate for <20 GP; scratched already filtered out above
       const shrunk=shrinkRate(p[pgKey],p.gp,stat);
+      // v66: blend with playoff per-game rate (scoring stats only)
+      const blended = blendedRate(p, stat, shrunk);
       // v21: stat-category rate adjustment (physical stats go up, scoring stays at baseline discount)
-      const rm_rate_disc = shrunk*rm*rateDiscount*statRateMultiplier(stat);
+      const rm_rate_disc = blended*rm*rateDiscount*statRateMultiplier(stat);
       const remainingGames = Math.max(0, expG - (p.pGP||0));
       const actual=readActual(p, stat);
       // v16: for scoring stats, use per-game probability-weighted goal equivalents (respects per-game expTotal);
@@ -5312,7 +5338,7 @@ function PlayerDetailPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalen
     const r = dispersionFor(stat, dispersion);
     const rm = roleMultiplier(player.lineRole, stat);
     const pgKey = stat==="tk"?"take_pg":stat==="pim"?"pim_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
-    const rr_base = shrinkRate(player[pgKey],player.gp,stat)*rm*rateDiscount*statRateMultiplier(stat);
+    const rr_base = blendedRate(player, stat, shrinkRate(player[pgKey],player.gp,stat))*rm*rateDiscount*statRateMultiplier(stat);
     const remainingGames = Math.max(0, expG - (player.pGP||0));
     const gEq = SCORING_STATS.has(stat) && gameEquivalentsFor
       ? gameEquivalentsFor(player.team, stat)
@@ -5476,13 +5502,18 @@ function SeriesLeaderPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalen
   const engineLabel = simResult && simResult.leaderProb ? `Unified MC (${simResult.trials/1000}k, L1)` : "Independent MC (10k)";
 
   return <Card>
-    <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:10,flexWrap:"wrap"}}>
-      <SH title="Series Stat Leader" sub={`${engineLabel} · OR: ${or}x · Temp: ${temp}`}/>
-      <Seg options={SERIES_LEADER_STATS.map(s=>({id:s.id,label:s.label}))} value={stat} onChange={setStat} accent="#7c3aed"/>
-      <label style={{fontSize:11,color:"var(--color-text-secondary)",display:"flex",gap:4,alignItems:"center"}}>
-        Temp: <LazyNI value={temp} onCommit={v=>setCustomTemps(t=>({...t,[stat]:v}))} min={0.5} max={5} step={0.1} style={{width:46}} showSpinner={false}/>
-      </label>
-      {simResult && <span style={{fontSize:9,padding:"2px 6px",borderRadius:3,background:"rgba(124,58,237,0.15)",color:"#a78bfa",letterSpacing:0.4,fontWeight:500}}>UNIFIED</span>}
+    {/* v66: restructured header. SH on its own row (block-level), then controls row.
+        Old layout: SH inside a flex container caused subtitle ("...Temp: X") to wrap awkwardly
+        and visually overlap the adjacent Series Setup card's Score/Result columns. */}
+    <div style={{marginBottom:10}}>
+      <SH title="Series Stat Leader" sub={`${engineLabel} · OR: ${or}x`}/>
+      <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+        <Seg options={SERIES_LEADER_STATS.map(s=>({id:s.id,label:s.label}))} value={stat} onChange={setStat} accent="#7c3aed"/>
+        <label style={{fontSize:11,color:"var(--color-text-secondary)",display:"flex",gap:4,alignItems:"center"}}>
+          Temp: <LazyNI value={temp} onCommit={v=>setCustomTemps(t=>({...t,[stat]:v}))} min={0.5} max={5} step={0.1} style={{width:46}} showSpinner={false}/>
+        </label>
+        {simResult && <span style={{fontSize:9,padding:"2px 6px",borderRadius:3,background:"rgba(124,58,237,0.15)",color:"#a78bfa",letterSpacing:0.4,fontWeight:500}}>UNIFIED</span>}
+      </div>
     </div>
     <div style={{overflowX:"auto"}}>
       <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
