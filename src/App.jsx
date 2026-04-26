@@ -1065,22 +1065,22 @@ function shrinkRate(rawRate, gp, stat) {
   return (gp * (rawRate||0) + SHRINK_K * prior) / (gp + SHRINK_K);
 }
 // v66: recent-form blending. Blends regular-season rate with realized playoff per-game rate,
-// weighted by playoff sample size. Formula: effective = (1-w) × season + w × playoff,
-// where w = min(0.30, pGP × 0.05). At pGP=6+, w hits 0.30 cap.
-// Rationale: playoffs have meaningfully different scoring environments (tighter D, hotter goalies,
-// PP1 concentration). Hot players in playoffs get small bump; cold players get slight haircut.
-// Cap at 0.30 prevents overfitting to noisy ~3-game samples.
+// weighted by playoff sample size.
+// v67: cap raised 0.30 → 0.50, slope raised 0.05 → 0.10. At pGP=5 → w=0.50 cap.
+// Rationale: book comparisons (DK on hot depth players like Kapanen, JEE) showed our model
+// under-weighted playoff sample — books trust 3-4 games of hot scoring more than we did.
+// Symmetric (mean-preserving) — also correctly fades cold stars like Eichel.
+// Formula: effective = (1-w) × season + w × playoff, w = min(0.50, pGP × 0.10).
 // Only applies to scoring stats (g/a/sog) where reg→playoff signal transfers cleanly.
-// Physical stats (hit/blk/tk) already drift up via statRateMultiplier; pim/give too noisy.
 const BLEND_STATS = new Set(["g","a","sog"]);
 function blendedRate(p, stat, seasonRate) {
-  if (!BLEND_STATS.has(stat)) return seasonRate;
+  if (!p || !BLEND_STATS.has(stat)) return seasonRate;
   const pGP = p.pGP || 0;
   if (pGP <= 0) return seasonRate;
   // Map stat → playoff field
   const poTotal = stat==="g" ? (p.pG||0) : stat==="a" ? (p.pA||0) : (p.pSOG||0);
   const poRate = poTotal / pGP;
-  const w = Math.min(0.30, pGP * 0.05);
+  const w = Math.min(0.50, pGP * 0.10);
   return (1 - w) * seasonRate + w * poRate;
 }
 function fmt(p) { const a = toAmer(p); return a > 0 ? `+${a}` : `${a}`; }
@@ -5502,9 +5502,7 @@ function SeriesLeaderPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalen
   const engineLabel = simResult && simResult.leaderProb ? `Unified MC (${simResult.trials/1000}k, L1)` : "Independent MC (10k)";
 
   return <Card>
-    {/* v66: restructured header. SH on its own row (block-level), then controls row.
-        Old layout: SH inside a flex container caused subtitle ("...Temp: X") to wrap awkwardly
-        and visually overlap the adjacent Series Setup card's Score/Result columns. */}
+    {/* v66: SH on its own row, then controls row. Prevents subtitle from overlapping adjacent card. */}
     <div style={{marginBottom:10}}>
       <SH title="Series Stat Leader" sub={`${engineLabel} · OR: ${or}x`}/>
       <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
