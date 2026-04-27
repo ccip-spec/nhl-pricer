@@ -7352,14 +7352,24 @@ function ParlayTab({allSeries, currentRound, margins, dark}) {
   const maxSize = uniqueSids.size;
   for (let k = 2; k <= maxSize; k++) sizes.push(k);
 
+  const [sortBy, setSortBy] = useState("price"); // "teams" | "price"
+  const [sortDir, setSortDir] = useState("asc");
+
   const combos = useMemo(()=>buildCombos(selectedSize), [selectedSize, teamOptions, overrides]);
   const rows = useMemo(()=>{
-    return combos.map(combo => {
+    const base = combos.map(combo => {
       const dec = combo.reduce((a,b)=>a*effDec(b), 1);
       const p = 1/dec;
-      return {combo, dec, american: toAmer(p)};
-    }).sort((a,b)=>a.dec - b.dec);
-  }, [combos, overrides]);
+      return {combo, dec, american: toAmer(p), label: combo.map(o=>o.team).join(" & ")};
+    });
+    base.sort((a,b)=>{
+      let cmp = 0;
+      if (sortBy === "teams") cmp = a.label.localeCompare(b.label);
+      else cmp = a.dec - b.dec;
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+    return base;
+  }, [combos, overrides, sortBy, sortDir]);
 
   const fmtPrice = (r) => showDec ? r.dec.toFixed(2) : (r.american>0?`+${r.american}`:`${r.american}`);
   const fmtTeam = (opt) => {
@@ -7465,8 +7475,18 @@ function ParlayTab({allSeries, currentRound, margins, dark}) {
               <thead style={{position:"sticky",top:0,background:dark?"#131625":"#fff",zIndex:1}}>
                 <tr style={{borderBottom:"0.5px solid var(--color-border-secondary)",color:"var(--color-text-tertiary)"}}>
                   <th style={{padding:"6px 8px",textAlign:"left",fontWeight:400,width:40}}>#</th>
-                  <th style={{padding:"6px 8px",textAlign:"left",fontWeight:400}}>Teams</th>
-                  <th style={{padding:"6px 8px",textAlign:"right",fontWeight:400,width:80}}>Price</th>
+                  <th onClick={()=>{
+                    if(sortBy==="teams") setSortDir(d=>d==="asc"?"desc":"asc");
+                    else { setSortBy("teams"); setSortDir("asc"); }
+                  }} style={{padding:"6px 8px",textAlign:"left",fontWeight:400,cursor:"pointer",userSelect:"none"}}>
+                    Teams {sortBy==="teams" ? (sortDir==="asc"?"▲":"▼") : ""}
+                  </th>
+                  <th onClick={()=>{
+                    if(sortBy==="price") setSortDir(d=>d==="asc"?"desc":"asc");
+                    else { setSortBy("price"); setSortDir("asc"); }
+                  }} style={{padding:"6px 8px",textAlign:"right",fontWeight:400,width:80,cursor:"pointer",userSelect:"none"}}>
+                    Price {sortBy==="price" ? (sortDir==="asc"?"▲":"▼") : ""}
+                  </th>
                 </tr>
               </thead>
               <tbody>
