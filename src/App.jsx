@@ -830,8 +830,33 @@ function toDec(p) {
 
 // v49: read a player's realized playoff total for a given stat key.
 // Handles the "pts" case (not stored; derived from pG+pA) and normalizes field-name casing.
-function readActual(p, stat) {
+function readActual(p, stat, roundFilter) {
   if (!p) return 0;
+  // v76: when roundFilter is passed (e.g. "r1", "r2"), sum only that round's per-game stats
+  // from p.pGames. Without the filter, returns cumulative playoff totals (rollup fields).
+  // Required because rollup fields (pG/pA/pSOG/etc.) accumulate across ALL rounds,
+  // which makes "Now" columns wrong in per-series and R1-scope leader markets once R2 starts.
+  if (roundFilter && p.pGames && roundFilter !== "full") {
+    const roundNum = roundFilter === "r1" ? 1 : roundFilter === "r2" ? 2 :
+                     roundFilter === "conf" ? 3 : roundFilter === "cup" ? 4 : null;
+    if (roundNum != null) {
+      let total = 0;
+      for (const e of p.pGames) {
+        if (e.round !== roundNum) continue;
+        if (stat === "pts") total += (e.g||0) + (e.a||0);
+        else if (stat === "tk") total += e.tk||0;
+        else if (stat === "give") total += e.give||0;
+        else if (stat === "pim") total += e.pim||0;
+        else if (stat === "g") total += e.g||0;
+        else if (stat === "a") total += e.a||0;
+        else if (stat === "sog") total += e.sog||0;
+        else if (stat === "hit") total += e.hit||0;
+        else if (stat === "blk") total += e.blk||0;
+        else if (stat === "toi") total += e.toi||0;
+      }
+      return total;
+    }
+  }
   if (stat === "pts") return (p.pG||0) + (p.pA||0);
   if (stat === "tk")  return p.pTK  || 0;
   if (stat === "give")return p.pGIVE|| p.pGV || 0;
@@ -844,6 +869,19 @@ function readActual(p, stat) {
   if (stat === "blk") return p.pBLK || 0;
   if (stat === "toi") return p.pTOI || 0;  // v56 — playoff total TOI in minutes
   return 0;
+}
+// v76: games played by a player in a specific round (or all playoffs).
+// Used so that "future games left in series" is calculated correctly per-round —
+// otherwise an R2 player who played 5 R1 games has pGP=5 even before R2 G1.
+function readActualGP(p, roundFilter) {
+  if (!p) return 0;
+  if (!roundFilter || roundFilter === "full" || !p.pGames) return p.pGP || 0;
+  const roundNum = roundFilter === "r1" ? 1 : roundFilter === "r2" ? 2 :
+                   roundFilter === "conf" ? 3 : roundFilter === "cup" ? 4 : null;
+  if (roundNum == null) return p.pGP || 0;
+  let gp = 0;
+  for (const e of p.pGames) if (e.round === roundNum) gp++;
+  return gp;
 }
 
 // Stats that scale with game total goals (offense-linked).
@@ -2713,7 +2751,9 @@ function AppInner() {
       } else {
         expTotal = teamExpGR1[p.team]||5.82;
       }
-      actualGP=p.pGP||0;
+      // v76: round-filtered GP — pGP accumulates across rounds, but R1 scope should
+      // only count R1 games for "remaining games" calc.
+      actualGP=readActualGP(p, "r1");
     }
     else{
       const adv=advancement[p.team]||{winR1:0.5,winConf:0.25,winCup:0.1,manualR1:false,manualConf:false,manualCup:false};
@@ -2734,9 +2774,11 @@ function AppInner() {
       } else {
         expTotal=5.82*(1 + r1 + r2 + conf);
       }
+      // Full playoff scope: use cumulative pGP.
       actualGP=p.pGP||0;
     }
-    const actual = readActual(p, stat);
+    // v76: actual stat for R1 scope is R1-only; full scope is cumulative.
+    const actual = readActual(p, stat, scope==="r1" ? "r1" : "full");
     const futureLam = Math.max(0.0001, rr * Math.max(0, expTotal - actualGP));
     const lam = Math.max(0.0001, actual + futureLam);
     return {actual, futureLam, lam};
@@ -3298,6 +3340,29 @@ function GameEntryModal({dark,allSeries,players,goalies,initialSeriesIdx,initial
 // v41: number input with local string state — only commits parent on blur or Enter.
 // Fixes the laggy/cursor-jumpy behavior on the advancement table where every keystroke
 // re-rendered the whole 16-team auto-chain.
+// v76: text input with deferred commit. Used for team-name fields where every-keystroke
+// state propagation triggered cascade re-renders (laggy on R2 with 4+ series mounted).
+// Commits on blur or Enter — not on every keystroke.
+function LazyText({value, onCommit, placeholder, transform, style={}}) {
+  const [draft, setDraft] = useState(value || "");
+  const [editing, setEditing] = useState(false);
+  useEffect(()=>{
+    if (!editing) setDraft(value || "");
+  }, [value, editing]);
+  const commit = () => {
+    setEditing(false);
+    const final = transform ? transform(draft) : draft;
+    if (final !== value) onCommit(final);
+    setDraft(final);
+  };
+  return <input type="text" placeholder={placeholder} value={draft}
+    onFocus={()=>setEditing(true)}
+    onChange={e=>setDraft(transform ? transform(e.target.value) : e.target.value)}
+    onBlur={commit}
+    onKeyDown={e=>{ if(e.key==="Enter") e.target.blur(); }}
+    style={style}/>;
+}
+
 function LazyNI({value, onCommit, min, max, step=0.01, style={}, tabIndex, showSpinner=true}) {
   const [draft, setDraft] = useState(String(value));
   const [editing, setEditing] = useState(false);
@@ -3466,7 +3531,9 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
               <div style={{fontSize:9,fontWeight:500,color:"var(--color-text-tertiary)",marginBottom:6,textTransform:"uppercase"}}>Series {idx+1}</div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 66px",gap:4,marginBottom:6}}>
                 {[["homeTeam","Home team"],["homeAbbr","Abbr"],["awayTeam","Away team"],["awayAbbr","Abbr"]].map(([f,ph])=>(
-                  <input key={f} placeholder={ph} value={m[f]||""} onChange={e=>updM(idx,f,f.includes("Abbr")?e.target.value.toUpperCase():e.target.value)}
+                  <LazyText key={f} placeholder={ph} value={m[f]||""}
+                    onCommit={v=>updM(idx,f,v)}
+                    transform={f.includes("Abbr") ? (x=>x.toUpperCase()) : null}
                     style={{padding:"3px 6px",fontSize:11,background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-primary)"}}/>
                 ))}
               </div>
@@ -3599,7 +3666,7 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
             <TH cols={["#","Player","Team","Role","Now","λ",...(showTrue?["True%"]:[]),"Adj%","American",...(showDec?["Dec"]:[])]}/>
             <tbody>{displayed.map((p,i)=>{
               const rank=leaderMarket.indexOf(p)+1,a=toAmer(p.adjProb);
-              const now=readActual(p, lStat);
+              const now=readActual(p, lStat, lScope==="r1" ? "r1" : "full");
               return <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)")}}>
                 <td style={{padding:"4px 8px",color:"var(--color-text-tertiary)",fontSize:10,width:28}}>{rank}</td>
                 <td style={{padding:"4px 8px",fontWeight:rank<=3?500:400}}>{p.name}</td>
@@ -4383,7 +4450,9 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             <SH title="Series Setup"/>
             <div style={{display:"grid",gridTemplateColumns:"1fr 66px",gap:4,marginBottom:8}}>
               {[["homeTeam","Home team"],["homeAbbr","Abbr"],["awayTeam","Away team"],["awayAbbr","Abbr"]].map(([f,ph])=>(
-                <input key={f} placeholder={ph} value={s[f]||""} onChange={e=>updS(f,f.includes("Abbr")?e.target.value.toUpperCase():e.target.value)}
+                <LazyText key={f} placeholder={ph} value={s[f]||""}
+                  onCommit={v=>updS(f,v)}
+                  transform={f.includes("Abbr") ? (x=>x.toUpperCase()) : null}
                   style={{padding:"4px 7px",fontSize:12,background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:4,color:"var(--color-text-primary)"}}/>
               ))}
             </div>
@@ -4998,12 +5067,12 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             </Card>;
           })()}
 
-          {mkt==="props"&&<PropsPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark} mode="ou" simResult={simResult}/>}
-          {mkt==="binary"&&<PropsPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark} mode="binary" simResult={simResult}/>}
-          {mkt==="propcombos"&&<PropCombosPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark}/>}
+          {mkt==="props"&&<PropsPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark} mode="ou" simResult={simResult} currentRound={currentRound}/>}
+          {mkt==="binary"&&<PropsPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark} mode="binary" simResult={simResult} currentRound={currentRound}/>}
+          {mkt==="propcombos"&&<PropCombosPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark} currentRound={currentRound}/>}
           {mkt==="goaliesaves"&&<GoalieSavesPanel s={s} expG={expG} goalies={goalies} margins={margins} showTrue={showTrue} dark={dark}/>}
-          {mkt==="playerdetail"&&<PlayerDetailPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark}/>}
-          {mkt==="seriesleader"&&<SeriesLeaderPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark} simResult={simResult} simStale={simStale}/>}
+          {mkt==="playerdetail"&&<PlayerDetailPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark} currentRound={currentRound}/>}
+          {mkt==="seriesleader"&&<SeriesLeaderPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark} simResult={simResult} simStale={simStale} currentRound={currentRound}/>}
         </div>
       </div>
     </div>
@@ -5011,7 +5080,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
 }
 
 // ─── PROPS PANEL (shared O/U + Binary) ───────────────────────────────────────
-function PropsPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,players,globals,margins,showTrue,dark,mode,simResult}) {
+function PropsPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,players,globals,margins,showTrue,dark,mode,simResult,currentRound}) {
   const [stat,setStat]=useState("g");
   const [line,setLine]=useState(mode==="binary"?1:0.5);
   const [expanded,setExpanded]=useState(()=>new Set()); // v24: expanded player keys for alt-line ladder
@@ -5049,8 +5118,10 @@ function PropsPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,p
       // 200+ cent gaps on N+ markets (Kapanen 4+ -676 vs FD -115).
       // v21: stat-category rate adjustment (physical stats go up, scoring stays at baseline discount)
       const rm_rate_disc = shrunk*rm*rateDiscount*statRateMultiplier(stat);
-      const remainingGames = Math.max(0, expG - (p.pGP||0));
-      const actual=readActual(p, stat);
+      // v76: per-round GP and actual so R2 series doesn't carry over R1 stats
+      const roundGP = readActualGP(p, currentRound);
+      const remainingGames = Math.max(0, expG - roundGP);
+      const actual=readActual(p, stat, currentRound);
       // v16: for scoring stats, use per-game probability-weighted goal equivalents (respects per-game expTotal);
       // for defensive stats, fall back to flat expected-games-remaining.
       // v23: for scoring stats, gameEquivalentsFor(team, stat) additionally applies per-game goalie-faced multiplier.
@@ -5117,7 +5188,7 @@ function PropsPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,p
       if (!!a.settled !== !!b.settled) return a.settled ? 1 : -1;
       return b.adjYes - a.adjYes;
     });
-  },[pool,stat,line,globals,expG,statMargin,gameEquivalents,mode,simResult]);
+  },[pool,stat,line,globals,expG,statMargin,gameEquivalents,mode,simResult,currentRound]);
 
   if(!s.homeAbbr||!s.awayAbbr) return <Card><div style={{color:"var(--color-text-secondary)",fontSize:12}}>Set team abbreviations to load props</div></Card>;
 
@@ -5253,7 +5324,7 @@ function PropsPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,p
 // 2-3 player combos with AND / OR / MORE operators across any stat with configurable thresholds.
 // Independence assumption between players (simple, fine for first version per CC).
 // MORE is 2-player only and supports 2-way (strict A>B) or 3-way with push (A>B / B>A / tie).
-function PropCombosPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,players,globals,margins,showTrue,dark}) {
+function PropCombosPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,players,globals,margins,showTrue,dark,currentRound}) {
   const STATS=[
     {id:"g",label:"Goals",mk:"propsGoals"},{id:"a",label:"Assists",mk:"propsAssists"},
     {id:"pts",label:"Points",mk:"propsPoints"},{id:"sog",label:"SOG",mk:"propsSOG"},
@@ -5300,8 +5371,9 @@ function PropCombosPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalents
       const pgKey = stat==="tk"?"take_pg":stat==="pim"?"pim_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
       const shrunk = shrinkRate(p[pgKey], p.gp, stat);
       const rm_rate_disc = shrunk*rm*rateDiscount*statRateMultiplier(stat);
-      const remainingGames = Math.max(0, expG - (p.pGP||0));
-      const actual = readActual(p, stat);
+      const roundGP = readActualGP(p, currentRound);
+      const remainingGames = Math.max(0, expG - roundGP);
+      const actual = readActual(p, stat, currentRound);
       const gEq = SCORING_STATS.has(stat) && gameEquivalentsFor
         ? gameEquivalentsFor(p.team, stat)
         : (gameEquivalents!=null && SCORING_STATS.has(stat)) ? gameEquivalents : remainingGames;
@@ -5309,7 +5381,7 @@ function PropCombosPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalents
       const lam = Math.max(0.0001, actual + futureLam);
       return {p, stat, futureLam, actual, r, lam};
     });
-  }, [slots, pool, globals, expG, gameEquivalents, gameEquivalentsFor]);
+  }, [slots, pool, globals, expG, gameEquivalents, gameEquivalentsFor, currentRound]);
 
   // Per-slot P(X >= line) using NB CDF on FUTURE lambda
   const slotProbs = slotData.map((d, i) => {
@@ -5680,7 +5752,7 @@ function GoalieSavesPanel({s,expG,goalies,margins,showTrue,dark}) {
 // ─── PLAYER O/U DETAIL PANEL ─────────────────────────────────────────────────
 // Full multi-line O/U table for a single selected player across all stats.
 // Matches Player O-U Detail sheet: shows every half-integer line from 0.5 up.
-function PlayerDetailPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,players,globals,margins,showTrue,dark}) {
+function PlayerDetailPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,players,globals,margins,showTrue,dark,currentRound}) {
   const [selectedPlayer,setSelectedPlayer] = useState("");
   const [stat,setStat] = useState("g");
   const STATS=[
@@ -5710,11 +5782,12 @@ function PlayerDetailPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalen
     const pgKey = stat==="tk"?"take_pg":stat==="pim"?"pim_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
     // v68: NO blend in Player Detail (alt-line table for N+ markets). Same reasoning as Props.
     const rr_base = shrinkRate(player[pgKey],player.gp,stat)*rm*rateDiscount*statRateMultiplier(stat);
-    const remainingGames = Math.max(0, expG - (player.pGP||0));
+    const roundGP = readActualGP(player, currentRound);
+    const remainingGames = Math.max(0, expG - roundGP);
     const gEq = SCORING_STATS.has(stat) && gameEquivalentsFor
       ? gameEquivalentsFor(player.team, stat)
       : (gameEquivalents!=null && SCORING_STATS.has(stat)) ? gameEquivalents : remainingGames;
-    const actual = readActual(player, stat);
+    const actual = readActual(player, stat, currentRound);
     const futureLam = Math.max(0.0001, rr_base*gEq);
     const lam = Math.max(0.0001, actual + futureLam);
     // Build line table: 0.5 through ceil(lam)+4, step 0.5
@@ -5811,7 +5884,7 @@ const SERIES_LEADER_STATS = [
   {id:"toi",  label:"TOI",       temp:3.0, kMax:300}, // v56: series TOI leader (in minutes)
   ];
 
-function SeriesLeaderPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,players,globals,margins,showTrue,dark,simResult,simStale}) {
+function SeriesLeaderPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,players,globals,margins,showTrue,dark,simResult,simStale,currentRound}) {
   const [stat,setStat]=useState("g");
   const [customTemps,setCustomTemps]=useState({});
   const meta=SERIES_LEADER_STATS.find(x=>x.id===stat)||SERIES_LEADER_STATS[0];
@@ -5837,11 +5910,12 @@ function SeriesLeaderPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalen
       const rm=roleMultiplier(p.lineRole, stat);
       const pgKey=stat==="tk"?"take_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat==="pim"?"pim_pg":stat+"_pg";
       const rr_base=shrinkRate(p[pgKey],p.gp,stat)*rm*rateDiscount*statRateMultiplier(stat);
-      const remainingGames = Math.max(0, expG - (p.pGP||0));
+      const roundGP = readActualGP(p, currentRound);
+      const remainingGames = Math.max(0, expG - roundGP);
       const gEq = SCORING_STATS.has(stat) && gameEquivalentsFor
         ? gameEquivalentsFor(p.team, stat)
         : (gameEquivalents!=null && SCORING_STATS.has(stat)) ? gameEquivalents : remainingGames;
-      const actual = readActual(p, stat);
+      const actual = readActual(p, stat, currentRound);
       const futureLam = Math.max(0.0001, rr_base*gEq);
       return {actual, futureLam, lam: actual+futureLam};
     });
@@ -5866,7 +5940,7 @@ function SeriesLeaderPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalen
     const adj = applyLeaderOverround(raw, temp, or);
     return pool.map((p,i)=>({...p,lambda:entries[i].lam,futureLam:entries[i].futureLam,actualStat:entries[i].actual,trueProb:raw[i],adjProb:adj[i]}))
       .sort((a,b)=>b.adjProb-a.adjProb);
-  },[pool,stat,expG,globals,temp,or,gameEquivalents,gameEquivalentsFor,simResult]);
+  },[pool,stat,expG,globals,temp,or,gameEquivalents,gameEquivalentsFor,simResult,currentRound]);
 
   if(!s.homeAbbr||!s.awayAbbr) return <Card><div style={{color:"var(--color-text-secondary)",fontSize:12}}>Set team abbreviations to load series leaders</div></Card>;
 
@@ -5889,8 +5963,8 @@ function SeriesLeaderPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalen
         <TH cols={["#","Player","Team","Role","Now","λ",...(showTrue?["True%","DH%"]:[]),"Adj%","American","Dec"]}/>
         <tbody>{leaderRows.map((p,i)=>{
           const a=toAmer(p.adjProb);
-          // current actual series stat
-          const now=readActual(p, stat);
+          // current actual series stat (v76: per-round)
+          const now=readActual(p, stat, currentRound);
           return <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)")}}>
             <td style={{padding:"3px 8px",color:"var(--color-text-tertiary)",fontSize:9}}>{i+1}</td>
             <td style={{padding:"3px 8px",fontWeight:i<3?500:400}}>{p.name}</td>
@@ -7115,15 +7189,32 @@ function UploadTab({players,setPlayers,goalies,setGoalies,linemates,setLinemates
           const ongoal=parseFloat(c[idx("ongoal")])||0;
           const goals=parseFloat(c[idx("goals")])||0;
           const xGoals=parseFloat(c[idx("xGoals")])||goals; // v23: fall back to goals if xGoals missing
+          const icetime=parseFloat(c[idx("icetime")])||0; // seconds
           const saves=ongoal-goals;
           const name=c[idx("name")]?.trim();if(!name)continue;
-          // v23: goalie quality multiplier. >1.0 = better than expected; <1.0 = worse.
-          // Applied as a MULTIPLIER on opposing skaters' scoring lambda — so when a sharp goalie faces
-          // our skater, their goal rate shrinks. Clamp to [0.75, 1.25] to avoid wild extremes from tiny samples.
-          const rawQuality = goals>0 ? xGoals/goals : 1.0;
-          const quality = Math.max(0.75, Math.min(1.25, rawQuality));
+          // v75: goalie quality based on Goals Saved Above Expected per 60 (GSAx/60) with Bayesian shrinkage.
+          // Old formula (xGoals/goals clamped 0.75-1.25) produced ~95% of goalies at 0.95-1.05 → near-zero
+          // model effect on opposing skater scoring. New formula gives a meaningful 0.85-1.15 spread.
+          //
+          // Convention preserved: quality > 1.0 = ELITE (saves more than expected).
+          // Consumer code applies multiplier as 1/quality on opposing skater rate → elite goalie shrinks scoring.
+          //
+          // Math:
+          //   GSAx/60 = (xGoals - goals) / icetime_hours          // positive = elite
+          //   raw_quality = 1 + 0.30 × GSAx/60                    // +0.5 GSAx/60 → 1.15 quality (elite)
+          //   raw_quality clamped to [0.80, 1.20]
+          //   shrinkage_weight = icetime_min / (icetime_min + 600)// half-prior at 10 game-equivalents
+          //   quality = 1 + shrinkage_weight × (raw_quality - 1)  // shrink toward 1.0 on small samples
+          let quality = 1.0;
+          if (icetime > 0) {
+            const gsax60 = (xGoals - goals) / (icetime / 3600);
+            const rawQuality = Math.max(0.80, Math.min(1.20, 1 + 0.30 * gsax60));
+            const icemin = icetime / 60;
+            const w = icemin / (icemin + 600);
+            quality = +(1 + w * (rawQuality - 1)).toFixed(3);
+          }
           rawGoalies.push({name,team,gp:Math.round(gp),saves,saves_pg:+(saves/gp).toFixed(4),
-                          xGoals:+xGoals.toFixed(2),goals:+goals.toFixed(1),quality:+quality.toFixed(3)});
+                          xGoals:+xGoals.toFixed(2),goals:+goals.toFixed(1),quality});
         }
         const teamGP={};
         rawGoalies.forEach(g=>{teamGP[g.team]=(teamGP[g.team]||0)+g.gp;});
@@ -7335,6 +7426,13 @@ function PlayerStatsTab({players,setPlayers,dark}) {
   const [search,setSearch]=useState("");
   const [showZeros,setShowZeros]=useState(false);
   const [editing,setEditing]=useState(null); // {player, round, game}
+  // v76: pivot table by selected stat. Default Points.
+  const [sortStat,setSortStat]=useState("rPts");
+  const SORT_TABS=[
+    {id:"rPts",l:"Points"},{id:"rG",l:"Goals"},{id:"rA",l:"Assists"},
+    {id:"rSOG",l:"SOG"},{id:"rHIT",l:"Hits"},{id:"rBLK",l:"Blocks"},
+    {id:"rTK",l:"TK"},{id:"rGIVE",l:"GV"},{id:"rPIM",l:"PIM"},
+  ];
 
   // Active roster: everyone except SCRATCHED/STARTER/BACKUP
   const roster = useMemo(()=>{
@@ -7363,8 +7461,8 @@ function PlayerStatsTab({players,setPlayers,dark}) {
       return {p, games, rGP, rG, rA, rPts:rG+rA, rSOG, rHIT, rBLK, rTK, rPIM, rGIVE};
     })
     .filter(r=>showZeros||r.rGP>0)
-    .sort((a,b)=>b.rPts-a.rPts||b.rG-a.rG||a.p.name.localeCompare(b.p.name));
-  },[roster,round,showZeros]);
+    .sort((a,b)=>(b[sortStat]||0)-(a[sortStat]||0) || b.rPts-a.rPts || a.p.name.localeCompare(b.p.name));
+  },[roster,round,showZeros,sortStat]);
 
   const teams = useMemo(()=>{
     if(!players) return [];
@@ -7425,6 +7523,16 @@ function PlayerStatsTab({players,setPlayers,dark}) {
           Show zero-GP
         </label>
         <span style={{marginLeft:"auto",fontSize:10,color:"var(--color-text-tertiary)"}}>Click any G1-G7 cell to edit</span>
+      </div>
+      {/* v76: sort/filter by stat. Default Points. */}
+      <div style={{display:"flex",gap:0,marginTop:10,borderRadius:"var(--border-radius-md)",overflow:"hidden",border:"0.5px solid var(--color-border-secondary)",width:"fit-content"}}>
+        {SORT_TABS.map(t => <button key={t.id} onClick={()=>setSortStat(t.id)} style={{
+          padding:"5px 14px",fontSize:11,border:"none",
+          borderRight:"0.5px solid var(--color-border-tertiary)",cursor:"pointer",
+          background:sortStat===t.id?"#3b82f6":"var(--color-background-secondary)",
+          color:sortStat===t.id?"white":"var(--color-text-secondary)",fontWeight:sortStat===t.id?500:400}}>
+          {t.l}
+        </button>)}
       </div>
     </Card>
 
