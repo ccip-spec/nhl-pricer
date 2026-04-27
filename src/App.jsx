@@ -7370,7 +7370,10 @@ function ParlayTab({allSeries, currentRound, margins, dark}) {
     return `${opt.team} (${a>0?`+${a}`:a})`;
   };
 
-  const copyText = useMemo(()=>{
+  const copyTextOnly = useMemo(()=>{
+    return rows.map(r => r.combo.map(o=>o.team).join(" & ") + " to advance").join("\n");
+  }, [rows]);
+  const copyTextAndOdds = useMemo(()=>{
     return rows.map(r => {
       const teams = r.combo.map(o=>o.team).join(" & ") + " to advance";
       return `${teams}\t${fmtPrice(r)}`;
@@ -7457,7 +7460,7 @@ function ParlayTab({allSeries, currentRound, margins, dark}) {
         </div>}
 
         {rows.length > 0 && <>
-          <div style={{maxHeight:600,overflowY:"auto",border:"0.5px solid var(--color-border-secondary)",borderRadius:4}}>
+          <div style={{maxHeight:1100,overflowY:"auto",border:"0.5px solid var(--color-border-secondary)",borderRadius:4}}>
             <table style={{width:"100%",fontSize:11,borderCollapse:"collapse"}}>
               <thead style={{position:"sticky",top:0,background:dark?"#131625":"#fff",zIndex:1}}>
                 <tr style={{borderBottom:"0.5px solid var(--color-border-secondary)",color:"var(--color-text-tertiary)"}}>
@@ -7480,16 +7483,17 @@ function ParlayTab({allSeries, currentRound, margins, dark}) {
             </table>
           </div>
 
-          <div style={{marginTop:10,display:"flex",gap:8,alignItems:"center"}}>
-            <button onClick={()=>{
-              navigator.clipboard?.writeText(copyText);
-            }} style={{padding:"5px 12px",fontSize:11,background:"#1d4ed8",color:"white",
-              border:"none",borderRadius:4,cursor:"pointer"}}>
-              Copy all to clipboard
+          <div style={{marginTop:10,display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+            <button onClick={()=>{ navigator.clipboard?.writeText(copyTextOnly); }}
+              style={{padding:"5px 12px",fontSize:11,background:"#1d4ed8",color:"white",
+                border:"none",borderRadius:4,cursor:"pointer"}}>
+              Copy text only
             </button>
-            <span style={{fontSize:10,color:"var(--color-text-tertiary)"}}>
-              Tab-separated: Teams \t Price
-            </span>
+            <button onClick={()=>{ navigator.clipboard?.writeText(copyTextAndOdds); }}
+              style={{padding:"5px 12px",fontSize:11,background:"var(--color-background-secondary)",color:"var(--color-text-primary)",
+                border:"0.5px solid var(--color-border-secondary)",borderRadius:4,cursor:"pointer"}}>
+              Copy text & odds
+            </button>
           </div>
         </>}
       </Card>
