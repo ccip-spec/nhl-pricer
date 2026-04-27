@@ -7289,12 +7289,15 @@ function ParlayTab({allSeries, currentRound, margins, dark}) {
     const opts = [];
     (allSeries || []).forEach((s, si) => {
       if (!s || !s.games) return;
+      // Drop completed series — winner has already advanced, no parlay action.
+      const homeWins = s.games.filter(g => g.result === "home").length;
+      const awayWins = s.games.filter(g => g.result === "away").length;
+      if (homeWins >= 4 || awayWins >= 4) return;
       const outcomes = computeOutcomes(s.games);
       const hwp = ["4-0","4-1","4-2","4-3"].reduce((acc,k)=>acc+(outcomes[k]||0),0);
       const awp = 1 - hwp;
       const [adjH, adjA] = applyMargin([hwp, awp], margins.winner);
       const sid = `s${si}`;
-      // Eliminated teams (advance prob ~0) are dropped — they cannot be parlayed.
       if (adjH > 0.001) opts.push({
         sid, team: s.homeTeam || s.homeAbbr || `Home${si+1}`,
         abbr: s.homeAbbr || "", modelP: adjH, modelDec: toDec(adjH),
@@ -7369,7 +7372,7 @@ function ParlayTab({allSeries, currentRound, margins, dark}) {
 
   const copyText = useMemo(()=>{
     return rows.map(r => {
-      const teams = r.combo.map(o=>o.team).join(" + ");
+      const teams = r.combo.map(o=>o.team).join(" & ") + " to advance";
       return `${teams}\t${fmtPrice(r)}`;
     }).join("\n");
   }, [rows, showDec]);
@@ -7467,7 +7470,7 @@ function ParlayTab({allSeries, currentRound, margins, dark}) {
                 {rows.map((r,i)=>(
                   <tr key={i} style={{borderTop:"0.5px solid var(--color-border-tertiary)"}}>
                     <td style={{padding:"4px 8px",color:"var(--color-text-tertiary)",fontFamily:"var(--font-mono)"}}>{i+1}</td>
-                    <td style={{padding:"4px 8px"}}>{r.combo.map(o=>o.team).join(" + ")}</td>
+                    <td style={{padding:"4px 8px"}}>{r.combo.map(o=>o.team).join(" & ")} to advance</td>
                     <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontWeight:500}}>
                       {fmtPrice(r)}
                     </td>
