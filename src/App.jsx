@@ -2492,6 +2492,13 @@ function AppInner() {
     return m;
   },[matchups.r1]);
 
+  // v77: same for R2
+  const teamExpGR2 = useMemo(()=>{
+    const m={};
+    for(const x of (matchups.r2||[])){if(x.homeAbbr)m[x.homeAbbr]=(m[x.homeAbbr]||0)+x.expGames;if(x.awayAbbr)m[x.awayAbbr]=(m[x.awayAbbr]||0)+x.expGames;}
+    return m;
+  },[matchups.r2]);
+
   // v73: detect teams whose R1 series is decided. Used to zero out future games for
   // eliminated players in leader markets (so a guy whose series ended 4-1 doesn't keep
   // accumulating expected goals as if there were ~3.27 more games to play).
@@ -2512,6 +2519,24 @@ function AppInner() {
     }
     return map;
   }, [allSeries.r1]);
+
+  // v77: same for R2
+  const teamR2Status = useMemo(()=>{
+    const map = {};
+    for (const s of (allSeries.r2 || [])) {
+      if (!s || !s.games || !s.homeAbbr || !s.awayAbbr) continue;
+      let hw=0, aw=0;
+      for (const g of s.games) {
+        if (g.result === "home") hw++;
+        else if (g.result === "away") aw++;
+      }
+      const played = hw + aw;
+      const over = (hw >= 4 || aw >= 4);
+      map[s.homeAbbr] = { over, gamesPlayed: played, won: hw >= 4 };
+      map[s.awayAbbr] = { over, gamesPlayed: played, won: aw >= 4 };
+    }
+    return map;
+  }, [allSeries.r2]);
 
   // v38: helper to compute one series' (hwp, awp) from sim cache or closed-form.
   // Round-aware: sim cache key now includes round prefix.
@@ -2743,6 +2768,7 @@ function AppInner() {
     const rr = blended * rm * globals.rateDiscount * statRateMultiplier(stat);
     let expTotal,actualGP;
     const r1status = teamR1Status[p.team];
+    const r2status = teamR2Status[p.team];
     if(scope==="r1"){
       // v73: if R1 series is over for this team, lock expTotal to actual games played.
       // Otherwise use the closed-form expected length.
@@ -2754,6 +2780,19 @@ function AppInner() {
       // v76: round-filtered GP — pGP accumulates across rounds, but R1 scope should
       // only count R1 games for "remaining games" calc.
       actualGP=readActualGP(p, "r1");
+    }
+    else if(scope==="r2"){
+      // v77: R2 scope mirrors R1. If team's R2 series is decided, lock expTotal to gamesPlayed.
+      // If team isn't in R2 (eliminated in R1 or hasn't been seeded yet), expTotal=0 → no future production.
+      if (r2status && r2status.over) {
+        expTotal = r2status.gamesPlayed;
+      } else if (teamExpGR2[p.team] != null) {
+        expTotal = teamExpGR2[p.team];
+      } else {
+        // Team not in R2 — no future games in this scope.
+        expTotal = readActualGP(p, "r2");
+      }
+      actualGP = readActualGP(p, "r2");
     }
     else{
       const adv=advancement[p.team]||{winR1:0.5,winConf:0.25,winCup:0.1,manualR1:false,manualConf:false,manualCup:false};
@@ -2777,12 +2816,12 @@ function AppInner() {
       // Full playoff scope: use cumulative pGP.
       actualGP=p.pGP||0;
     }
-    // v76: actual stat for R1 scope is R1-only; full scope is cumulative.
-    const actual = readActual(p, stat, scope==="r1" ? "r1" : "full");
+    // v76/77: actual stat for R1 scope is R1-only; R2 is R2-only; full scope is cumulative.
+    const actual = readActual(p, stat, scope==="r1" ? "r1" : scope==="r2" ? "r2" : "full");
     const futureLam = Math.max(0.0001, rr * Math.max(0, expTotal - actualGP));
     const lam = Math.max(0.0001, actual + futureLam);
     return {actual, futureLam, lam};
-  },[globals.rateDiscount,teamExpGR1,teamR1Status,advancement,autoR1ByTeam,autoConfByTeamFinal,autoCupByTeamFinal,autoR2ByTeam]);
+  },[globals.rateDiscount,teamExpGR1,teamExpGR2,teamR1Status,teamR2Status,advancement,autoR1ByTeam,autoConfByTeamFinal,autoCupByTeamFinal,autoR2ByTeam]);
 
   // v24 Phase E Pt3: Per-matchup series sims. Cached by matchups + globals + players.
   // Stat-independent — running all 9 stats per sim gives us PMFs for every leader market.
@@ -2853,11 +2892,24 @@ function AppInner() {
     if(!players||!players.length)return[];
     // v24 Phase E Pt3: prefer unified R1 market when in R1 scope and it's computable
     if (lScope === "r1" && r1LeaderMarket) return r1LeaderMarket;
-    const or=lScope==="r1"?globals.overroundR1:globals.overroundFull;
+    const or=lScope==="r1"?globals.overroundR1:lScope==="r2"?globals.overroundR1:globals.overroundFull;
     const pf=globals.powerFactor;
     const r = globals.dispersion;
     let pool=players.filter(p=>roleMultiplier(p.lineRole)>0);
     if(lScope==="r1"){const r1m=matchups.r1||[];const active=new Set([...r1m.filter(m=>m.homeAbbr).map(m=>m.homeAbbr),...r1m.filter(m=>m.awayAbbr).map(m=>m.awayAbbr)]);if(active.size>0)pool=pool.filter(p=>active.has(p.team));}
+    // v77: R2 scope — filter to teams that are in R2 (could be from matchups.r2 or allSeries.r2).
+    if(lScope==="r2"){
+      const active = new Set();
+      for (const m of (matchups.r2||[])) {
+        if (m.homeAbbr) active.add(m.homeAbbr);
+        if (m.awayAbbr) active.add(m.awayAbbr);
+      }
+      for (const sr of (allSeries.r2||[])) {
+        if (sr.homeAbbr) active.add(sr.homeAbbr);
+        if (sr.awayAbbr) active.add(sr.awayAbbr);
+      }
+      if (active.size>0) pool = pool.filter(p=>active.has(p.team));
+    }
     // v43: Full Playoff scope must also filter to playoff teams. Bug: previously included all players,
     // so non-playoff teams (MTL, etc.) got default 50/25/10 advancement → ~10 expected playoff games each →
     // Caufield-style false favourites. Build active set from any series in any round of allSeries.
@@ -3494,7 +3546,7 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
         ))}
       </div>
       <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",marginBottom:14}}>
-        <Seg options={[{id:"r1",label:"Round 1"},{id:"full",label:"Full Playoff"}]} value={lScope} onChange={setLScope}/>
+        <Seg options={[{id:"r1",label:"Round 1"},{id:"r2",label:"Round 2"},{id:"full",label:"Full Playoff"}]} value={lScope} onChange={setLScope}/>
         <Seg options={STATS} value={lStat} onChange={setLStat} accent="#1d4ed8"/>
         <select value={filterTeam} onChange={e=>setFilterTeam(e.target.value)} style={SEL}>
           <option value="ALL">All Teams</option>
@@ -3657,7 +3709,7 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
       </Card>:<Card>
         <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:10}}>
           <span style={{fontSize:10,fontWeight:500,textTransform:"uppercase",letterSpacing:"0.08em",color:"var(--color-text-secondary)"}}>
-            {lScope==="r1"?"R1":"Playoff"} {STATS.find(s=>s.id===lStat)?.label} Leader
+            {lScope==="r1"?"R1":lScope==="r2"?"R2":"Playoff"} {STATS.find(s=>s.id===lStat)?.label} Leader
           </span>
           <span style={{fontSize:10,color:"var(--color-text-tertiary)"}}>{displayed.length} shown</span>
         </div>
@@ -3666,7 +3718,7 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
             <TH cols={["#","Player","Team","Role","Now","λ",...(showTrue?["True%"]:[]),"Adj%","American",...(showDec?["Dec"]:[])]}/>
             <tbody>{displayed.map((p,i)=>{
               const rank=leaderMarket.indexOf(p)+1,a=toAmer(p.adjProb);
-              const now=readActual(p, lStat, lScope==="r1" ? "r1" : "full");
+              const now=readActual(p, lStat, lScope==="r1" ? "r1" : lScope==="r2" ? "r2" : "full");
               return <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)")}}>
                 <td style={{padding:"4px 8px",color:"var(--color-text-tertiary)",fontSize:10,width:28}}>{rank}</td>
                 <td style={{padding:"4px 8px",fontWeight:rank<=3?500:400}}>{p.name}</td>
@@ -6143,7 +6195,7 @@ function CompareTab({leaderMarket,STATS,lStat,setLStat,lScope,setLScope,dark}) {
       {/* Book selector + controls */}
       <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:12}}>
         <div style={{display:"flex",borderRadius:"var(--border-radius-md)",overflow:"hidden",border:"0.5px solid var(--color-border-secondary)"}}>
-          {[{id:"r1",label:"Round 1"},{id:"full",label:"Full Playoff"}].map(s=>(
+          {[{id:"r1",label:"Round 1"},{id:"r2",label:"Round 2"},{id:"full",label:"Full Playoff"}].map(s=>(
             <button key={s.id} onClick={()=>setLScope(s.id)} style={{padding:"5px 12px",fontSize:11,border:"none",cursor:"pointer",
               background:lScope===s.id?"#3b82f6":"var(--color-background-secondary)",color:lScope===s.id?"white":"var(--color-text-secondary)"}}>
               {s.label}
@@ -6253,7 +6305,7 @@ function CompareTab({leaderMarket,STATS,lStat,setLStat,lScope,setLScope,dark}) {
       {/* Comparison table */}
       <Card>
         <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:10,flexWrap:"wrap"}}>
-          <SH title={`${lScope==="r1"?"R1":"Playoff"} ${STATS.find(s=>s.id===lStat)?.label||""} — ${activeBook} vs Our Price`}
+          <SH title={`${lScope==="r1"?"R1":lScope==="r2"?"R2":"Playoff"} ${STATS.find(s=>s.id===lStat)?.label||""} — ${activeBook} vs Our Price`}
             sub={withOdds.length?`${withOdds.length} players with ${activeBook} odds · ${displayed.length} shown`:"Paste odds above to populate"}/>
           <div style={{marginLeft:"auto",display:"flex",gap:8,alignItems:"center"}}>
             <select value={filterTeam} onChange={e=>setFilterTeam(e.target.value)} style={SEL}>
