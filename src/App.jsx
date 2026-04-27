@@ -2813,7 +2813,7 @@ function AppInner() {
     {id:"sog",label:"SOG"},{id:"hit",label:"Hits"},{id:"blk",label:"Blocks"},
     {id:"tk",label:"TK"},{id:"give",label:"GV"},
   ];
-  const NAV=[{id:"leaders",l:"Leader Markets"},{id:"series",l:"Series Pricer"},{id:"compare",l:"Line Compare"},{id:"upload",l:"Upload Stats"},{id:"stats",l:"Player Stats"},{id:"roles",l:"Roles"},{id:"settings",l:"Settings"}];
+  const NAV=[{id:"leaders",l:"Leader Markets"},{id:"series",l:"Series Pricer"},{id:"parlay",l:"Series Parlay Pricer"},{id:"compare",l:"Line Compare"},{id:"upload",l:"Upload Stats"},{id:"stats",l:"Player Stats"},{id:"roles",l:"Roles"},{id:"settings",l:"Settings"}];
   const [gameModal,setGameModal] = useState(null);
 
   return (
@@ -2852,6 +2852,7 @@ function AppInner() {
           gameUploadCounter={gameUploadCounter}
           simResultsBySeries={simResultsBySeries} setSimForSeries={setSimForSeries}
           currentRound={currentRound} setCurrentRound={setCurrentRound}/>}
+        {tab==="parlay"&&<ParlayTab allSeries={seriesForRound} currentRound={currentRound} margins={margins} dark={dark}/>}
         {tab==="upload"&&<UploadTab players={players} setPlayers={setP} goalies={goalies} setGoalies={setG}
           linemates={linemates} setLinemates={setLinemates}
           exportState={exportState} importState={importState} syncStatus={syncStatus}
@@ -7267,6 +7268,229 @@ function RolesTab({players,setPlayers,dark}) {
         </table>
       </div>
     </Card>
+  </div>;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SERIES PARLAY PRICER TAB (v69)
+// ═══════════════════════════════════════════════════════════════════════════════
+// Pulls each active series's home/away advance probability (with margin already applied
+// — same number shown in Quick Summary), then enumerates all valid combinations of
+// 2..N teams across all current-round series. Excludes combos containing both teams
+// from the same series (mathematically impossible). Per-team price overrides are
+// LOCAL to this tab — they do not affect any other market or sheet.
+function ParlayTab({allSeries, currentRound, margins, dark}) {
+  const [showDec, setShowDec] = useState(true);
+  const [overrides, setOverrides] = useState({}); // key: "<rid>|<abbr>" -> decimal odds
+  const [selectedSize, setSelectedSize] = useState(2);
+
+  // Build per-team option list from the active round's series.
+  const teamOptions = useMemo(() => {
+    const opts = [];
+    (allSeries || []).forEach((s, si) => {
+      if (!s || !s.games) return;
+      const outcomes = computeOutcomes(s.games);
+      const hwp = ["4-0","4-1","4-2","4-3"].reduce((acc,k)=>acc+(outcomes[k]||0),0);
+      const awp = 1 - hwp;
+      const [adjH, adjA] = applyMargin([hwp, awp], margins.winner);
+      const sid = `s${si}`;
+      // Eliminated teams (advance prob ~0) are dropped — they cannot be parlayed.
+      if (adjH > 0.001) opts.push({
+        sid, team: s.homeTeam || s.homeAbbr || `Home${si+1}`,
+        abbr: s.homeAbbr || "", modelP: adjH, modelDec: toDec(adjH),
+      });
+      if (adjA > 0.001) opts.push({
+        sid, team: s.awayTeam || s.awayAbbr || `Away${si+1}`,
+        abbr: s.awayAbbr || "", modelP: adjA, modelDec: toDec(adjA),
+      });
+    });
+    return opts;
+  }, [allSeries, margins.winner]);
+
+  // Effective decimal per team: override if present, else model.
+  const effDec = (opt) => {
+    const k = `${opt.sid}|${opt.abbr}`;
+    return overrides[k] != null ? overrides[k] : opt.modelDec;
+  };
+
+  // Generate all combinations of `k` teams from teamOptions, excluding same-series pairs.
+  const buildCombos = (k) => {
+    const result = [];
+    const n = teamOptions.length;
+    const idxs = new Array(k).fill(0).map((_,i)=>i);
+    function recurse(start, picked) {
+      if (picked.length === k) {
+        // Check no two share a series
+        const sids = new Set();
+        for (const p of picked) {
+          if (sids.has(p.sid)) return;
+          sids.add(p.sid);
+        }
+        result.push(picked.slice());
+        return;
+      }
+      for (let i = start; i < n; i++) {
+        // Early prune: skip if same-series as any already picked
+        if (picked.some(p => p.sid === teamOptions[i].sid)) continue;
+        picked.push(teamOptions[i]);
+        recurse(i + 1, picked);
+        picked.pop();
+      }
+    }
+    if (k <= n) recurse(0, []);
+    return result;
+  };
+
+  const N = teamOptions.length / 2; // number of active series (rough)
+  const sizes = [];
+  // Max parlay size = number of active series (one team per series)
+  // Determine from unique sids:
+  const uniqueSids = new Set(teamOptions.map(o=>o.sid));
+  const maxSize = uniqueSids.size;
+  for (let k = 2; k <= maxSize; k++) sizes.push(k);
+
+  const combos = useMemo(()=>buildCombos(selectedSize), [selectedSize, teamOptions, overrides]);
+  const rows = useMemo(()=>{
+    return combos.map(combo => {
+      const dec = combo.reduce((a,b)=>a*effDec(b), 1);
+      const p = 1/dec;
+      return {combo, dec, american: toAmer(p)};
+    }).sort((a,b)=>a.dec - b.dec);
+  }, [combos, overrides]);
+
+  const fmtPrice = (r) => showDec ? r.dec.toFixed(2) : (r.american>0?`+${r.american}`:`${r.american}`);
+  const fmtTeam = (opt) => {
+    const d = effDec(opt);
+    const p = 1/d;
+    const a = toAmer(p);
+    if (showDec) return `${opt.team} (${d.toFixed(2)})`;
+    return `${opt.team} (${a>0?`+${a}`:a})`;
+  };
+
+  const copyText = useMemo(()=>{
+    return rows.map(r => {
+      const teams = r.combo.map(o=>o.team).join(" + ");
+      return `${teams}\t${fmtPrice(r)}`;
+    }).join("\n");
+  }, [rows, showDec]);
+
+  return <div style={{display:"grid",gridTemplateColumns:"320px minmax(0,1fr)",gap:16,alignItems:"flex-start"}}>
+    {/* LEFT: matchup price overrides */}
+    <Card>
+      <SH title="Matchup Prices" sub={`Round: ${currentRound?.toUpperCase() || "R1"} · Edits affect only this tab`}/>
+      {teamOptions.length === 0 && <div style={{fontSize:12,color:"var(--color-text-tertiary)",fontStyle:"italic"}}>No active series in this round.</div>}
+      {teamOptions.length > 0 && <table style={{width:"100%",fontSize:11,borderCollapse:"collapse"}}>
+        <thead>
+          <tr style={{borderBottom:"0.5px solid var(--color-border-secondary)",color:"var(--color-text-tertiary)"}}>
+            <th style={{padding:"4px 4px",textAlign:"left",fontWeight:400}}>Team</th>
+            <th style={{padding:"4px 4px",textAlign:"right",fontWeight:400}}>Model</th>
+            <th style={{padding:"4px 4px",textAlign:"right",fontWeight:400}}>Override</th>
+          </tr>
+        </thead>
+        <tbody>
+          {teamOptions.map((opt,i) => {
+            const k = `${opt.sid}|${opt.abbr}`;
+            const ovr = overrides[k];
+            // Group separator between series
+            const prevSid = i>0 ? teamOptions[i-1].sid : null;
+            const sep = prevSid && prevSid !== opt.sid;
+            return <tr key={k} style={{borderTop: sep ? "0.5px solid var(--color-border-tertiary)" : "none"}}>
+              <td style={{padding:"4px 4px"}}>{opt.team}</td>
+              <td style={{padding:"4px 4px",textAlign:"right",fontFamily:"var(--font-mono)",color:"var(--color-text-secondary)"}}>
+                {opt.modelDec.toFixed(2)}
+              </td>
+              <td style={{padding:"4px 4px",textAlign:"right"}}>
+                <input type="number" step="0.01" min="1.01" max="500"
+                  value={ovr ?? ""} placeholder="—"
+                  onChange={e=>{
+                    const v = e.target.value;
+                    setOverrides(prev => {
+                      const next = {...prev};
+                      if (v === "" || v == null) delete next[k];
+                      else { const num = parseFloat(v); if (num > 1) next[k] = num; }
+                      return next;
+                    });
+                  }}
+                  style={{width:60,padding:"2px 4px",fontSize:11,fontFamily:"var(--font-mono)",textAlign:"right",
+                    background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
+                    borderRadius:3,color:ovr!=null?"#fbbf24":"var(--color-text-primary)"}}/>
+              </td>
+            </tr>;
+          })}
+        </tbody>
+      </table>}
+      {Object.keys(overrides).length > 0 && <button
+        onClick={()=>setOverrides({})}
+        style={{marginTop:8,padding:"4px 10px",fontSize:10,background:"transparent",
+          border:"0.5px solid var(--color-border-secondary)",color:"var(--color-text-secondary)",
+          borderRadius:3,cursor:"pointer"}}>
+        Clear all overrides
+      </button>}
+    </Card>
+
+    {/* RIGHT: parlay combos */}
+    <div>
+      <Card>
+        <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:10,flexWrap:"wrap"}}>
+          <SH title="Series Parlay Pricer" sub={`${rows.length} combos · ${selectedSize}-team`}/>
+          <div style={{marginLeft:"auto",display:"flex",gap:8,alignItems:"center"}}>
+            <Toggle label="Decimal" checked={showDec} onChange={setShowDec}/>
+          </div>
+        </div>
+
+        {/* size selector */}
+        <div style={{display:"flex",gap:0,marginBottom:10,borderRadius:"var(--border-radius-md)",overflow:"hidden",border:"0.5px solid var(--color-border-secondary)",width:"fit-content"}}>
+          {sizes.map(k => <button key={k} onClick={()=>setSelectedSize(k)} style={{
+            padding:"5px 12px",fontSize:11,border:"none",
+            borderRight:"0.5px solid var(--color-border-tertiary)",cursor:"pointer",
+            background:selectedSize===k?"#1d4ed8":"var(--color-background-secondary)",
+            color:selectedSize===k?"white":"var(--color-text-secondary)"}}>
+            {k} teams
+          </button>)}
+        </div>
+
+        {rows.length === 0 && <div style={{fontSize:12,color:"var(--color-text-tertiary)",fontStyle:"italic",padding:"20px 0"}}>
+          No valid combinations.
+        </div>}
+
+        {rows.length > 0 && <>
+          <div style={{maxHeight:600,overflowY:"auto",border:"0.5px solid var(--color-border-secondary)",borderRadius:4}}>
+            <table style={{width:"100%",fontSize:11,borderCollapse:"collapse"}}>
+              <thead style={{position:"sticky",top:0,background:dark?"#131625":"#fff",zIndex:1}}>
+                <tr style={{borderBottom:"0.5px solid var(--color-border-secondary)",color:"var(--color-text-tertiary)"}}>
+                  <th style={{padding:"6px 8px",textAlign:"left",fontWeight:400,width:40}}>#</th>
+                  <th style={{padding:"6px 8px",textAlign:"left",fontWeight:400}}>Teams</th>
+                  <th style={{padding:"6px 8px",textAlign:"right",fontWeight:400,width:80}}>Price</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r,i)=>(
+                  <tr key={i} style={{borderTop:"0.5px solid var(--color-border-tertiary)"}}>
+                    <td style={{padding:"4px 8px",color:"var(--color-text-tertiary)",fontFamily:"var(--font-mono)"}}>{i+1}</td>
+                    <td style={{padding:"4px 8px"}}>{r.combo.map(o=>o.team).join(" + ")}</td>
+                    <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontWeight:500}}>
+                      {fmtPrice(r)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div style={{marginTop:10,display:"flex",gap:8,alignItems:"center"}}>
+            <button onClick={()=>{
+              navigator.clipboard?.writeText(copyText);
+            }} style={{padding:"5px 12px",fontSize:11,background:"#1d4ed8",color:"white",
+              border:"none",borderRadius:4,cursor:"pointer"}}>
+              Copy all to clipboard
+            </button>
+            <span style={{fontSize:10,color:"var(--color-text-tertiary)"}}>
+              Tab-separated: Teams \t Price
+            </span>
+          </div>
+        </>}
+      </Card>
+    </div>
   </div>;
 }
 
