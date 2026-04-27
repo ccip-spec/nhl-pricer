@@ -2454,6 +2454,27 @@ function AppInner() {
     return m;
   },[matchups.r1]);
 
+  // v73: detect teams whose R1 series is decided. Used to zero out future games for
+  // eliminated players in leader markets (so a guy whose series ended 4-1 doesn't keep
+  // accumulating expected goals as if there were ~3.27 more games to play).
+  // Maps team abbr → { over: bool, gamesPlayed: int, won: bool }
+  const teamR1Status = useMemo(()=>{
+    const map = {};
+    for (const s of (allSeries.r1 || [])) {
+      if (!s || !s.games || !s.homeAbbr || !s.awayAbbr) continue;
+      let hw=0, aw=0;
+      for (const g of s.games) {
+        if (g.result === "home") hw++;
+        else if (g.result === "away") aw++;
+      }
+      const played = hw + aw;
+      const over = (hw >= 4 || aw >= 4);
+      map[s.homeAbbr] = { over, gamesPlayed: played, won: hw >= 4 };
+      map[s.awayAbbr] = { over, gamesPlayed: played, won: aw >= 4 };
+    }
+    return map;
+  }, [allSeries.r1]);
+
   // v38: helper to compute one series' (hwp, awp) from sim cache or closed-form.
   // Round-aware: sim cache key now includes round prefix.
   // v39: clinch detection — if a team has 4 wins in realized results, return 1.0/0.0 immediately.
@@ -2683,7 +2704,17 @@ function AppInner() {
     // v21: stat-category rate adjustment (scoring = raw discount; physical stats go up; neutral stats mild up)
     const rr = blended * rm * globals.rateDiscount * statRateMultiplier(stat);
     let expTotal,actualGP;
-    if(scope==="r1"){expTotal=teamExpGR1[p.team]||5.82;actualGP=p.pGP||0;}
+    const r1status = teamR1Status[p.team];
+    if(scope==="r1"){
+      // v73: if R1 series is over for this team, lock expTotal to actual games played.
+      // Otherwise use the closed-form expected length.
+      if (r1status && r1status.over) {
+        expTotal = r1status.gamesPlayed;
+      } else {
+        expTotal = teamExpGR1[p.team]||5.82;
+      }
+      actualGP=p.pGP||0;
+    }
     else{
       const adv=advancement[p.team]||{winR1:0.5,winConf:0.25,winCup:0.1,manualR1:false,manualConf:false,manualCup:false};
       // v40: respect per-field manual override flag — if set, use stored value; else use auto.
@@ -2696,14 +2727,20 @@ function AppInner() {
       // P(wins R2) = P(makes R3): use autoR2ByTeam if available, else interpolate between r1 and conf.
       const autoR2 = (autoR2ByTeam||{})[p.team];
       const r2 = (autoR2 != null && !adv.manualConf) ? autoR2 : Math.sqrt(Math.max(0, r1 * conf));
-      expTotal=5.82*(1 + r1 + r2 + conf);
+      // v73: if R1 series is over and team lost, expTotal locks to gamesPlayed (no future).
+      // If they won, advancement probs handle further-round expectation correctly.
+      if (r1status && r1status.over && !r1status.won) {
+        expTotal = r1status.gamesPlayed;
+      } else {
+        expTotal=5.82*(1 + r1 + r2 + conf);
+      }
       actualGP=p.pGP||0;
     }
     const actual = readActual(p, stat);
     const futureLam = Math.max(0.0001, rr * Math.max(0, expTotal - actualGP));
     const lam = Math.max(0.0001, actual + futureLam);
     return {actual, futureLam, lam};
-  },[globals.rateDiscount,teamExpGR1,advancement,autoR1ByTeam,autoConfByTeamFinal,autoCupByTeamFinal,autoR2ByTeam]);
+  },[globals.rateDiscount,teamExpGR1,teamR1Status,advancement,autoR1ByTeam,autoConfByTeamFinal,autoCupByTeamFinal,autoR2ByTeam]);
 
   // v24 Phase E Pt3: Per-matchup series sims. Cached by matchups + globals + players.
   // Stat-independent — running all 9 stats per sim gives us PMFs for every leader market.
@@ -4197,6 +4234,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
     {id:"mostgoals",l:"Most Goals"},{id:"teamgoals",l:"Team Goals"},
     {id:"parlay",l:"Parlay"},
     {id:"props",l:"O/U Props"},{id:"binary",l:"1+ Props"},
+    {id:"propcombos",l:"Prop Combos"},
     {id:"goaliesaves",l:"Goalie Saves"},
     {id:"playerdetail",l:"Player Detail"},
     {id:"seriesleader",l:"Series Leader"},
@@ -4339,7 +4377,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
         </>}
       </Card>}
 
-      <div style={{display:"grid",gridTemplateColumns:"340px minmax(0,1fr)",gap:14,alignItems:"start"}}>
+      <div style={{display:"grid",gridTemplateColumns:"380px minmax(0,1fr)",gap:18,alignItems:"start"}}>
         <div>
           <Card style={{marginBottom:10}}>
             <SH title="Series Setup"/>
@@ -4962,6 +5000,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
 
           {mkt==="props"&&<PropsPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark} mode="ou" simResult={simResult}/>}
           {mkt==="binary"&&<PropsPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark} mode="binary" simResult={simResult}/>}
+          {mkt==="propcombos"&&<PropCombosPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark}/>}
           {mkt==="goaliesaves"&&<GoalieSavesPanel s={s} expG={expG} goalies={goalies} margins={margins} showTrue={showTrue} dark={dark}/>}
           {mkt==="playerdetail"&&<PlayerDetailPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark}/>}
           {mkt==="seriesleader"&&<SeriesLeaderPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark} simResult={simResult} simStale={simStale}/>}
@@ -5207,6 +5246,335 @@ function PropsPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,p
         })}</tbody>
       </table>
     </div>
+  </Card>;
+}
+
+// ─── PROP COMBOS PANEL (v73) ─────────────────────────────────────────────────
+// 2-3 player combos with AND / OR / MORE operators across any stat with configurable thresholds.
+// Independence assumption between players (simple, fine for first version per CC).
+// MORE is 2-player only and supports 2-way (strict A>B) or 3-way with push (A>B / B>A / tie).
+function PropCombosPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,players,globals,margins,showTrue,dark}) {
+  const STATS=[
+    {id:"g",label:"Goals",mk:"propsGoals"},{id:"a",label:"Assists",mk:"propsAssists"},
+    {id:"pts",label:"Points",mk:"propsPoints"},{id:"sog",label:"SOG",mk:"propsSOG"},
+    {id:"hit",label:"Hits",mk:"propsHits"},{id:"blk",label:"Blocks",mk:"propsBlocks"},
+    {id:"tk",label:"Takeaways",mk:"propsTakeaways"},
+    {id:"give",label:"Giveaways",mk:"propsGiveaways"},
+  ];
+  const pool = useMemo(()=>{
+    if(!players)return[];
+    const teams=new Set([s.homeAbbr,s.awayAbbr].filter(Boolean));
+    return players.filter(p=>teams.has(p.team)&&!OUT_ROLES.has(p.lineRole))
+      .sort((a,b)=>(b.g_pg||0)-(a.g_pg||0));
+  },[players,s.homeAbbr,s.awayAbbr]);
+
+  // Slot state: each slot has {playerKey, stat, line}
+  const [slots, setSlots] = useState([
+    {playerKey:"", stat:"g", line:1},
+    {playerKey:"", stat:"g", line:1},
+  ]);
+  const [op, setOp] = useState("OR"); // "OR" | "AND" | "MORE"
+  const [moreMode, setMoreMode] = useState("2way"); // "2way" | "3way"
+
+  const addSlot = () => {
+    if (slots.length >= 5) return;
+    setSlots(prev => [...prev, {playerKey:"", stat:"g", line:1}]);
+    if (op === "MORE") setOp("OR"); // MORE not allowed with 3+
+  };
+  const removeSlot = (i) => {
+    if (slots.length <= 2) return;
+    setSlots(prev => prev.filter((_,j)=>j!==i));
+  };
+
+  // Per-slot lambda + PMF computation. Mirrors PropsPanel logic.
+  const slotData = useMemo(()=>{
+    const {rateDiscount,dispersion}=globals;
+    return slots.map(slot => {
+      if (!slot.playerKey) return null;
+      const p = pool.find(x => `${x.name}|${x.team}` === slot.playerKey);
+      if (!p) return null;
+      const stat = slot.stat;
+      const r = dispersionFor(stat, dispersion);
+      const rm = roleMultiplier(p.lineRole, stat);
+      if (rm === 0) return {p, stat, futureLam:0.0001, actual:0, r, lam:0.0001};
+      const pgKey = stat==="tk"?"take_pg":stat==="pim"?"pim_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
+      const shrunk = shrinkRate(p[pgKey], p.gp, stat);
+      const rm_rate_disc = shrunk*rm*rateDiscount*statRateMultiplier(stat);
+      const remainingGames = Math.max(0, expG - (p.pGP||0));
+      const actual = readActual(p, stat);
+      const gEq = SCORING_STATS.has(stat) && gameEquivalentsFor
+        ? gameEquivalentsFor(p.team, stat)
+        : (gameEquivalents!=null && SCORING_STATS.has(stat)) ? gameEquivalents : remainingGames;
+      const futureLam = Math.max(0.0001, rm_rate_disc*gEq);
+      const lam = Math.max(0.0001, actual + futureLam);
+      return {p, stat, futureLam, actual, r, lam};
+    });
+  }, [slots, pool, globals, expG, gameEquivalents, gameEquivalentsFor]);
+
+  // Per-slot P(X >= line) using NB CDF on FUTURE lambda
+  const slotProbs = slotData.map((d, i) => {
+    if (!d) return null;
+    const line = slots[i].line;
+    const lineInt = Math.ceil(line - 0.001);
+    const needMore = Math.max(0, lineInt - d.actual);
+    if (needMore === 0) return 1; // already has it
+    return 1 - nbCDF(needMore - 1, d.futureLam, d.r);
+  });
+
+  // Build PMF for a slot's TOTAL (actual + future) — used for MORE comparisons.
+  // Future is NB(futureLam, r); total = actual + future. Truncate at 30 for compute speed.
+  const slotPMFs = slotData.map(d => {
+    if (!d) return null;
+    const KMAX = 30;
+    const pmf = new Array(KMAX+1).fill(0);
+    for (let k = 0; k <= KMAX; k++) {
+      // future ≥ 0; total = actual + future. So future = k - actual.
+      const fk = k - d.actual;
+      if (fk < 0) continue;
+      pmf[k] = nbPMF(fk, d.futureLam, d.r);
+    }
+    return pmf;
+  });
+
+  // Compute combo probability
+  let trueProb = null;
+  let pushProb = 0;
+  let twoWayB = null; // for MORE, the "B more" prob
+
+  const allSet = slotData.every(d => d != null);
+  if (allSet) {
+    if (op === "OR") {
+      // 1 - Π(1 - p_i)
+      let q = 1;
+      for (const p of slotProbs) q *= (1 - p);
+      trueProb = 1 - q;
+    } else if (op === "AND") {
+      let q = 1;
+      for (const p of slotProbs) q *= p;
+      trueProb = q;
+    } else if (op === "MORE" && slotData.length === 2) {
+      // P(A > B), P(A < B), P(A = B) by convolving over PMFs
+      const [pmfA, pmfB] = slotPMFs;
+      let pAGreater = 0, pBGreater = 0, pTie = 0;
+      for (let a = 0; a < pmfA.length; a++) {
+        for (let b = 0; b < pmfB.length; b++) {
+          const j = pmfA[a] * pmfB[b];
+          if (a > b) pAGreater += j;
+          else if (b > a) pBGreater += j;
+          else pTie += j;
+        }
+      }
+      if (moreMode === "2way") {
+        // Ties go to neither — typically book renormalizes. Assume "no push": ties reduce to nothing,
+        // so renormalize over no-tie outcomes.
+        const sum = pAGreater + pBGreater;
+        trueProb = sum > 0 ? pAGreater / sum : 0.5;
+        twoWayB = sum > 0 ? pBGreater / sum : 0.5;
+      } else {
+        trueProb = pAGreater;
+        twoWayB = pBGreater;
+        pushProb = pTie;
+      }
+    }
+  }
+
+  // Margin: use the strictest of involved stats' margins (or simple average). Default 1.05.
+  const orMargin = useMemo(()=>{
+    if (!allSet) return 1.05;
+    const ms = slotData.map(d => margins[(STATS.find(x=>x.id===d.stat)||{}).mk] || 1.05);
+    return Math.max(...ms);
+  }, [slotData, allSet, margins]);
+
+  let priceA = null, priceB = null, priceTie = null;
+  if (trueProb != null) {
+    if (op === "MORE" && moreMode === "3way") {
+      // Apply margin proportionally across 3 outcomes
+      const [adjA, adjB, adjT] = applyMargin([trueProb, twoWayB, pushProb], orMargin);
+      priceA = adjA; priceB = adjB; priceTie = adjT;
+    } else if (op === "MORE" && moreMode === "2way") {
+      const [adjA, adjB] = applyMargin([trueProb, twoWayB], orMargin);
+      priceA = adjA; priceB = adjB;
+    } else {
+      // 2-outcome (Yes / No)
+      const [adjY, adjN] = applyMargin([trueProb, 1 - trueProb], orMargin);
+      priceA = adjY; priceB = adjN;
+    }
+  }
+
+  const labelText = (() => {
+    const parts = slotData.map((d,i) => {
+      if (!d) return `[Slot ${i+1}]`;
+      const statLabel = (STATS.find(x=>x.id===d.stat)||{}).label || d.stat;
+      const line = slots[i].line;
+      const lineInt = Math.ceil(line - 0.001);
+      return `${d.p.name} ${lineInt}+ ${statLabel}`;
+    });
+    if (op === "OR") return parts.join(" OR ");
+    if (op === "AND") return parts.join(" AND ");
+    if (op === "MORE" && slotData.length === 2 && slotData[0] && slotData[1]) {
+      const stat0 = (STATS.find(x=>x.id===slotData[0].stat)||{}).label || slotData[0].stat;
+      return `${slotData[0].p.name} more ${stat0} than ${slotData[1].p.name}`;
+    }
+    return parts.join(" ?? ");
+  })();
+
+  return <Card>
+    <SH title="Prop Combos" sub={`${s.homeAbbr || s.homeTeam || "Home"} vs ${s.awayAbbr || s.awayTeam || "Away"} · independence assumption`}/>
+
+    {/* Operator selector */}
+    <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:12,flexWrap:"wrap"}}>
+      <span style={{fontSize:11,color:"var(--color-text-tertiary)"}}>Operator:</span>
+      {["OR","AND",...(slots.length===2?["MORE"]:[])].map(o => (
+        <button key={o} onClick={()=>setOp(o)} style={{
+          padding:"4px 12px",fontSize:11,fontWeight:500,
+          background:op===o?"#1d4ed8":"var(--color-background-secondary)",
+          color:op===o?"white":"var(--color-text-secondary)",
+          border:"0.5px solid var(--color-border-secondary)",
+          borderRadius:4,cursor:"pointer"}}>{o}</button>
+      ))}
+      {op === "MORE" && <>
+        <span style={{fontSize:11,color:"var(--color-text-tertiary)",marginLeft:12}}>Mode:</span>
+        {["2way","3way"].map(m => (
+          <button key={m} onClick={()=>setMoreMode(m)} style={{
+            padding:"4px 10px",fontSize:11,
+            background:moreMode===m?"#7c3aed":"var(--color-background-secondary)",
+            color:moreMode===m?"white":"var(--color-text-secondary)",
+            border:"0.5px solid var(--color-border-secondary)",
+            borderRadius:4,cursor:"pointer"}}>{m==="2way"?"2-way (no push)":"3-way (push)"}</button>
+        ))}
+      </>}
+    </div>
+
+    {/* Slot configurators */}
+    <div style={{display:"grid",gap:8,marginBottom:14}}>
+      {slots.map((slot, i) => (
+        <div key={i} style={{display:"flex",gap:8,alignItems:"center",padding:8,
+          background:"var(--color-background-secondary)",borderRadius:4,border:"0.5px solid var(--color-border-secondary)"}}>
+          <span style={{fontSize:10,color:"var(--color-text-tertiary)",fontWeight:500,width:50}}>Player {i+1}</span>
+          <select value={slot.playerKey} onChange={e=>{
+            const v = e.target.value;
+            setSlots(prev => prev.map((sl,j)=>j===i?{...sl, playerKey:v}:sl));
+          }} style={{flex:1,padding:"4px 6px",fontSize:11,background:"var(--color-background-primary)",
+            color:"var(--color-text-primary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,minWidth:160}}>
+            <option value="">— select player —</option>
+            {pool.map(p => <option key={`${p.name}|${p.team}`} value={`${p.name}|${p.team}`}>
+              {p.name} ({p.team})
+            </option>)}
+          </select>
+          <select value={slot.stat} onChange={e=>{
+            const v = e.target.value;
+            setSlots(prev => prev.map((sl,j)=>j===i?{...sl, stat:v}:sl));
+          }} style={{padding:"4px 6px",fontSize:11,background:"var(--color-background-primary)",
+            color:"var(--color-text-primary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:3}}>
+            {STATS.map(st => <option key={st.id} value={st.id}>{st.label}</option>)}
+          </select>
+          {op !== "MORE" && <>
+            <span style={{fontSize:10,color:"var(--color-text-tertiary)"}}>Line:</span>
+            <input type="number" min="0.5" step="0.5" value={slot.line}
+              onChange={e=>{
+                const v = parseFloat(e.target.value)||0.5;
+                setSlots(prev => prev.map((sl,j)=>j===i?{...sl, line:v}:sl));
+              }}
+              style={{width:50,padding:"4px 6px",fontSize:11,background:"var(--color-background-primary)",
+                color:"var(--color-text-primary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,textAlign:"right"}}/>
+            <span style={{fontSize:10,color:"var(--color-text-tertiary)"}}>+</span>
+          </>}
+          {/* Per-slot diagnostic */}
+          {slotData[i] && <span style={{fontSize:10,color:"var(--color-text-tertiary)",marginLeft:6,fontFamily:"var(--font-mono)"}}>
+            λ {slotData[i].lam.toFixed(2)} (now {slotData[i].actual})
+            {op !== "MORE" && slotProbs[i]!=null && ` · ${(slotProbs[i]*100).toFixed(1)}%`}
+          </span>}
+          {slots.length > 2 && <button onClick={()=>removeSlot(i)} style={{
+            padding:"2px 8px",fontSize:11,background:"transparent",
+            color:"#ef4444",border:"0.5px solid var(--color-border-secondary)",
+            borderRadius:3,cursor:"pointer"}}>×</button>}
+        </div>
+      ))}
+      {slots.length < 5 && <button onClick={addSlot} style={{
+        padding:"6px 12px",fontSize:11,background:"transparent",
+        color:"var(--color-text-secondary)",
+        border:"1px dashed var(--color-border-secondary)",borderRadius:4,cursor:"pointer",width:"fit-content"}}>
+        + Add player ({slots.length}/5)
+      </button>}
+    </div>
+
+    {/* Result */}
+    {trueProb != null ? <div style={{padding:12,background:"var(--color-background-secondary)",borderRadius:4,border:"0.5px solid var(--color-border-secondary)"}}>
+      <div style={{fontSize:13,fontWeight:500,marginBottom:8}}>{labelText}</div>
+      {op === "MORE" && moreMode === "3way" ? <table style={{width:"100%",fontSize:12}}>
+        <thead><tr style={{color:"var(--color-text-tertiary)",fontSize:10,textAlign:"left"}}>
+          <th style={{padding:"4px 0",fontWeight:400}}>Outcome</th>
+          {showTrue && <th style={{padding:"4px 0",fontWeight:400,textAlign:"right"}}>True %</th>}
+          <th style={{padding:"4px 0",fontWeight:400,textAlign:"right"}}>Adj %</th>
+          <th style={{padding:"4px 0",fontWeight:400,textAlign:"right"}}>American</th>
+          <th style={{padding:"4px 0",fontWeight:400,textAlign:"right"}}>Decimal</th>
+        </tr></thead>
+        <tbody>
+          {[
+            [`${slotData[0].p.name} more`, trueProb, priceA],
+            [`${slotData[1].p.name} more`, twoWayB, priceB],
+            [`Tie`, pushProb, priceTie],
+          ].map(([n,tp,ap])=>(
+            <tr key={n} style={{borderTop:"0.5px solid var(--color-border-tertiary)"}}>
+              <td style={{padding:"6px 0"}}>{n}</td>
+              {showTrue && <td style={{padding:"6px 0",textAlign:"right",fontFamily:"var(--font-mono)",color:"var(--color-text-tertiary)"}}>{(tp*100).toFixed(1)}%</td>}
+              <td style={{padding:"6px 0",textAlign:"right",fontFamily:"var(--font-mono)"}}>{(ap*100).toFixed(1)}%</td>
+              <td style={{padding:"6px 0",textAlign:"right",fontFamily:"var(--font-mono)",fontWeight:500}}>{fmt(ap)}</td>
+              <td style={{padding:"6px 0",textAlign:"right",fontFamily:"var(--font-mono)"}}>{toDec(ap).toFixed(2)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table> : op === "MORE" ? <table style={{width:"100%",fontSize:12}}>
+        <thead><tr style={{color:"var(--color-text-tertiary)",fontSize:10,textAlign:"left"}}>
+          <th style={{padding:"4px 0",fontWeight:400}}>Outcome</th>
+          {showTrue && <th style={{padding:"4px 0",fontWeight:400,textAlign:"right"}}>True %</th>}
+          <th style={{padding:"4px 0",fontWeight:400,textAlign:"right"}}>Adj %</th>
+          <th style={{padding:"4px 0",fontWeight:400,textAlign:"right"}}>American</th>
+          <th style={{padding:"4px 0",fontWeight:400,textAlign:"right"}}>Decimal</th>
+        </tr></thead>
+        <tbody>
+          {[
+            [`${slotData[0].p.name} more`, trueProb, priceA],
+            [`${slotData[1].p.name} more`, twoWayB, priceB],
+          ].map(([n,tp,ap])=>(
+            <tr key={n} style={{borderTop:"0.5px solid var(--color-border-tertiary)"}}>
+              <td style={{padding:"6px 0"}}>{n}</td>
+              {showTrue && <td style={{padding:"6px 0",textAlign:"right",fontFamily:"var(--font-mono)",color:"var(--color-text-tertiary)"}}>{(tp*100).toFixed(1)}%</td>}
+              <td style={{padding:"6px 0",textAlign:"right",fontFamily:"var(--font-mono)"}}>{(ap*100).toFixed(1)}%</td>
+              <td style={{padding:"6px 0",textAlign:"right",fontFamily:"var(--font-mono)",fontWeight:500}}>{fmt(ap)}</td>
+              <td style={{padding:"6px 0",textAlign:"right",fontFamily:"var(--font-mono)"}}>{toDec(ap).toFixed(2)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table> : <table style={{width:"100%",fontSize:12}}>
+        <thead><tr style={{color:"var(--color-text-tertiary)",fontSize:10,textAlign:"left"}}>
+          <th style={{padding:"4px 0",fontWeight:400}}>Outcome</th>
+          {showTrue && <th style={{padding:"4px 0",fontWeight:400,textAlign:"right"}}>True %</th>}
+          <th style={{padding:"4px 0",fontWeight:400,textAlign:"right"}}>Adj %</th>
+          <th style={{padding:"4px 0",fontWeight:400,textAlign:"right"}}>American</th>
+          <th style={{padding:"4px 0",fontWeight:400,textAlign:"right"}}>Decimal</th>
+        </tr></thead>
+        <tbody>
+          {[
+            [`Yes`, trueProb, priceA],
+            [`No`, 1-trueProb, priceB],
+          ].map(([n,tp,ap])=>(
+            <tr key={n} style={{borderTop:"0.5px solid var(--color-border-tertiary)"}}>
+              <td style={{padding:"6px 0"}}>{n}</td>
+              {showTrue && <td style={{padding:"6px 0",textAlign:"right",fontFamily:"var(--font-mono)",color:"var(--color-text-tertiary)"}}>{(tp*100).toFixed(1)}%</td>}
+              <td style={{padding:"6px 0",textAlign:"right",fontFamily:"var(--font-mono)"}}>{(ap*100).toFixed(1)}%</td>
+              <td style={{padding:"6px 0",textAlign:"right",fontFamily:"var(--font-mono)",fontWeight:500}}>{fmt(ap)}</td>
+              <td style={{padding:"6px 0",textAlign:"right",fontFamily:"var(--font-mono)"}}>{toDec(ap).toFixed(2)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>}
+      <div style={{marginTop:8,fontSize:9,color:"var(--color-text-tertiary)"}}>
+        Margin: {orMargin.toFixed(2)}x (max of involved stats)
+      </div>
+    </div> : <div style={{fontSize:12,color:"var(--color-text-tertiary)",fontStyle:"italic"}}>
+      Select a player for each slot to see the combo price.
+    </div>}
   </Card>;
 }
 
