@@ -433,9 +433,9 @@ function buildSimInputs(effG, homeAbbr, awayAbbr, players, globals, goalieQualit
       // v53: role multiplier is stat-aware now (TOP6 +bump for scoring, -penalty for hits)
       const rm = roleMultiplier(p.lineRole, stat);
       const shrunk = shrinkRate(p[pgKey(stat)], p.gp, stat);
-      // v66: blend with playoff per-game rate (scoring stats only; weight ramps up to 0.30 by pGP=6)
-      const blended = blendedRate(p, stat, shrunk);
-      const rr = blended * rm * globals.rateDiscount * statRateMultiplier(stat);
+      // v68: NO blend here. Sim drives N+ / O/U / 1+ markets — blend was over-weighting
+      // playoff sample for those markets. Series Leader has its own blend at site 2.
+      const rr = shrunk * rm * globals.rateDiscount * statRateMultiplier(stat);
       const actual = p[actKey(stat)] || 0;
       // Per-game future lambda for game i (if game played already -> 0; else rr × scale × goalieMult)
       const perGameFuture = [];
@@ -1067,9 +1067,10 @@ function shrinkRate(rawRate, gp, stat) {
 // v66: recent-form blending. Blends regular-season rate with realized playoff per-game rate,
 // weighted by playoff sample size.
 // v67: cap raised 0.30 → 0.50, slope raised 0.05 → 0.10. At pGP=5 → w=0.50 cap.
-// Rationale: book comparisons (DK on hot depth players like Kapanen, JEE) showed our model
-// under-weighted playoff sample — books trust 3-4 games of hot scoring more than we did.
-// Symmetric (mean-preserving) — also correctly fades cold stars like Eichel.
+// v68: SCOPED TO SERIES LEADER ONLY. v67 inadvertently bled into Props / Player Detail / Sim,
+// breaking N+ market prices (Kapanen 4+ at -676 vs FD -115; Faber 6+ at +819 vs FD +10000).
+// Goal of pricer is to MATCH market consensus (operating as a competitor book),
+// not to disagree. Props/Sim/PlayerDetail revert to pure shrunk season rate.
 // Formula: effective = (1-w) × season + w × playoff, w = min(0.50, pGP × 0.10).
 // Only applies to scoring stats (g/a/sog) where reg→playoff signal transfers cleanly.
 const BLEND_STATS = new Set(["g","a","sog"]);
@@ -5004,10 +5005,10 @@ function PropsPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,p
       const pgKey=stat==="tk"?"take_pg":stat==="pim"?"pim_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
       // v13: shrink rate for <20 GP; scratched already filtered out above
       const shrunk=shrinkRate(p[pgKey],p.gp,stat);
-      // v66: blend with playoff per-game rate (scoring stats only)
-      const blended = blendedRate(p, stat, shrunk);
+      // v68: NO blend in Props. Goal is market-consensus matching; v67 blend caused
+      // 200+ cent gaps on N+ markets (Kapanen 4+ -676 vs FD -115).
       // v21: stat-category rate adjustment (physical stats go up, scoring stays at baseline discount)
-      const rm_rate_disc = blended*rm*rateDiscount*statRateMultiplier(stat);
+      const rm_rate_disc = shrunk*rm*rateDiscount*statRateMultiplier(stat);
       const remainingGames = Math.max(0, expG - (p.pGP||0));
       const actual=readActual(p, stat);
       // v16: for scoring stats, use per-game probability-weighted goal equivalents (respects per-game expTotal);
@@ -5338,7 +5339,8 @@ function PlayerDetailPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalen
     const r = dispersionFor(stat, dispersion);
     const rm = roleMultiplier(player.lineRole, stat);
     const pgKey = stat==="tk"?"take_pg":stat==="pim"?"pim_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
-    const rr_base = blendedRate(player, stat, shrinkRate(player[pgKey],player.gp,stat))*rm*rateDiscount*statRateMultiplier(stat);
+    // v68: NO blend in Player Detail (alt-line table for N+ markets). Same reasoning as Props.
+    const rr_base = shrinkRate(player[pgKey],player.gp,stat)*rm*rateDiscount*statRateMultiplier(stat);
     const remainingGames = Math.max(0, expG - (player.pGP||0));
     const gEq = SCORING_STATS.has(stat) && gameEquivalentsFor
       ? gameEquivalentsFor(player.team, stat)
