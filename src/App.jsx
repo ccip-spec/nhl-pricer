@@ -1443,6 +1443,235 @@ function parseNSTGameReport(text) {
 }
 
 
+// v84: ESPN box score paste parser. Returns same shape as parseHRFullPage / parseNSTGameReport
+// so downstream commit logic is unchanged.
+//
+// ESPN paste structure:
+//   First team's name (sometimes prefixed with stray "a " or "h ")
+//   "forwards" header
+//   N rows alternating: "Player Name" then "#jersey"
+//   "defensemen" header
+//   M more "Player Name" / "#jersey" rows
+//   "Time On Ice    Faceoffs"  (label row, ignore)
+//   "G A +/- S SM BS PN PIM HT TK GV SHFT TOI PPTOI SHTOI ESTOI FW FL FO%"  (forwards header)
+//   N forwards stat rows (tab-separated)
+//   second header for defensemen, M defensemen stat rows
+//   "goalies" header, names, header row, stat row(s)
+//   Repeat entire pattern for second team
+//   "Scoring Summary" — running score "Away Home" trails each goal line; final = last pair
+function parseESPNBoxScore(text) {
+  const NAME_TO_ABBR = {
+    "Anaheim Ducks":"ANA","Boston Bruins":"BOS","Buffalo Sabres":"BUF","Calgary Flames":"CGY",
+    "Carolina Hurricanes":"CAR","Chicago Blackhawks":"CHI","Colorado Avalanche":"COL",
+    "Columbus Blue Jackets":"CBJ","Dallas Stars":"DAL","Detroit Red Wings":"DET",
+    "Edmonton Oilers":"EDM","Florida Panthers":"FLA","Los Angeles Kings":"LAK",
+    "Minnesota Wild":"MIN","Montreal Canadiens":"MTL","Montréal Canadiens":"MTL",
+    "Nashville Predators":"NSH","New Jersey Devils":"NJD","New York Islanders":"NYI",
+    "New York Rangers":"NYR","Ottawa Senators":"OTT","Philadelphia Flyers":"PHI",
+    "Pittsburgh Penguins":"PIT","San Jose Sharks":"SJS","Seattle Kraken":"SEA",
+    "St. Louis Blues":"STL","St Louis Blues":"STL","Tampa Bay Lightning":"TBL",
+    "Toronto Maple Leafs":"TOR","Utah Mammoth":"UTA","Utah Hockey Club":"UTA",
+    "Vancouver Canucks":"VAN","Vegas Golden Knights":"VEG","Washington Capitals":"WSH",
+    "Winnipeg Jets":"WPG"
+  };
+  const SHORT_TO_FULL = {};
+  for (const full of Object.keys(NAME_TO_ABBR)) {
+    const last = full.split(" ").pop();
+    if (!SHORT_TO_FULL[last]) SHORT_TO_FULL[last] = full;
+  }
+  SHORT_TO_FULL["Maple Leafs"] = "Toronto Maple Leafs";
+  SHORT_TO_FULL["Blue Jackets"] = "Columbus Blue Jackets";
+  SHORT_TO_FULL["Red Wings"] = "Detroit Red Wings";
+  SHORT_TO_FULL["Golden Knights"] = "Vegas Golden Knights";
+
+  const lines = text.split(/\r?\n/).map(l=>l.replace(/\s+$/,""));
+  const cleanTeamLine = (s) => s.replace(/^(a|h)\s+/i,"").trim();
+
+  // Find the two team headers (line followed within 3 lines by "forwards")
+  const teamHeaders = [];
+  for (let i=0; i<lines.length; i++) {
+    const cleaned = cleanTeamLine(lines[i]);
+    if (!cleaned) continue;
+    const fullName = NAME_TO_ABBR[cleaned] ? cleaned : (SHORT_TO_FULL[cleaned] || null);
+    if (!fullName) continue;
+    let confirmed = false;
+    for (let j=i+1; j<Math.min(i+4, lines.length); j++) {
+      if (lines[j].trim().toLowerCase() === "forwards") { confirmed = true; break; }
+    }
+    if (!confirmed) continue;
+    if (teamHeaders.length > 0 && teamHeaders[teamHeaders.length-1].abbr === NAME_TO_ABBR[fullName]) continue;
+    teamHeaders.push({idx:i, name:fullName, abbr:NAME_TO_ABBR[fullName]});
+    if (teamHeaders.length === 2) break;
+  }
+  if (teamHeaders.length < 2) {
+    return {error:"Could not find two team sections. Expected '<Team Name>' followed by 'forwards' for each team."};
+  }
+  const [away, home] = teamHeaders;
+
+  function parseTeamSection(startIdx, endIdx) {
+    const lo = startIdx;
+    const hi = endIdx == null ? lines.length : endIdx;
+    const findIn = (label, from = lo) => {
+      for (let i=from; i<hi; i++) if (lines[i].trim().toLowerCase() === label) return i;
+      return -1;
+    };
+    const fwdIdx = findIn("forwards");
+    const defIdx = findIn("defensemen", fwdIdx>=0?fwdIdx+1:lo);
+    const goalieIdx = findIn("goalies", defIdx>=0?defIdx+1:lo);
+    if (fwdIdx === -1 || defIdx === -1) return null;
+
+    function readNames(fromExclusive, toExclusive) {
+      const names = [];
+      let i = fromExclusive + 1;
+      while (i < toExclusive) {
+        const nameLine = lines[i].trim();
+        const jerseyLine = (i+1 < toExclusive) ? lines[i+1].trim() : "";
+        if (!nameLine || nameLine.toLowerCase()==="defensemen" || nameLine.toLowerCase()==="goalies") break;
+        if (/^Time On Ice\b/i.test(nameLine)) break;
+        if (/^G\s+A\s+\+\/-/i.test(nameLine) || /^G\tA\t\+\/-/.test(nameLine)) break;
+        if (/^#/.test(nameLine)) { i++; continue; }
+        if (/^#\d+/.test(jerseyLine)) {
+          names.push(nameLine);
+          i += 2;
+        } else {
+          names.push(nameLine);
+          i++;
+        }
+      }
+      return names;
+    }
+    const fwdNames = readNames(fwdIdx, defIdx);
+    const defNames = readNames(defIdx, goalieIdx >= 0 ? goalieIdx : hi);
+
+    function findStatHeader(from) {
+      for (let i=from; i<hi; i++) {
+        const L = lines[i].trim();
+        if (/^G\s+A\s+\+\/-\s+S\s+SM\s+BS/i.test(L) || /^G\tA\t\+\/-\tS\tSM\tBS/.test(L)) return i;
+      }
+      return -1;
+    }
+    function parseStatRow(raw) {
+      const row = raw.includes("\t") ? raw.split(/\t/) : raw.split(/\s+/);
+      const num = (j)=>{ const v = row[j]?.trim(); if (!v||v==="-") return 0; const n = parseFloat(v); return isFinite(n)?n:0; };
+      // Stat positions: 0:G 1:A 2:+/- 3:S 4:SM 5:BS 6:PN 7:PIM 8:HT 9:TK 10:GV 11:SHFT 12:TOI
+      return {
+        g:   num(0)|0,
+        a:   num(1)|0,
+        sog: num(3)|0,
+        pim: num(7)|0,
+        hit: num(8)|0,
+        tk:  num(9)|0,
+        give:num(10)|0,
+        blk: num(5)|0,
+        toi: (row[12]||"0:00").trim(),
+      };
+    }
+    const h1 = findStatHeader(defIdx);
+    if (h1 === -1) return null;
+    const fwdStats = [];
+    let i = h1 + 1;
+    while (fwdStats.length < fwdNames.length && i < hi) {
+      const L = lines[i];
+      if (!L.trim()) { i++; continue; }
+      if (/^G\s+A\s+\+\/-/i.test(L.trim())) { i++; continue; }
+      fwdStats.push(parseStatRow(L));
+      i++;
+    }
+    const h2 = findStatHeader(i);
+    if (h2 === -1) return null;
+    const defStats = [];
+    i = h2 + 1;
+    while (defStats.length < defNames.length && i < hi) {
+      const L = lines[i];
+      if (!L.trim()) { i++; continue; }
+      if (/^G\s+A\s+\+\/-/i.test(L.trim())) { i++; continue; }
+      defStats.push(parseStatRow(L));
+      i++;
+    }
+
+    const players = [];
+    for (let j=0; j<fwdNames.length && j<fwdStats.length; j++) players.push({name:fwdNames[j], ...fwdStats[j]});
+    for (let j=0; j<defNames.length && j<defStats.length; j++) players.push({name:defNames[j], ...defStats[j]});
+
+    const goalies = [];
+    if (goalieIdx !== -1) {
+      const isGHeader = (s) => /^SA\s+GA\s+SV\s+SV%/i.test(s) || /^SA\tGA\tSV\tSV%/.test(s);
+      const goalieNames = [];
+      let gi = goalieIdx + 1;
+      while (gi < hi && !isGHeader(lines[gi].trim())) {
+        const nm = lines[gi].trim();
+        const jr = (gi+1 < hi) ? lines[gi+1].trim() : "";
+        if (!nm) { gi++; continue; }
+        if (/^#/.test(nm)) { gi++; continue; }
+        if (/^#\d+/.test(jr)) { goalieNames.push(nm); gi += 2; }
+        else { goalieNames.push(nm); gi++; }
+      }
+      if (gi < hi) {
+        let si = gi + 1;
+        for (const gname of goalieNames) {
+          while (si < hi && !lines[si].trim()) si++;
+          if (si >= hi) break;
+          const row = lines[si].includes("\t") ? lines[si].split(/\t/) : lines[si].split(/\s+/);
+          const num = (j)=>{ const v = row[j]?.trim(); if (!v||v==="-") return 0; const n = parseFloat(v); return isFinite(n)?n:0; };
+          goalies.push({
+            name: gname,
+            sa: num(0)|0,
+            ga: num(1)|0,
+            sv: num(2)|0,
+            toi: (row[9]||"0:00").trim(),
+            dec: "", so: 0,
+          });
+          si++;
+        }
+      }
+    }
+    return {players, goalies};
+  }
+
+  const scoringIdx = (()=>{
+    for (let i=0; i<lines.length; i++) if (/^Scoring Summary\s*$/i.test(lines[i].trim())) return i;
+    return lines.length;
+  })();
+
+  const awayData = parseTeamSection(away.idx, home.idx);
+  const homeData = parseTeamSection(home.idx, scoringIdx);
+
+  if (!awayData || !homeData) {
+    return {error:"Could not parse one or both team sections. Need 'forwards', 'defensemen', and the stat header row 'G A +/- S SM BS ...' for each team."};
+  }
+  if (awayData.players.length === 0 && homeData.players.length === 0) {
+    return {error:"No player stat rows parsed. Stat rows must be tab-separated; copy directly from the ESPN page."};
+  }
+
+  // Score: scan the scoring summary for trailing "<away> <home>" running-total pairs; final = last.
+  let awayScore = 0, homeScore = 0;
+  for (let i=scoringIdx; i<lines.length; i++) {
+    const L = lines[i].trim();
+    const m = L.match(/(?:^|\s)(\d+)[\s\t]+(\d+)\s*$/);
+    if (m) {
+      const a = +m[1], h = +m[2];
+      if (a <= 15 && h <= 15) { awayScore = a; homeScore = h; }
+    }
+  }
+  let ot = false, so = false;
+  for (let i=scoringIdx; i<lines.length; i++) {
+    if (/\bOT\d?\b/.test(lines[i])) ot = true;
+    if (/\bShootout\b/i.test(lines[i])) so = true;
+  }
+
+  return {
+    awayAbbr: away.abbr, homeAbbr: home.abbr,
+    awayName: away.name, homeName: home.name,
+    awayScore, homeScore,
+    ot, so, dateISO: null,
+    awayPlayers: awayData.players,
+    homePlayers: homeData.players,
+    awayGoalies: awayData.goalies,
+    homeGoalies: homeData.goalies,
+  };
+}
+
+
 function parseHRFullPage(text) {
   const NAME_TO_ABBR = {
     "Anaheim Ducks":"ANA","Boston Bruins":"BOS","Buffalo Sabres":"BUF","Calgary Flames":"CGY",
@@ -3751,7 +3980,7 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
   const [showR1,setShowR1]=useState(false);
   const [showAdv,setShowAdv]=useState(false);
   // v39: advancement table entry mode — "prob" (0..1) or "decimal" (decimal odds, 1.01..)
-  const [advEntryMode,setAdvEntryMode]=useState("prob");
+  const [advEntryMode,setAdvEntryMode]=useState("decimal");
   const [filterTeam,setFilterTeam]=useState("ALL");
   const teams=[...new Set(leaderMarket.map(p=>p.team))].sort();
   const displayed=filterTeam==="ALL"?leaderMarket:leaderMarket.filter(p=>p.team===filterTeam);
@@ -4025,6 +4254,27 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
   const [showMgn,setShowMgn]=useState(false);
   const s=allSeries[safeSi] || defaultSeries(0);
 
+  // v83: per-series margin overrides. Each series can hold its own override values; everything
+  // not overridden inherits from the global `margins` (Settings tab). Edits here are local
+  // to this series; edits on Settings tab still affect every series that hasn't overridden.
+  const effMargins = useMemo(()=>({...margins, ...(s.marginOverrides||{})}), [margins, s.marginOverrides]);
+  function updMarginOverride(key, val) {
+    setAllSeries(p=>{
+      const u=[...p];
+      const cur = u[safeSi] || {};
+      const ovr = {...(cur.marginOverrides||{})};
+      // Empty/null/NaN → remove the override (revert to inherit). Otherwise store the value
+      // even if it equals the current global — user might want it to be sticky.
+      if (val == null || val === "" || isNaN(val)) {
+        delete ovr[key];
+      } else {
+        ovr[key] = val;
+      }
+      u[safeSi] = {...cur, marginOverrides: Object.keys(ovr).length ? ovr : undefined};
+      return u;
+    });
+  }
+
   // v24: compute team strengths from on-ice xG for auto win% generation
   const homeStrength = useMemo(()=>s.homeAbbr?computeTeamStrength(players,s.homeAbbr):null, [players,s.homeAbbr]);
   const awayStrength = useMemo(()=>s.awayAbbr?computeTeamStrength(players,s.awayAbbr):null, [players,s.awayAbbr]);
@@ -4055,7 +4305,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
   const outcomes=useMemo(()=>computeOutcomes(effG),[effKey]);
   const hwp=["4-0","4-1","4-2","4-3"].reduce((acc,k)=>acc+(outcomes[k]||0),0);
   const awp=1-hwp;
-  const [adjH,adjA]=applyMargin([hwp,awp],margins.winner);
+  const [adjH,adjA]=applyMargin([hwp,awp],effMargins.winner);
 
   const len4=(outcomes["4-0"]||0)+(outcomes["0-4"]||0);
   const len5=(outcomes["4-1"]||0)+(outcomes["1-4"]||0);
@@ -4087,7 +4337,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
   // when the series is at 3-2 PHI — they're literally the same event).
   //
   // Returns null if the outcome doesn't collapse to a single next-game result; otherwise the
-  // adjusted (with-margin) price using margins.winner as the per-game juice.
+  // adjusted (with-margin) price using effMargins.winner as the per-game juice.
   //
   // collapseSide: "home" or "away" — which team's next-game win produces this outcome.
   const nextGameCollapsePrice = useCallback((collapseSide) => {
@@ -4097,9 +4347,9 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
     const wp = nextG.winPct;
     if (wp == null) return null;
     const truePrice = collapseSide === "home" ? wp : (1 - wp);
-    const adj = Math.min(0.995, truePrice * (margins.winner || 1.04));
+    const adj = Math.min(0.995, truePrice * (effMargins.winner || 1.04));
     return adj;
-  }, [effG, margins.winner]);
+  }, [effG, effMargins.winner]);
   // Test: does (finalHw, finalAw) require exactly one specific next-game result given current state?
   // Returns "home" / "away" / null.
   const collapseSideForScore = useCallback((finalHw, finalAw) => {
@@ -4363,18 +4613,21 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
       if (sim && p === 0 && realized.gamesPlayed > 0) return 0;
       return p;
     });
-    const adjusted = applyMargin(lenAdj, margins.length);
+    const adjusted = applyMargin(lenAdj, effMargins.length);
     return {probs, lenAdj: adjusted, settled: lenAdj.map(p => p === 0 && realized.gamesPlayed > 0)};
-  }, [effKey, margins.length, simResult, simStale, realized, len4, len5, len6, len7]);
+  }, [effKey, effMargins.length, simResult, simStale, realized, len4, len5, len6, len7]);
   // Keep old lenAdj symbol for backward compat with the Length panel
   const lenAdjEffective = lengthMkt.lenAdj;
 
   const e8=useMemo(()=>{
     const src = (simResult && !simStale && simResult.exactScoreProb) ? simResult.exactScoreProb : outcomes;
     const rows=[{l:`${s.homeTeam||"Home"} 4-0`,k:"4-0"},{l:`${s.homeTeam||"Home"} 4-1`,k:"4-1"},{l:`${s.homeTeam||"Home"} 4-2`,k:"4-2"},{l:`${s.homeTeam||"Home"} 4-3`,k:"4-3"},{l:`${s.awayTeam||"Away"} 4-0`,k:"0-4"},{l:`${s.awayTeam||"Away"} 4-1`,k:"1-4"},{l:`${s.awayTeam||"Away"} 4-2`,k:"2-4"},{l:`${s.awayTeam||"Away"} 4-3`,k:"3-4"}].map(o=>({...o,tp:src[o.k]||0}));
-    // v81: detect outcomes that collapse to a single next-game event (e.g. at 3-2 PHI,
-    // "PHI 4-2" = PHI wins G6). Those rows price off the moneyline, not the series-market juice.
-    const annotated = rows.map(o => {
+    // v82: detect collapsing outcomes (single next-game event) AND apply per-outcome juice
+    // for non-collapsing rows. No renormalization — preserves true probability mass when other
+    // outcomes are removed (e.g. settled outcomes shouldn't inflate the surviving rows).
+    // v84: removed the min(or-1, 0.12) cap. Full per-series margin now applies directly.
+    const orE8 = effMargins.eightWay || 1.12;
+    return rows.map(o => {
       const [hw, aw] = o.k.split("-").map(Number);
       let impossible;
       if (realized.seriesOver) {
@@ -4382,44 +4635,47 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
       } else {
         impossible = realized.hw > hw || realized.aw > aw;
       }
-      const collapseSide = impossible ? null : collapseSideForScore(hw, aw);
-      return {...o, _settled: impossible, tp: impossible ? 0 : o.tp, _collapseSide: collapseSide};
-    });
-    // Compute standard-margin prices for non-collapsing rows.
-    // Collapsing rows are zeroed out for the margin calc and then overridden with the next-game price.
-    const tpsForMargin = annotated.map(o => o._collapseSide ? 0 : o.tp);
-    const adj = applyMargin(tpsForMargin, margins.eightWay);
-    return annotated.map((o,i) => {
-      if (o._settled) return {...o, ap: 0};
-      if (o._collapseSide) {
-        const ap = nextGameCollapsePrice(o._collapseSide);
-        return {...o, ap: ap != null ? ap : adj[i], _collapse: true};
+      if (impossible) return {...o, _settled: true, tp: 0, ap: 0};
+      const collapseSide = collapseSideForScore(hw, aw);
+      let ap;
+      if (collapseSide) {
+        const ml = nextGameCollapsePrice(collapseSide);
+        ap = ml != null ? ml : Math.min(0.995, o.tp * orE8);
+      } else {
+        ap = Math.min(0.995, o.tp * orE8);
       }
-      return {...o, ap: adj[i]};
+      return {...o, _settled: false, _collapseSide: collapseSide, _collapse: !!collapseSide, ap};
     });
-  },[effKey,outcomes,margins.eightWay,margins.winner,s.homeTeam,s.awayTeam,simResult,simStale,realized,collapseSideForScore,nextGameCollapsePrice]);
+  },[effKey,outcomes,effMargins.eightWay,effMargins.winner,s.homeTeam,s.awayTeam,simResult,simStale,realized,collapseSideForScore,nextGameCollapsePrice]);
 
   const winOrders=useMemo(()=>{
     const seqs=computeWinOrders(effG);
     const entries=Object.entries(seqs).map(([seq,tp])=>({seq,tp,hw:seq.split("").filter(c=>c==="H").length,aw:seq.split("").filter(c=>c==="A").length}));
     // v81: a sequence "collapses" to a single next-game event when its length equals
     // gamesPlayed+1 (i.e., this is the team clinching in the very next game).
-    // Such rows price off the next-game moneyline (winPct × margins.winner), not series-market juice.
-    const annotated = entries.map(e => {
+    // Such rows price off the next-game moneyline (winPct × effMargins.winner), not series-market juice.
+    // v82: do NOT renormalize non-collapsing rows after zeroing collapsing ones — that artificially
+    // inflated the surviving series-market rows by a factor of 1/(1-pCollapsed). Instead, apply
+    // per-outcome juice independently: each row gets `p × (1 + edge)`, capped at 0.995.
+    // This makes each Win Order row's price stand on its own and stay consistent with broader
+    // series markets (e.g., series-winner price when a team can only win in 7).
+    // v84: removed the min(or-1, 0.06) cap. With per-series margins (v83) the user explicitly
+    // sets the desired juice per series — capping it silently made the slider do nothing above 1.06.
+    // Now the full margin applies: each row gets `p × OR`, capped at 0.995 to keep prices finite.
+    const orWO = effMargins.winOrder || 1.06;
+    return entries.map(e => {
       const collapses = e.seq.length === realized.gamesPlayed + 1 && !realized.seriesOver;
       const collapseSide = collapses ? (e.seq.charAt(e.seq.length-1)==="H" ? "home" : "away") : null;
-      return {...e, _collapseSide: collapseSide};
-    });
-    const tpsForMargin = annotated.map(e => e._collapseSide ? 0 : e.tp);
-    const adj = applyMargin(tpsForMargin, margins.winOrder);
-    return annotated.map((e,i) => {
-      if (e._collapseSide) {
-        const ap = nextGameCollapsePrice(e._collapseSide);
-        return {...e, ap: ap != null ? ap : adj[i], _collapse: true};
+      let ap;
+      if (collapseSide) {
+        const ml = nextGameCollapsePrice(collapseSide);
+        ap = ml != null ? ml : Math.min(0.995, e.tp * orWO);
+      } else {
+        ap = Math.min(0.995, e.tp * orWO);
       }
-      return {...e, ap: adj[i]};
+      return {...e, _collapseSide: collapseSide, _collapse: !!collapseSide, ap};
     }).sort((a,b)=>b.ap-a.ap);
-  },[effKey,margins.winOrder,margins.winner,realized,nextGameCollapsePrice]);
+  },[effKey,effMargins.winOrder,effMargins.winner,realized,nextGameCollapsePrice]);
 
   // Score @ G3 — v31: relabel ("0-3" → "PHI 3-0"); detect settled when ≥3 games played.
   const cs3=useMemo(()=>{
@@ -4458,22 +4714,22 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
       if (settledNo) p = 0;
       return {k, label: labelFor(k), tp: p, _settled: settledYes || settledNo};
     });
-    const adj=applyMargin(entries.map(e=>e.tp),margins.correctScore);
+    const adj=applyMargin(entries.map(e=>e.tp),effMargins.correctScore);
     return entries.map((e,i)=>({...e, ap: e._settled ? e.tp : adj[i]}))
       .sort((a,b)=>{
         if (!!a._settled !== !!b._settled) return a._settled ? 1 : -1;
         return b.tp - a.tp;
       });
-  },[effKey,margins.correctScore,s.homeAbbr,s.awayAbbr,realized]);
+  },[effKey,effMargins.correctScore,s.homeAbbr,s.awayAbbr,realized]);
 
   // Per-game OT market — v31: annotate settled (game already played) per game with realized OT result
   const otPerGame=useMemo(()=>effG.map((g,i)=>{
     const pOT=g.pOT??0.22;
-    const [adjOT,adjNo]=applyMargin([pOT,1-pOT],margins.otGames);
+    const [adjOT,adjNo]=applyMargin([pOT,1-pOT],effMargins.otGames);
     const settled = !!g.result;
     const wentOT = !!(g.wentOT || g.ot || g.result === "ot");
     return {game:i+1,pOT,adjOT,adjNo,expTotal:g.expTotal,winPct:g.winPct,_settled:settled,_wentOT:wentOT};
-  }),[effKey,margins.otGames]);
+  }),[effKey,effMargins.otGames]);
 
   // Series OT games distribution — v31: sim PMF when available
   const otSeriesMkts=useMemo(()=>{
@@ -4501,12 +4757,12 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
       if (st === "yes") return 1;
       if (st === "no") return 0;
       // Margin-adjust: just multiply this single-event probability by margin (1+margin/2 standard)
-      return Math.min(1, p * margins.otExact);
+      return Math.min(1, p * effMargins.otExact);
     });
     const ouLines=[0.5,1.5,2.5,3.5];
-    const ouRows = ouFromSimPMF(pmf, ouLines, margins.otGames, realized.otGames, realized.gamesRemaining);
+    const ouRows = ouFromSimPMF(pmf, ouLines, effMargins.otGames, realized.otGames, realized.gamesRemaining);
     return {lambda, exactLines, exactProbs, exactAdj, exactSettled, ouLines, ouRows: sortSettled(ouRows)};
-  },[effKey,margins.otExact,margins.otGames,simResult,realized]);
+  },[effKey,effMargins.otExact,effMargins.otGames,simResult,realized]);
 
   // Spread market — v31: sim's exactScoreProb when available; per-row settled detection.
   // Lines are wins-spread (e.g., "-3.5" = win series by 4 wins, i.e., 4-0).
@@ -4567,13 +4823,13 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
       let pHome = r.pHome, pAway = r.pAway;
       if (settledHome) { pHome = 1; pAway = 0; }
       else if (settledAway) { pHome = 0; pAway = 1; }
-      const [ah, aa] = (settledHome || settledAway) ? [pHome, pAway] : applyMargin([pHome, pAway], margins.spread);
+      const [ah, aa] = (settledHome || settledAway) ? [pHome, pAway] : applyMargin([pHome, pAway], effMargins.spread);
       return {...r, pHome, pAway, ah, aa, _settled: settledHome || settledAway, _settledSide: settledHome ? "home" : settledAway ? "away" : null};
     }).sort((a,b)=>{
       if (!!a._settled !== !!b._settled) return a._settled ? 1 : -1;
       return 0;
     });
-  },[effKey,margins.spread,outcomes,s.homeAbbr,s.awayAbbr,simResult,realized]);
+  },[effKey,effMargins.spread,outcomes,s.homeAbbr,s.awayAbbr,simResult,realized]);
 
   // Total goals O/U — v31: prefers sim PMF when available; settled rows handled
   const totalGoalsMkt=useMemo(()=>{
@@ -4589,9 +4845,9 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
     // Realized total goals so far + max additional possible (assume 12 goals/game cap as soft sanity)
     const realizedTotal = realized.goalsH + realized.goalsA;
     const maxAdditional = realized.gamesRemaining * 12;
-    const rows = ouFromSimPMF(pmf, lines, margins.totalGoals, realizedTotal, maxAdditional);
+    const rows = ouFromSimPMF(pmf, lines, effMargins.totalGoals, realizedTotal, maxAdditional);
     return {lambda, lines: sortSettled(rows)};
-  },[effKey,margins.totalGoals,simResult,realized]);
+  },[effKey,effMargins.totalGoals,simResult,realized]);
 
   // Shutouts O/U — v31: sim PMF when available; settled when realized count exceeds line
   const shutoutMkt=useMemo(()=>{
@@ -4601,7 +4857,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
     let lambda=0; for (let k=0;k<pmf.length;k++) lambda += k*pmf[k];
     const lines=[0.5,1.5,2.5,3.5];
     // Realized shutouts so far. Max additional = remaining games (each game can produce at most 1 shutout).
-    const rows = ouFromSimPMF(pmf, lines, margins.shutouts, realized.shutouts, realized.gamesRemaining);
+    const rows = ouFromSimPMF(pmf, lines, effMargins.shutouts, realized.shutouts, realized.gamesRemaining);
     // v80: exact shutout count market (0, 1, 2, 3, 4+).
     // Each row's true prob = P(realized + future = k). Future PMF is `pmf`; "realized" shutouts already happened.
     // So P(final = k) = pmf[k - realized] when k >= realized, 0 otherwise. 4+ bucket sums tail.
@@ -4624,10 +4880,10 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
     const impossible4 = need4 > remaining;
     exactBuckets.push({label: "4+", tp: tp4, _settled: impossible4, k: 4});
     const trueProbs = exactBuckets.map(r => r._settled ? 0 : r.tp);
-    const adj = applyMargin(trueProbs, margins.shutouts);
+    const adj = applyMargin(trueProbs, effMargins.shutouts);
     const exactRows = exactBuckets.map((r,i) => ({...r, ap: r._settled ? 0 : adj[i]}));
     return {lambda, lines: sortSettled(rows), exactRows};
-  },[effKey,margins.shutouts,s.shutoutRate,simResult,realized]);
+  },[effKey,effMargins.shutouts,s.shutoutRate,simResult,realized]);
 
   // Team most goals — v31: sim convolution when available.
   // v79: closed-form fallback now uses computeTeamGoalsPMF (which respects realized scores)
@@ -4659,9 +4915,9 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
     const settledAway = -homeLead > maxAdd;
     if (settledHome) { pHomeMost = 1; pAwayMost = 0; pTied = 0; }
     else if (settledAway) { pHomeMost = 0; pAwayMost = 1; pTied = 0; }
-    const [ah,aa] = (settledHome || settledAway) ? [pHomeMost, pAwayMost] : applyMargin([pHomeMost,pAwayMost],margins.teamMostGoals);
+    const [ah,aa] = (settledHome || settledAway) ? [pHomeMost, pAwayMost] : applyMargin([pHomeMost,pAwayMost],effMargins.teamMostGoals);
     return {pHomeMost,pAwayMost,pTied,ah,aa,_settled: settledHome || settledAway, _settledSide: settledHome ? "home" : settledAway ? "away" : null};
-  },[effKey,margins.teamMostGoals,s.winnerGoalShift,hwp,awp,simResult,realized,effG]);
+  },[effKey,effMargins.teamMostGoals,s.winnerGoalShift,hwp,awp,simResult,realized,effG]);
 
   // Per-team goals O/U — v31: sim PMFs when available
   const teamGoalsMkt=useMemo(()=>{
@@ -4684,18 +4940,18 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
     const linesH=ladder(pmfH), linesA=ladder(pmfA);
     const maxAdd = realized.gamesRemaining * 12;
     return {
-      home:{lambda:lamH, rows: sortSettled(ouFromSimPMF(pmfH, linesH, margins.teamGoals, realized.goalsH, maxAdd))},
-      away:{lambda:lamA, rows: sortSettled(ouFromSimPMF(pmfA, linesA, margins.teamGoals, realized.goalsA, maxAdd))},
+      home:{lambda:lamH, rows: sortSettled(ouFromSimPMF(pmfH, linesH, effMargins.teamGoals, realized.goalsH, maxAdd))},
+      away:{lambda:lamA, rows: sortSettled(ouFromSimPMF(pmfA, linesA, effMargins.teamGoals, realized.goalsA, maxAdd))},
     };
-  },[effKey,margins.teamGoals,simResult,realized]);
+  },[effKey,effMargins.teamGoals,simResult,realized]);
 
   // v31: realized state of this series — used to mark settled outcomes across all market panels.
   // Parlays — v49: G = next unplayed game × series winner, 4 combos
   const parlayMkt=useMemo(()=>{
     const {gameNum, rows} = computeParlays(effG, outcomes);
-    const adj = applyMargin(rows.map(r=>r.tp), margins.parlay);
+    const adj = applyMargin(rows.map(r=>r.tp), effMargins.parlay);
     return { gameNum, rows: rows.map((r,i)=>({...r, ap: adj[i]})) };
-  },[effKey,margins.parlay,outcomes]);
+  },[effKey,effMargins.parlay,outcomes]);
 
   const MKTS=[
     {id:"winner",l:"Winner"},{id:"eightway",l:"Correct Score"},{id:"length",l:"Length"},
@@ -4784,12 +5040,34 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
       })()}
 
       {showMgn&&<Card style={{marginBottom:14}}>
-        <SH title="Market Margins"/>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:8}}>
-          {Object.entries(margins).map(([k,v])=><label key={k} style={{fontSize:11,display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}>
-            <span style={{color:"var(--color-text-secondary)",textTransform:"capitalize"}}>{k.replace(/([A-Z])/g," $1")}</span>
-            <LazyNI value={v} onCommit={nv=>setMargins(m=>({...m,[k]:nv}))} min={1} max={3} step={0.01} style={{width:56}}/>
-          </label>)}
+        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8,flexWrap:"wrap"}}>
+          <SH title="Market Margins" sub={`Overrides apply to ${s.homeAbbr||"this"} vs ${s.awayAbbr||"this"} ONLY. Settings tab edits affect all series.`}/>
+          {s.marginOverrides && Object.keys(s.marginOverrides).length>0 && <>
+            <span style={{fontSize:9,padding:"2px 6px",borderRadius:3,background:"rgba(245,158,11,0.15)",color:"#f59e0b",letterSpacing:0.3,fontWeight:500,marginLeft:"auto"}}>
+              {Object.keys(s.marginOverrides).length} OVERRIDE{Object.keys(s.marginOverrides).length>1?"S":""}
+            </span>
+            <button onClick={()=>setAllSeries(p=>{const u=[...p];u[safeSi]={...u[safeSi],marginOverrides:undefined};return u;})}
+              style={{padding:"3px 10px",fontSize:10,borderRadius:3,cursor:"pointer",background:"rgba(100,116,139,0.10)",border:"0.5px solid var(--color-border-secondary)",color:"var(--color-text-secondary)"}}>
+              Reset All to Global
+            </button>
+          </>}
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))",gap:8}}>
+          {Object.entries(margins).map(([k,gv])=>{
+            const isOverridden = s.marginOverrides && s.marginOverrides[k] != null;
+            const v = isOverridden ? s.marginOverrides[k] : gv;
+            return <label key={k} style={{fontSize:11,display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}>
+              <span style={{color:"var(--color-text-secondary)",textTransform:"capitalize",display:"flex",alignItems:"center",gap:4}}>
+                {k.replace(/([A-Z])/g," $1")}
+                {isOverridden && <span style={{fontSize:8,padding:"1px 4px",borderRadius:2,background:"rgba(245,158,11,0.15)",color:"#f59e0b",letterSpacing:0.3,fontWeight:500}}>OVR</span>}
+              </span>
+              <div style={{display:"flex",alignItems:"center",gap:3}}>
+                <LazyNI value={v} onCommit={nv=>updMarginOverride(k,nv)} min={1} max={3} step={0.01} style={{width:58,color:isOverridden?"#fbbf24":"var(--color-text-primary)"}}/>
+                {isOverridden && <button onClick={()=>updMarginOverride(k, gv)} title="Reset to global" tabIndex={-1}
+                  style={{padding:"1px 4px",fontSize:10,lineHeight:1,borderRadius:3,cursor:"pointer",background:"rgba(100,116,139,0.10)",border:"0.5px solid var(--color-border-secondary)",color:"var(--color-text-secondary)"}}>↻</button>}
+              </div>
+            </label>;
+          })}
         </div>
       </Card>}
 
@@ -5076,12 +5354,12 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             </div>
           )}
 
-          {mkt==="winner"&&<Card><SH title="Series Winner" sub={`OR: ${margins.winner}x`}/>
+          {mkt==="winner"&&<Card><SH title="Series Winner" sub={`OR: ${effMargins.winner}x`}/>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><TH cols={["Team",...(showTrue?["True%"]:[]),"Adj%","American","Decimal"]}/>
             <tbody><OR label={s.homeTeam||"Home"} tp={hwp} ap={adjH} showTrue={showTrue}/><OR label={s.awayTeam||"Away"} tp={awp} ap={adjA} showTrue={showTrue}/></tbody></table>
           </Card>}
 
-          {mkt==="eightway"&&<Card><SH title="Series Correct Score" sub={`OR: ${margins.eightWay}x`}/>
+          {mkt==="eightway"&&<Card><SH title="Series Correct Score" sub={`OR: ${effMargins.eightWay}x`}/>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><TH cols={["Outcome",...(showTrue?["True%"]:[]),"Adj%","American","Decimal"]}/>
             <tbody>{e8.map((o,i)=>(
               <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:o._settled?0.4:1,textDecoration:o._settled?"line-through":"none"}}>
@@ -5094,7 +5372,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             ))}</tbody></table>
           </Card>}
 
-          {mkt==="length"&&<Card><SH title="Series Length" sub={`Realized: ${realized.gamesPlayed}g played · OR: ${margins.length}x`}/>
+          {mkt==="length"&&<Card><SH title="Series Length" sub={`Realized: ${realized.gamesPlayed}g played · OR: ${effMargins.length}x`}/>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><TH cols={["Games",...(showTrue?["True%"]:[]),"Adj%","American","Decimal"]}/>
             <tbody>{(()=>{
               const data = [["4 Games",4,len4,lenAdjEffective[0]],["5 Games",5,len5,lenAdjEffective[1]],["6 Games",6,len6,lenAdjEffective[2]],["7 Games",7,len7,lenAdjEffective[3]]];
@@ -5114,7 +5392,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
               Exp length: <strong style={{color:"var(--color-text-primary)"}}>{expG.toFixed(2)}g</strong></div>
             {/* v49: O/U series length */}
             <div style={{marginTop:12}}>
-              <SH title="Length O/U" sub={`OR: ${margins.length}x`}/>
+              <SH title="Length O/U" sub={`OR: ${effMargins.length}x`}/>
               <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
                 <TH cols={["Line",...(showTrue?["True O%","True U%"]:[]),"O Adj%","U Adj%","Over","Under"]}/>
                 <tbody>{(()=>{
@@ -5142,7 +5420,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
                     let apO, apU;
                     if (settledO) { apO=1; apU=0; }
                     else if (settledU) { apO=0; apU=1; }
-                    else { [apO,apU] = applyMargin([over,under], margins.length); }
+                    else { [apO,apU] = applyMargin([over,under], effMargins.length); }
                     return (
                       <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:(settledO||settledU)?0.55:1}}>
                         <td style={{padding:"5px 8px",fontFamily:"var(--font-mono)"}}>{L.line}</td>
@@ -5171,7 +5449,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             };
             return <Card>
               <div style={{display:"flex",alignItems:"center",marginBottom:10}}>
-                <SH title="Win Order (70-Way)" sub={`OR: ${margins.winOrder}x — sequences show game-by-game winner`}/>
+                <SH title="Win Order (70-Way)" sub={`OR: ${effMargins.winOrder}x — sequences show game-by-game winner`}/>
                 <button onClick={copyAll} style={{marginLeft:"auto",padding:"3px 10px",fontSize:10,borderRadius:"var(--border-radius-md)",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",color:"var(--color-text-secondary)",cursor:"pointer"}}>Copy All</button>
               </div>
               {realized.seriesOver && <div style={{padding:"6px 10px",marginBottom:8,background:"rgba(34,197,94,0.10)",border:"0.5px solid rgba(34,197,94,0.3)",borderRadius:"var(--border-radius-md)",fontSize:10,color:"#4ade80"}}>SERIES OVER — market settled</div>}
@@ -5194,7 +5472,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             </Card>;
           })()}
 
-          {mkt==="score3"&&<Card><SH title="Correct Score After 3 Games" sub={`OR: ${margins.correctScore}x`}/>
+          {mkt==="score3"&&<Card><SH title="Correct Score After 3 Games" sub={`OR: ${effMargins.correctScore}x`}/>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><TH cols={["Score",...(showTrue?["True%"]:[]),"Adj%","American","Decimal"]}/>
             <tbody>{cs3.map((o,i)=>(
               <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:o._settled?0.4:1}}>
@@ -5207,7 +5485,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             ))}</tbody></table>
           </Card>}
 
-          {mkt==="ot"&&<Card><SH title="OT Per Game" sub={`Per-game OT probability — OR: ${margins.otGames}x`}/>
+          {mkt==="ot"&&<Card><SH title="OT Per Game" sub={`Per-game OT probability — OR: ${effMargins.otGames}x`}/>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
               <TH cols={["Game","Home","Win%","Total","pOT","OT Adj%","OT Odds","No OT Odds"]}/>
               <tbody>{otPerGame.map((o,i)=>(
@@ -5226,7 +5504,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
           </Card>}
 
           {mkt==="otseries"&&<Card>
-            <SH title="OT Games in Series" sub={`λ=${otSeriesMkts.lambda.toFixed(2)} · Realized: ${realized.otGames}/${realized.gamesPlayed} games · Exact OR: ${margins.otExact}x · O/U OR: ${margins.otGames}x`}/>
+            <SH title="OT Games in Series" sub={`λ=${otSeriesMkts.lambda.toFixed(2)} · Realized: ${realized.otGames}/${realized.gamesPlayed} games · Exact OR: ${effMargins.otExact}x · O/U OR: ${effMargins.otGames}x`}/>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
               <div>
                 <div style={{fontSize:10,fontWeight:500,color:"var(--color-text-secondary)",marginBottom:6,textTransform:"uppercase"}}>Exact # OT Games</div>
@@ -5271,7 +5549,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             </div>
           </Card>}
 
-          {mkt==="spread"&&<Card><SH title="Series Spread" sub={`Wins differential — OR: ${margins.spread}x`}/>
+          {mkt==="spread"&&<Card><SH title="Series Spread" sub={`Wins differential — OR: ${effMargins.spread}x`}/>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
               <TH cols={["Home Line","Away Line",...(showTrue?["True%"]:[]),"H Adj%","H Odds","A Adj%","A Odds"]}/>
               <tbody>{spreadMkt.map((r,i)=>(
@@ -5288,7 +5566,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             </table>
           </Card>}
 
-          {mkt==="totalgoals"&&<Card><SH title="Total Goals O/U" sub={`λ=${totalGoalsMkt.lambda.toFixed(2)} goals · OR: ${margins.totalGoals}x`}/>
+          {mkt==="totalgoals"&&<Card><SH title="Total Goals O/U" sub={`λ=${totalGoalsMkt.lambda.toFixed(2)} goals · OR: ${effMargins.totalGoals}x`}/>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
               <TH cols={["Line",...(showTrue?["P(Over)"]:[]),"Ov Adj%","Over","Under"]}/>
               <tbody>{totalGoalsMkt.lines.map((r,i)=>(
@@ -5303,7 +5581,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             </table>
           </Card>}
 
-          {mkt==="shutouts"&&<Card><SH title="Total Shutouts O/U" sub={`λ=${shutoutMkt.lambda.toFixed(3)} · Rate=${s.shutoutRate??0.08}/g · OR: ${margins.shutouts}x`}/>
+          {mkt==="shutouts"&&<Card><SH title="Total Shutouts O/U" sub={`λ=${shutoutMkt.lambda.toFixed(3)} · Rate=${s.shutoutRate??0.08}/g · OR: ${effMargins.shutouts}x`}/>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
               <TH cols={["Line",...(showTrue?["P(Over)"]:[]),"Ov Adj%","Over","Under"]}/>
               <tbody>{shutoutMkt.lines.map((r,i)=>(
@@ -5388,7 +5666,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             }).filter(r => r.rawP > 0.0005)
               .sort((a,b)=> b.rawP - a.rawP);
             const totalRaw = rows.reduce((s,r)=>s+r.rawP, 0);
-            const or = margins.otScorer || 1.20;
+            const or = effMargins.otScorer || 1.20;
             const scale = totalRaw > 0 ? (pSeriesHasOT / totalRaw) : 1;
             const adjusted = rows.map(r => ({...r, adjP: Math.min(0.9999, r.rawP * scale * or)}));
             return <Card>
@@ -5414,7 +5692,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             </Card>;
           })()}
 
-          {mkt==="mostgoals"&&<Card><SH title="Team With Most Goals" sub={`Realized: ${s.homeAbbr||"H"} ${realized.goalsH}g · ${s.awayAbbr||"A"} ${realized.goalsA}g · OR: ${margins.teamMostGoals}x`}/>
+          {mkt==="mostgoals"&&<Card><SH title="Team With Most Goals" sub={`Realized: ${s.homeAbbr||"H"} ${realized.goalsH}g · ${s.awayAbbr||"A"} ${realized.goalsA}g · OR: ${effMargins.teamMostGoals}x`}/>
             <div style={{marginBottom:10,fontSize:11,color:"var(--color-text-tertiary)"}}>Push (tie) pays full.</div>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
               <TH cols={["Outcome",...(showTrue?["True%"]:[]),"Adj%","American","Decimal"]}/>
@@ -5442,7 +5720,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             </table>
           </Card>}
 
-          {mkt==="teamgoals"&&<Card><SH title="Per-Team Total Goals O/U" sub={`Realized: ${s.homeAbbr||"H"} ${realized.goalsH}g · ${s.awayAbbr||"A"} ${realized.goalsA}g · OR: ${margins.teamGoals}x`}/>
+          {mkt==="teamgoals"&&<Card><SH title="Per-Team Total Goals O/U" sub={`Realized: ${s.homeAbbr||"H"} ${realized.goalsH}g · ${s.awayAbbr||"A"} ${realized.goalsA}g · OR: ${effMargins.teamGoals}x`}/>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:0}}>
               {[["home",s.homeTeam||s.homeAbbr||"Home",teamGoalsMkt.home],["away",s.awayTeam||s.awayAbbr||"Away",teamGoalsMkt.away]].map(([side,name,data],si)=>(
                 <div key={side} style={{
@@ -5478,7 +5756,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
               ? "Next unplayed game result × series winner (4 combos)"
               : `Based on current series state (${s.games.filter(g=>g.result==="home").length}-${s.games.filter(g=>g.result==="away").length}). Next game × series winner.`;
             return <Card>
-              <SH title={parlayTitle} sub={`OR: ${margins.parlay}x`}/>
+              <SH title={parlayTitle} sub={`OR: ${effMargins.parlay}x`}/>
               <div style={{marginBottom:8,fontSize:11,color:"var(--color-text-tertiary)"}}>{parlayNote}</div>
               <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
                 <TH cols={["Parlay",...(showTrue?["True%"]:[]),"Adj%","American","Decimal"]}/>
@@ -5487,12 +5765,12 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             </Card>;
           })()}
 
-          {mkt==="props"&&<PropsPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark} mode="ou" simResult={simResult} currentRound={currentRound}/>}
-          {mkt==="binary"&&<PropsPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark} mode="binary" simResult={simResult} currentRound={currentRound}/>}
-          {mkt==="propcombos"&&<PropCombosPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark} currentRound={currentRound}/>}
-          {mkt==="goaliesaves"&&<GoalieSavesPanel s={s} expG={expG} goalies={goalies} margins={margins} showTrue={showTrue} dark={dark}/>}
-          {mkt==="playerdetail"&&<PlayerDetailPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark} currentRound={currentRound}/>}
-          {mkt==="seriesleader"&&<SeriesLeaderPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={margins} showTrue={showTrue} dark={dark} simResult={simResult} simStale={simStale} currentRound={currentRound}/>}
+          {mkt==="props"&&<PropsPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={effMargins} showTrue={showTrue} dark={dark} mode="ou" simResult={simResult} currentRound={currentRound}/>}
+          {mkt==="binary"&&<PropsPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={effMargins} showTrue={showTrue} dark={dark} mode="binary" simResult={simResult} currentRound={currentRound}/>}
+          {mkt==="propcombos"&&<PropCombosPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={effMargins} showTrue={showTrue} dark={dark} currentRound={currentRound}/>}
+          {mkt==="goaliesaves"&&<GoalieSavesPanel s={s} expG={expG} goalies={goalies} margins={effMargins} showTrue={showTrue} dark={dark}/>}
+          {mkt==="playerdetail"&&<PlayerDetailPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={effMargins} showTrue={showTrue} dark={dark} currentRound={currentRound}/>}
+          {mkt==="seriesleader"&&<SeriesLeaderPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={effMargins} showTrue={showTrue} dark={dark} simResult={simResult} simStale={simStale} currentRound={currentRound}/>}
         </div>
       </div>
     </div>
@@ -5764,13 +6042,13 @@ function PropCombosPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalents
     {playerKey:"", stat:"g", line:1},
     {playerKey:"", stat:"g", line:1},
   ]);
-  const [op, setOp] = useState("OR"); // "OR" | "AND" | "MORE"
+  const [op, setOp] = useState("OR"); // "OR" | "AND" | "H2H"
   const [moreMode, setMoreMode] = useState("2way"); // "2way" | "3way"
 
   const addSlot = () => {
     if (slots.length >= 5) return;
     setSlots(prev => [...prev, {playerKey:"", stat:"g", line:1}]);
-    if (op === "MORE") setOp("OR"); // MORE not allowed with 3+
+    if (op === "H2H") setOp("OR"); // MORE not allowed with 3+
   };
   const removeSlot = (i) => {
     if (slots.length <= 2) return;
@@ -5844,7 +6122,7 @@ function PropCombosPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalents
       let q = 1;
       for (const p of slotProbs) q *= p;
       trueProb = q;
-    } else if (op === "MORE" && slotData.length === 2) {
+    } else if (op === "H2H" && slotData.length === 2) {
       // P(A > B), P(A < B), P(A = B) by convolving over PMFs
       const [pmfA, pmfB] = slotPMFs;
       let pAGreater = 0, pBGreater = 0, pTie = 0;
@@ -5879,11 +6157,11 @@ function PropCombosPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalents
 
   let priceA = null, priceB = null, priceTie = null;
   if (trueProb != null) {
-    if (op === "MORE" && moreMode === "3way") {
+    if (op === "H2H" && moreMode === "3way") {
       // Apply margin proportionally across 3 outcomes
       const [adjA, adjB, adjT] = applyMargin([trueProb, twoWayB, pushProb], orMargin);
       priceA = adjA; priceB = adjB; priceTie = adjT;
-    } else if (op === "MORE" && moreMode === "2way") {
+    } else if (op === "H2H" && moreMode === "2way") {
       const [adjA, adjB] = applyMargin([trueProb, twoWayB], orMargin);
       priceA = adjA; priceB = adjB;
     } else {
@@ -5893,21 +6171,43 @@ function PropCombosPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalents
     }
   }
 
+  // v83: natural-language label for the combo. Also handles 3+ players with comma+ "&" formatting.
   const labelText = (() => {
+    // Detect uniform stat + line across all slots (most common case → cleaner text).
+    const validSlots = slotData.filter(d => d != null);
+    if (validSlots.length === 0) return slots.map((_,i)=>`[Slot ${i+1}]`).join(" / ");
+
+    const allSameStat = validSlots.every(d => d.stat === validSlots[0].stat);
+    const lines = slotData.map((d,i) => slots[i] ? Math.ceil(slots[i].line - 0.001) : 1);
+    const allSameLine = lines.filter((_,i)=>slotData[i]!=null).every(l => l === lines[slotData.findIndex(d=>d!=null)]);
+
+    if ((op === "OR" || op === "AND") && allSameStat && allSameLine) {
+      const statLabel = (STATS.find(x=>x.id===validSlots[0].stat)||{}).label || validSlots[0].stat;
+      const lineInt = lines[slotData.findIndex(d=>d!=null)];
+      const names = validSlots.map(d => d.p.name);
+      // "A & B" for 2; "A, B & C" for 3+; "A, B, C & D" for 4+
+      const namesText = names.length === 1 ? names[0]
+        : names.length === 2 ? `${names[0]} ${op === "OR" ? "OR" : "AND"} ${names[1]}`
+        : names.slice(0,-1).join(", ") + ` ${op === "OR" ? "OR" : "AND"} ${names[names.length-1]}`;
+      // Lowercased plural form for stat — Goals → goals, Hits → hits
+      const stLower = statLabel.toLowerCase();
+      if (op === "OR") return `${namesText} to score ${lineInt}+ ${stLower} in series`;
+      // AND with 2 players reads more naturally with "both"; 3+ with "each"
+      const verb = names.length === 2 ? "both to score" : "each to score";
+      return `${namesText} ${verb} ${lineInt}+ ${stLower} in series`;
+    }
+    if (op === "H2H" && validSlots.length === 2 && slotData[0] && slotData[1]) {
+      const stat0 = (STATS.find(x=>x.id===slotData[0].stat)||{}).label || slotData[0].stat;
+      return `${slotData[0].p.name} more ${stat0.toLowerCase()} than ${slotData[1].p.name}`;
+    }
+    // Heterogeneous fallback — list per-slot
     const parts = slotData.map((d,i) => {
       if (!d) return `[Slot ${i+1}]`;
       const statLabel = (STATS.find(x=>x.id===d.stat)||{}).label || d.stat;
-      const line = slots[i].line;
-      const lineInt = Math.ceil(line - 0.001);
-      return `${d.p.name} ${lineInt}+ ${statLabel}`;
+      const lineInt = Math.ceil(slots[i].line - 0.001);
+      return `${d.p.name} ${lineInt}+ ${statLabel.toLowerCase()}`;
     });
-    if (op === "OR") return parts.join(" OR ");
-    if (op === "AND") return parts.join(" AND ");
-    if (op === "MORE" && slotData.length === 2 && slotData[0] && slotData[1]) {
-      const stat0 = (STATS.find(x=>x.id===slotData[0].stat)||{}).label || slotData[0].stat;
-      return `${slotData[0].p.name} more ${stat0} than ${slotData[1].p.name}`;
-    }
-    return parts.join(" ?? ");
+    return parts.join(op === "OR" ? " OR " : op === "AND" ? " AND " : " ?? ");
   })();
 
   return <Card>
@@ -5916,7 +6216,7 @@ function PropCombosPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalents
     {/* Operator selector */}
     <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:12,flexWrap:"wrap"}}>
       <span style={{fontSize:11,color:"var(--color-text-tertiary)"}}>Operator:</span>
-      {["OR","AND",...(slots.length===2?["MORE"]:[])].map(o => (
+      {["OR","AND",...(slots.length===2?["H2H"]:[])].map(o => (
         <button key={o} onClick={()=>setOp(o)} style={{
           padding:"4px 12px",fontSize:11,fontWeight:500,
           background:op===o?"#1d4ed8":"var(--color-background-secondary)",
@@ -5924,7 +6224,7 @@ function PropCombosPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalents
           border:"0.5px solid var(--color-border-secondary)",
           borderRadius:4,cursor:"pointer"}}>{o}</button>
       ))}
-      {op === "MORE" && <>
+      {op === "H2H" && <>
         <span style={{fontSize:11,color:"var(--color-text-tertiary)",marginLeft:12}}>Mode:</span>
         {["2way","3way"].map(m => (
           <button key={m} onClick={()=>setMoreMode(m)} style={{
@@ -5960,7 +6260,7 @@ function PropCombosPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalents
             color:"var(--color-text-primary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:3}}>
             {STATS.map(st => <option key={st.id} value={st.id}>{st.label}</option>)}
           </select>
-          {op !== "MORE" && <>
+          {op !== "H2H" && <>
             <span style={{fontSize:10,color:"var(--color-text-tertiary)"}}>Line:</span>
             <input type="number" min="0.5" step="0.5" value={slot.line}
               onChange={e=>{
@@ -5974,7 +6274,7 @@ function PropCombosPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalents
           {/* Per-slot diagnostic */}
           {slotData[i] && <span style={{fontSize:10,color:"var(--color-text-tertiary)",marginLeft:6,fontFamily:"var(--font-mono)"}}>
             λ {slotData[i].lam.toFixed(2)} (now {slotData[i].actual})
-            {op !== "MORE" && slotProbs[i]!=null && ` · ${(slotProbs[i]*100).toFixed(1)}%`}
+            {op !== "H2H" && slotProbs[i]!=null && ` · ${(slotProbs[i]*100).toFixed(1)}%`}
           </span>}
           {slots.length > 2 && <button onClick={()=>removeSlot(i)} style={{
             padding:"2px 8px",fontSize:11,background:"transparent",
@@ -5993,7 +6293,7 @@ function PropCombosPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalents
     {/* Result */}
     {trueProb != null ? <div style={{padding:12,background:"var(--color-background-secondary)",borderRadius:4,border:"0.5px solid var(--color-border-secondary)"}}>
       <div style={{fontSize:13,fontWeight:500,marginBottom:8}}>{labelText}</div>
-      {op === "MORE" && moreMode === "3way" ? <table style={{width:"100%",fontSize:12}}>
+      {op === "H2H" && moreMode === "3way" ? <table style={{width:"100%",fontSize:12}}>
         <thead><tr style={{color:"var(--color-text-tertiary)",fontSize:10,textAlign:"left"}}>
           <th style={{padding:"4px 0",fontWeight:400}}>Outcome</th>
           {showTrue && <th style={{padding:"4px 0",fontWeight:400,textAlign:"right"}}>True %</th>}
@@ -6016,7 +6316,7 @@ function PropCombosPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalents
             </tr>
           ))}
         </tbody>
-      </table> : op === "MORE" ? <table style={{width:"100%",fontSize:12}}>
+      </table> : op === "H2H" ? <table style={{width:"100%",fontSize:12}}>
         <thead><tr style={{color:"var(--color-text-tertiary)",fontSize:10,textAlign:"left"}}>
           <th style={{padding:"4px 0",fontWeight:400}}>Outcome</th>
           {showTrue && <th style={{padding:"4px 0",fontWeight:400,textAlign:"right"}}>True %</th>}
@@ -6867,14 +7167,19 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
     if(!paste.trim()) return;
 
     // v78: select parser based on format selector. "auto" sniffs the paste for NST signature
-    // (the unique "<Team> - Individual" section header) — falls back to HR otherwise.
+    // v84: auto-detect: NST has " - Individual" headers; ESPN has "forwards" + "defensemen" + "G A +/- S SM BS";
+    // HR is the fallback.
     let r;
     let detectedFormat = format;
     if (format === "auto") {
-      detectedFormat = / - Individual\s*$/m.test(paste) ? "nst" : "hr";
+      if (/ - Individual\s*$/m.test(paste)) detectedFormat = "nst";
+      else if (/^forwards\s*$/im.test(paste) && /^defensemen\s*$/im.test(paste) && /G\s+A\s+\+\/-\s+S\s+SM\s+BS/.test(paste)) detectedFormat = "espn";
+      else detectedFormat = "hr";
     }
     if (detectedFormat === "nst") {
       r = parseNSTGameReport(paste);
+    } else if (detectedFormat === "espn") {
+      r = parseESPNBoxScore(paste);
     } else {
       r = parseHRFullPage(paste);
     }
@@ -7139,15 +7444,14 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
 
   return <div>
     <div style={{fontSize:10,color:"var(--color-text-tertiary)",marginBottom:8,lineHeight:1.5}}>
-      Paste an <strong>entire</strong> Hockey Reference game page (Ctrl+A → Ctrl+C from hockey-reference.com)
-      OR a Natural Stat Trick game report (Ctrl+A → Ctrl+C from naturalstattrick.com).
-      Series + game # auto-detected. One paste covers both teams.
+      Paste an <strong>entire</strong> Hockey Reference, Natural Stat Trick, or ESPN box score
+      page (Ctrl+A → Ctrl+C). Series + game # auto-detected. One paste covers both teams.
     </div>
 
     {/* v78: format selector */}
     <div style={{display:"flex",gap:0,marginBottom:8,borderRadius:"var(--border-radius-md)",overflow:"hidden",
       border:"0.5px solid var(--color-border-secondary)",width:"fit-content"}}>
-      {[{id:"auto",l:"Auto-detect"},{id:"hr",l:"Hockey Reference"},{id:"nst",l:"Natural Stat Trick"}].map(f => (
+      {[{id:"auto",l:"Auto-detect"},{id:"hr",l:"Hockey Reference"},{id:"nst",l:"Natural Stat Trick"},{id:"espn",l:"ESPN"}].map(f => (
         <button key={f.id} onClick={()=>setFormat(f.id)}
           style={{padding:"5px 14px",fontSize:11,border:"none",
             borderRight:"0.5px solid var(--color-border-tertiary)",cursor:"pointer",
@@ -7335,24 +7639,27 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
       </div>
     </div>}
 
-    {/* Imports log */}
-    {seriesImports.length>0&&<div style={{marginTop:12}}>
+    {/* Imports log — v83: shows ALL imports across all series, not just current focus */}
+    {imports.length>0&&<div style={{marginTop:12}}>
       <div style={{fontSize:10,fontWeight:500,color:"var(--color-text-secondary)",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:4}}>
-        Recent Imports ({seriesImports.length})
+        All Uploaded Games ({imports.length})
       </div>
-      <div style={{maxHeight:180,overflowY:"auto",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)"}}>
-        {seriesImports.map(e=>(
+      <div style={{maxHeight:240,overflowY:"auto",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)"}}>
+        {imports.map(e=>(
           <div key={e.id} style={{display:"flex",gap:8,fontSize:10,padding:"4px 8px",borderBottom:"0.5px solid var(--color-border-tertiary)",alignItems:"center"}}>
             <span style={{color:"var(--color-text-tertiary)",flexShrink:0,fontSize:9}}>{e.ts}</span>
-            <span style={{color:"#10b981",flexShrink:0,fontFamily:"var(--font-mono)"}}>G{e.game}</span>
+            <span style={{color:"#10b981",flexShrink:0,fontFamily:"var(--font-mono)"}}>R{e.round||1}G{e.game}</span>
             <span style={{flexShrink:0,fontFamily:"var(--font-mono)",color:"var(--color-text-secondary)"}}>
               {e.awayAbbr} {e.awayScore}-{e.homeScore} {e.homeAbbr}{e.ot?" OT":""}
             </span>
             <span style={{color:"var(--color-text-secondary)",flexShrink:0}}>{e.matched}p</span>
             {e.unmatched.length>0&&<span style={{color:"#f59e0b",fontSize:9}}>⚠{e.unmatched.length}</span>}
-            <button onClick={()=>handleUndo(e.id)}
+            {e._source&&<span style={{fontSize:8,color:"var(--color-text-tertiary)",letterSpacing:0.3}}>{e._source}</span>}
+            <button onClick={()=>{
+              if(window.confirm(`Undo ${e.awayAbbr} @ ${e.homeAbbr} G${e.game}? This will remove all stats from this game.`)) handleUndo(e.id);
+            }}
               style={{marginLeft:"auto",padding:"2px 8px",fontSize:9,borderRadius:3,border:"0.5px solid rgba(239,68,68,0.3)",background:"rgba(239,68,68,0.08)",color:"#ef4444",cursor:"pointer"}}>
-              Undo
+              ✕ Delete
             </button>
           </div>
         ))}
@@ -8005,6 +8312,12 @@ function PlayerStatsTab({players,setPlayers,dark}) {
             )}
             {rows.map((r,i)=>{
               const p=r.p;
+              // v83: map current sort tab to a per-game stat key. Cells now show only that stat.
+              // "Played but no <stat>" gets a muted "0" (still shows they played); "didn't play" stays "+".
+              const STAT_TAB_TO_GAME_KEY = {rG:"g", rA:"a", rPts:"pts", rSOG:"sog", rHIT:"hit", rBLK:"blk", rTK:"tk", rGIVE:"give", rPIM:"pim"};
+              const STAT_TAB_TO_LABEL = {rG:"G", rA:"A", rPts:"P", rSOG:"SOG", rHIT:"H", rBLK:"B", rTK:"T", rGIVE:"GV", rPIM:"PIM"};
+              const gKey = STAT_TAB_TO_GAME_KEY[sortStat] || "g";
+              const sLabel = STAT_TAB_TO_LABEL[sortStat] || "";
               return <tr key={p.name+p.team} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.015)":"rgba(0,0,0,0.01)")}}>
                 <td style={{padding:"4px 8px",fontSize:11}}>{p.name}</td>
                 <td style={{padding:"4px 4px",textAlign:"center"}}><span style={{fontSize:9,padding:"1px 5px",borderRadius:2,background:"rgba(59,130,246,0.12)",color:"#60a5fa"}}>{p.team}</span></td>
@@ -8012,22 +8325,23 @@ function PlayerStatsTab({players,setPlayers,dark}) {
                 {[1,2,3,4,5,6,7].map(g=>{
                   const e = r.games[g];
                   const hasEntry = !!e;
-                  const hasStats = hasEntry && ((e.g||0)+(e.a||0)+(e.sog||0)+(e.hit||0)+(e.blk||0)+(e.tk||0)+(e.pim||0)+(e.give||0)) > 0;
-                  const summary = hasEntry ? (
-                    (e.g?`${e.g}G `:"") + (e.a?`${e.a}A `:"") + (!e.g&&!e.a&&e.sog?`${e.sog}SOG`:"") + (!e.g&&!e.a&&!e.sog&&(e.hit||e.blk||e.pim)?"✓":"") || "—"
-                  ) : "";
+                  // v83: per-game stat value matching the active sort tab.
+                  const statVal = hasEntry ? (gKey === "pts" ? (e.g||0) + (e.a||0) : (e[gKey]||0)) : 0;
+                  const hasThisStat = hasEntry && statVal > 0;
                   return <td key={g}
                     onClick={()=>setEditing({name:p.name,team:p.team,round,game:g,existing:e})}
                     style={{
                       padding:"4px 4px",textAlign:"center",cursor:"pointer",
                       fontFamily:"var(--font-mono)",fontSize:10,
-                      background:hasStats?"rgba(16,185,129,0.08)":hasEntry?"rgba(100,116,139,0.05)":"transparent",
-                      color:hasStats?"#10b981":"var(--color-text-tertiary)",
-                      border:hasEntry?"0.5px solid rgba(16,185,129,0.2)":"0.5px dashed var(--color-border-tertiary)",
+                      // Three states: has the active stat (green), played but no stat (muted gray bg, no color), didn't play (dashed border)
+                      background: hasThisStat ? "rgba(16,185,129,0.08)" : hasEntry ? "rgba(100,116,139,0.05)" : "transparent",
+                      color: hasThisStat ? "#10b981" : hasEntry ? "var(--color-text-tertiary)" : "var(--color-text-tertiary)",
+                      border: hasEntry ? `0.5px solid ${hasThisStat ? "rgba(16,185,129,0.2)" : "var(--color-border-tertiary)"}` : "0.5px dashed var(--color-border-tertiary)",
                       minWidth:56,
+                      opacity: hasEntry ? 1 : 0.5,
                     }}
                     title={hasEntry?`G:${e.g} A:${e.a} SOG:${e.sog} HIT:${e.hit} BLK:${e.blk} TK:${e.tk} GIVE:${e.give}`:"Click to add stats"}>
-                    {summary || "+"}
+                    {hasEntry ? (statVal === 0 ? "0" : `${statVal}${sLabel}`) : "+"}
                   </td>;
                 })}
                 <td style={{padding:"4px 8px",textAlign:"center",fontFamily:"var(--font-mono)",fontSize:10,background:"rgba(59,130,246,0.04)",borderLeft:"0.5px solid var(--color-border-tertiary)"}}>
@@ -8279,11 +8593,15 @@ function ParlayTab({allSeries, currentRound, margins, dark}) {
   const [sortDir, setSortDir] = useState("asc");
 
   const combos = useMemo(()=>buildCombos(selectedSize), [selectedSize, teamOptions, overrides]);
+  // v82: format team list "A & B" for 2, "A, B & C" for 3+, with last separator " & ".
+  const fmtTeamList = (combo) => combo.length===2
+    ? `${combo[0].team} & ${combo[1].team}`
+    : combo.slice(0,-1).map(o=>o.team).join(", ") + ` & ${combo[combo.length-1].team}`;
   const rows = useMemo(()=>{
     const base = combos.map(combo => {
       const dec = combo.reduce((a,b)=>a*effDec(b), 1);
       const p = 1/dec;
-      return {combo, dec, american: toAmer(p), label: combo.map(o=>o.team).join(" & ")};
+      return {combo, dec, american: toAmer(p), label: fmtTeamList(combo)};
     });
     base.sort((a,b)=>{
       let cmp = 0;
@@ -8304,11 +8622,11 @@ function ParlayTab({allSeries, currentRound, margins, dark}) {
   };
 
   const copyTextOnly = useMemo(()=>{
-    return rows.map(r => r.combo.map(o=>o.team).join(" & ") + " to advance").join("\n");
+    return rows.map(r => fmtTeamList(r.combo) + " to advance").join("\n");
   }, [rows]);
   const copyTextAndOdds = useMemo(()=>{
     return rows.map(r => {
-      const teams = r.combo.map(o=>o.team).join(" & ") + " to advance";
+      const teams = fmtTeamList(r.combo) + " to advance";
       return `${teams}\t${fmtPrice(r)}`;
     }).join("\n");
   }, [rows, showDec]);
@@ -8339,17 +8657,14 @@ function ParlayTab({allSeries, currentRound, margins, dark}) {
                 {opt.modelDec.toFixed(2)}
               </td>
               <td style={{padding:"4px 4px",textAlign:"right"}}>
-                <input type="number" step="0.01" min="1.01" max="500"
-                  value={ovr ?? ""} placeholder="—"
-                  onChange={e=>{
-                    const v = e.target.value;
-                    setOverrides(prev => {
-                      const next = {...prev};
-                      if (v === "" || v == null) delete next[k];
-                      else { const num = parseFloat(v); if (num > 1) next[k] = num; }
-                      return next;
-                    });
-                  }}
+                <LazyNI value={ovr ?? ""} onCommit={v=>{
+                  setOverrides(prev => {
+                    const next = {...prev};
+                    if (v === "" || v == null || isNaN(v)) delete next[k];
+                    else if (v > 1) next[k] = v;
+                    return next;
+                  });
+                }} min={1.01} max={500} step={0.01} showSpinner={false}
                   style={{width:60,padding:"2px 4px",fontSize:11,fontFamily:"var(--font-mono)",textAlign:"right",
                     background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
                     borderRadius:3,color:ovr!=null?"#fbbf24":"var(--color-text-primary)"}}/>
@@ -8416,7 +8731,7 @@ function ParlayTab({allSeries, currentRound, margins, dark}) {
                 {rows.map((r,i)=>(
                   <tr key={i} style={{borderTop:"0.5px solid var(--color-border-tertiary)"}}>
                     <td style={{padding:"4px 8px",color:"var(--color-text-tertiary)",fontFamily:"var(--font-mono)"}}>{i+1}</td>
-                    <td style={{padding:"4px 8px"}}>{r.combo.map(o=>o.team).join(" & ")} to advance</td>
+                    <td style={{padding:"4px 8px"}}>{r.combo.length===2 ? `${r.combo[0].team} & ${r.combo[1].team}` : r.combo.slice(0,-1).map(o=>o.team).join(", ") + ` & ${r.combo[r.combo.length-1].team}`} to advance</td>
                     <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontWeight:500}}>
                       {fmtPrice(r)}
                     </td>
