@@ -1544,11 +1544,29 @@ function parseESPNBoxScore(text) {
     const defNames = readNames(defIdx, goalieIdx >= 0 ? goalieIdx : hi);
 
     function findStatHeader(from) {
+      // ESPN paste has each column header on its own line: "G", "A", "+/-", "S", "SM", "BS", ...
+      // The first data row appears right after the last header token "FO%".
+      // We detect the header by spotting the sequence "G", "A", "+/-" on consecutive lines.
+      // (Defensive fallback also matches single-line space/tab-separated header in case ESPN format changes.)
       for (let i=from; i<hi; i++) {
         const L = lines[i].trim();
+        if (L === "G" && i+2 < hi && lines[i+1].trim() === "A" && lines[i+2].trim() === "+/-") return i;
+        // Single-line variant (defensive)
         if (/^G\s+A\s+\+\/-\s+S\s+SM\s+BS/i.test(L) || /^G\tA\t\+\/-\tS\tSM\tBS/.test(L)) return i;
       }
       return -1;
+    }
+    // Skip past the vertical header (or 1-line header) and return the index of the first data row.
+    function skipHeaderToData(headerIdx) {
+      const L = lines[headerIdx].trim();
+      // Single-line case: data starts on next line
+      if (/^G\s+A\s+\+\/-\s+S\s+SM/i.test(L) || /^G\tA\t\+\/-\tS\tSM/.test(L)) return headerIdx + 1;
+      // Vertical case: scan until we hit "FO%" then return next line
+      for (let i=headerIdx; i<hi; i++) {
+        if (lines[i].trim() === "FO%") return i + 1;
+      }
+      // Fallback — assume 19 vertical lines (G..FO%) and skip them.
+      return headerIdx + 19;
     }
     function parseStatRow(raw) {
       const row = raw.includes("\t") ? raw.split(/\t/) : raw.split(/\s+/);
@@ -1569,22 +1587,23 @@ function parseESPNBoxScore(text) {
     const h1 = findStatHeader(defIdx);
     if (h1 === -1) return null;
     const fwdStats = [];
-    let i = h1 + 1;
+    let i = skipHeaderToData(h1);
     while (fwdStats.length < fwdNames.length && i < hi) {
       const L = lines[i];
       if (!L.trim()) { i++; continue; }
-      if (/^G\s+A\s+\+\/-/i.test(L.trim())) { i++; continue; }
+      // Skip another header that snuck in (defensemen header before defenseman data)
+      if (L.trim() === "G" || /^G\s+A\s+\+\/-/i.test(L.trim())) break;
       fwdStats.push(parseStatRow(L));
       i++;
     }
     const h2 = findStatHeader(i);
     if (h2 === -1) return null;
     const defStats = [];
-    i = h2 + 1;
+    i = skipHeaderToData(h2);
     while (defStats.length < defNames.length && i < hi) {
       const L = lines[i];
       if (!L.trim()) { i++; continue; }
-      if (/^G\s+A\s+\+\/-/i.test(L.trim())) { i++; continue; }
+      if (L.trim() === "G" || /^G\s+A\s+\+\/-/i.test(L.trim())) break;
       defStats.push(parseStatRow(L));
       i++;
     }
@@ -1595,10 +1614,11 @@ function parseESPNBoxScore(text) {
 
     const goalies = [];
     if (goalieIdx !== -1) {
-      const isGHeader = (s) => /^SA\s+GA\s+SV\s+SV%/i.test(s) || /^SA\tGA\tSV\tSV%/.test(s);
+      // Header pattern: vertical ("SA" / "GA" / "SV" / "SV%" / ... / "PIM") OR single-line "SA  GA  SV  SV%..."
+      const isGHeaderLine = (s) => s === "SA" || /^SA\s+GA\s+SV\s+SV%/i.test(s) || /^SA\tGA\tSV\tSV%/.test(s);
       const goalieNames = [];
       let gi = goalieIdx + 1;
-      while (gi < hi && !isGHeader(lines[gi].trim())) {
+      while (gi < hi && !isGHeaderLine(lines[gi].trim())) {
         const nm = lines[gi].trim();
         const jr = (gi+1 < hi) ? lines[gi+1].trim() : "";
         if (!nm) { gi++; continue; }
@@ -1607,7 +1627,18 @@ function parseESPNBoxScore(text) {
         else { goalieNames.push(nm); gi++; }
       }
       if (gi < hi) {
-        let si = gi + 1;
+        // Skip header lines. Vertical case = scan until we see "PIM"; single-line case = next line.
+        let dataStart;
+        const headerLine = lines[gi].trim();
+        if (/^SA\s+GA\s+SV/i.test(headerLine) || /^SA\tGA\tSV/.test(headerLine)) {
+          dataStart = gi + 1;
+        } else {
+          // Vertical — scan to "PIM"
+          let k = gi;
+          while (k < hi && lines[k].trim() !== "PIM") k++;
+          dataStart = k + 1;
+        }
+        let si = dataStart;
         for (const gname of goalieNames) {
           while (si < hi && !lines[si].trim()) si++;
           if (si >= hi) break;
@@ -7173,7 +7204,10 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
     let detectedFormat = format;
     if (format === "auto") {
       if (/ - Individual\s*$/m.test(paste)) detectedFormat = "nst";
-      else if (/^forwards\s*$/im.test(paste) && /^defensemen\s*$/im.test(paste) && /G\s+A\s+\+\/-\s+S\s+SM\s+BS/.test(paste)) detectedFormat = "espn";
+      // ESPN auto-detect: has "forwards" + "defensemen" sections. Stat header may be vertical
+      // (each column on its own line: "G", "A", "+/-"...) or single-line; either way the presence
+      // of "forwards" + "defensemen" + "FO%" (last column) is a strong signature.
+      else if (/^forwards\s*$/im.test(paste) && /^defensemen\s*$/im.test(paste) && /^FO%\s*$/m.test(paste)) detectedFormat = "espn";
       else detectedFormat = "hr";
     }
     if (detectedFormat === "nst") {
