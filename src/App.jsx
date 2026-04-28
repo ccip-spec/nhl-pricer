@@ -2476,6 +2476,33 @@ function AppInner() {
   });
 
   useEffect(()=>{document.body.style.background=dark?"#0d0f1a":"#f1f3f7";},[dark]);
+  // v79: inject select/option dark-mode styling. The browser-native <option> dropdown panel
+  // doesn't inherit page CSS — without color-scheme it renders OS-default which on dark themes
+  // produced unreadable white-on-light-grey text. color-scheme:dark tells the browser to use
+  // dark dropdown chrome; explicit option color/background kicks in on platforms that ignore it.
+  useEffect(()=>{
+    let el = document.getElementById("nhl-pricer-globals");
+    if (!el) {
+      el = document.createElement("style");
+      el.id = "nhl-pricer-globals";
+      document.head.appendChild(el);
+    }
+    if (dark) {
+      el.textContent = `
+        select { color-scheme: dark; }
+        select option { background-color: #1a1d2e; color: #e2e8f0; }
+        select option:checked { background-color: #2a3050; color: #fff; }
+        input { color-scheme: dark; }
+      `;
+    } else {
+      el.textContent = `
+        select { color-scheme: light; }
+        select option { background-color: #fff; color: #1a202c; }
+        select option:checked { background-color: #dbeafe; color: #1a202c; }
+        input { color-scheme: light; }
+      `;
+    }
+  },[dark]);
   useEffect(()=>{try{localStorage.setItem("nhl_linemates",JSON.stringify(linemates));}catch{}},[linemates]);
   useEffect(()=>{if(players)localStorage.setItem("nhl_p",JSON.stringify(players));},[players]);
   useEffect(()=>{if(goalies)localStorage.setItem("nhl_g",JSON.stringify(goalies));},[goalies]);
@@ -4053,6 +4080,37 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
     return {hw, aw, goalsH:gH, goalsA:gA, shutouts:sh, otGames:ot, gamesPlayed:played, gamesRemaining:Math.max(0, 7-played), seriesOver: hw>=4 || aw>=4};
   }, [effKey]);
 
+  // v81: when a series outcome reduces to "winner of the next single game", price it AT
+  // the next-game money line (winPct × winner overround) rather than applying series-market juice
+  // on top. Otherwise: same outcome shows up at different prices in different markets, which is
+  // a sharp magnet (e.g. correct-score "PHI 4-2" and win-order "PHI wins G6" should be identical
+  // when the series is at 3-2 PHI — they're literally the same event).
+  //
+  // Returns null if the outcome doesn't collapse to a single next-game result; otherwise the
+  // adjusted (with-margin) price using margins.winner as the per-game juice.
+  //
+  // collapseSide: "home" or "away" — which team's next-game win produces this outcome.
+  const nextGameCollapsePrice = useCallback((collapseSide) => {
+    // Find the next unplayed game
+    const nextG = effG.find(g => !g.result);
+    if (!nextG) return null;
+    const wp = nextG.winPct;
+    if (wp == null) return null;
+    const truePrice = collapseSide === "home" ? wp : (1 - wp);
+    const adj = Math.min(0.995, truePrice * (margins.winner || 1.04));
+    return adj;
+  }, [effG, margins.winner]);
+  // Test: does (finalHw, finalAw) require exactly one specific next-game result given current state?
+  // Returns "home" / "away" / null.
+  const collapseSideForScore = useCallback((finalHw, finalAw) => {
+    if (realized.seriesOver) return null;
+    // Home clinches via this outcome: home=4, away unchanged from realized
+    if (finalHw === 4 && realized.hw === 3 && finalAw === realized.aw) return "home";
+    // Away clinches via this outcome
+    if (finalAw === 4 && realized.aw === 3 && finalHw === realized.hw) return "away";
+    return null;
+  }, [realized]);
+
   // v31 (hoisted): helper — derive O/U rows from a sim PMF, with settled detection.
   function ouFromSimPMF(pmf, lines, marginVal, realizedCount=0, maxAdditional=Infinity) {
     return lines.map(line => {
@@ -4314,33 +4372,54 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
   const e8=useMemo(()=>{
     const src = (simResult && !simStale && simResult.exactScoreProb) ? simResult.exactScoreProb : outcomes;
     const rows=[{l:`${s.homeTeam||"Home"} 4-0`,k:"4-0"},{l:`${s.homeTeam||"Home"} 4-1`,k:"4-1"},{l:`${s.homeTeam||"Home"} 4-2`,k:"4-2"},{l:`${s.homeTeam||"Home"} 4-3`,k:"4-3"},{l:`${s.awayTeam||"Away"} 4-0`,k:"0-4"},{l:`${s.awayTeam||"Away"} 4-1`,k:"1-4"},{l:`${s.awayTeam||"Away"} 4-2`,k:"2-4"},{l:`${s.awayTeam||"Away"} 4-3`,k:"3-4"}].map(o=>({...o,tp:src[o.k]||0}));
-    // v59: removed pre-normalization (tp / sum). The raw outcome probabilities from computeOutcomes
-    //      already sum to 1 naturally — pre-normalizing was redundant and broke single-outcome-collapse
-    //      pricing (e.g., at 3-0, "4-0 exact" should be priced the same as "length = 4 games").
-    //      Settled outcomes (impossible given realized games) get zeroed before applyMargin handles them.
-    // v64: when series is OVER, every row except the realized final score is impossible.
+    // v81: detect outcomes that collapse to a single next-game event (e.g. at 3-2 PHI,
+    // "PHI 4-2" = PHI wins G6). Those rows price off the moneyline, not the series-market juice.
     const annotated = rows.map(o => {
       const [hw, aw] = o.k.split("-").map(Number);
       let impossible;
       if (realized.seriesOver) {
-        // Series done — only the actual final score row is alive
         impossible = !(realized.hw === hw && realized.aw === aw);
       } else {
-        // Series in progress — only impossible if we've already exceeded the win count for that side
         impossible = realized.hw > hw || realized.aw > aw;
       }
-      return {...o, _settled: impossible, tp: impossible ? 0 : o.tp};
+      const collapseSide = impossible ? null : collapseSideForScore(hw, aw);
+      return {...o, _settled: impossible, tp: impossible ? 0 : o.tp, _collapseSide: collapseSide};
     });
-    const adj=applyMargin(annotated.map(o=>o.tp),margins.eightWay);
-    return annotated.map((o,i)=>({...o, ap: o._settled ? 0 : adj[i]}));
-  },[effKey,outcomes,margins.eightWay,s.homeTeam,s.awayTeam,simResult,simStale,realized]);
+    // Compute standard-margin prices for non-collapsing rows.
+    // Collapsing rows are zeroed out for the margin calc and then overridden with the next-game price.
+    const tpsForMargin = annotated.map(o => o._collapseSide ? 0 : o.tp);
+    const adj = applyMargin(tpsForMargin, margins.eightWay);
+    return annotated.map((o,i) => {
+      if (o._settled) return {...o, ap: 0};
+      if (o._collapseSide) {
+        const ap = nextGameCollapsePrice(o._collapseSide);
+        return {...o, ap: ap != null ? ap : adj[i], _collapse: true};
+      }
+      return {...o, ap: adj[i]};
+    });
+  },[effKey,outcomes,margins.eightWay,margins.winner,s.homeTeam,s.awayTeam,simResult,simStale,realized,collapseSideForScore,nextGameCollapsePrice]);
 
   const winOrders=useMemo(()=>{
     const seqs=computeWinOrders(effG);
     const entries=Object.entries(seqs).map(([seq,tp])=>({seq,tp,hw:seq.split("").filter(c=>c==="H").length,aw:seq.split("").filter(c=>c==="A").length}));
-    const adj=applyMargin(entries.map(e=>e.tp),margins.winOrder);
-    return entries.map((e,i)=>({...e,ap:adj[i]})).sort((a,b)=>b.ap-a.ap);
-  },[effKey,margins.winOrder]);
+    // v81: a sequence "collapses" to a single next-game event when its length equals
+    // gamesPlayed+1 (i.e., this is the team clinching in the very next game).
+    // Such rows price off the next-game moneyline (winPct × margins.winner), not series-market juice.
+    const annotated = entries.map(e => {
+      const collapses = e.seq.length === realized.gamesPlayed + 1 && !realized.seriesOver;
+      const collapseSide = collapses ? (e.seq.charAt(e.seq.length-1)==="H" ? "home" : "away") : null;
+      return {...e, _collapseSide: collapseSide};
+    });
+    const tpsForMargin = annotated.map(e => e._collapseSide ? 0 : e.tp);
+    const adj = applyMargin(tpsForMargin, margins.winOrder);
+    return annotated.map((e,i) => {
+      if (e._collapseSide) {
+        const ap = nextGameCollapsePrice(e._collapseSide);
+        return {...e, ap: ap != null ? ap : adj[i], _collapse: true};
+      }
+      return {...e, ap: adj[i]};
+    }).sort((a,b)=>b.ap-a.ap);
+  },[effKey,margins.winOrder,margins.winner,realized,nextGameCollapsePrice]);
 
   // Score @ G3 — v31: relabel ("0-3" → "PHI 3-0"); detect settled when ≥3 games played.
   const cs3=useMemo(()=>{
@@ -4523,27 +4602,56 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
     const lines=[0.5,1.5,2.5,3.5];
     // Realized shutouts so far. Max additional = remaining games (each game can produce at most 1 shutout).
     const rows = ouFromSimPMF(pmf, lines, margins.shutouts, realized.shutouts, realized.gamesRemaining);
-    return {lambda, lines: sortSettled(rows)};
+    // v80: exact shutout count market (0, 1, 2, 3, 4+).
+    // Each row's true prob = P(realized + future = k). Future PMF is `pmf`; "realized" shutouts already happened.
+    // So P(final = k) = pmf[k - realized] when k >= realized, 0 otherwise. 4+ bucket sums tail.
+    const realizedS = realized.shutouts || 0;
+    const remaining = realized.gamesRemaining || 0;
+    const exactBuckets = [];
+    for (let k = 0; k < 4; k++) {
+      const need = k - realizedS;
+      // Settled: outcome k is impossible if k < realizedS (can't undo realized) OR k - realizedS > remaining
+      const impossible = (k < realizedS) || (need > remaining);
+      const tp = (need >= 0 && need < pmf.length && !impossible) ? pmf[need] : 0;
+      exactBuckets.push({label: String(k), tp, _settled: impossible, k});
+    }
+    // 4+ tail
+    const need4 = 4 - realizedS;
+    let tp4 = 0;
+    if (need4 <= remaining) {
+      for (let kk = Math.max(0, need4); kk < pmf.length; kk++) tp4 += pmf[kk];
+    }
+    const impossible4 = need4 > remaining;
+    exactBuckets.push({label: "4+", tp: tp4, _settled: impossible4, k: 4});
+    const trueProbs = exactBuckets.map(r => r._settled ? 0 : r.tp);
+    const adj = applyMargin(trueProbs, margins.shutouts);
+    const exactRows = exactBuckets.map((r,i) => ({...r, ap: r._settled ? 0 : adj[i]}));
+    return {lambda, lines: sortSettled(rows), exactRows};
   },[effKey,margins.shutouts,s.shutoutRate,simResult,realized]);
 
-  // Team most goals — v31: sim convolution when available; settled when one team can't possibly catch up
+  // Team most goals — v31: sim convolution when available.
+  // v79: closed-form fallback now uses computeTeamGoalsPMF (which respects realized scores)
+  // instead of the legacy heuristic that only looked at series win prob (broken when one team
+  // had a big realized goal lead, e.g. PHI 15-11 over PIT was being priced as PIT favored).
   const mostGoalsMkt=useMemo(()=>{
     let pHomeMost, pAwayMost, pTied;
+    let H, A;
     if (simResult && !simStale && simResult.homeGoalsPMF && simResult.awayGoalsPMF) {
-      // Compute P(H>A), P(A>H), P(H==A) from joint distribution (assumes near-independence)
-      const H = simResult.homeGoalsPMF, A = simResult.awayGoalsPMF;
-      let pH=0, pA=0, pT=0;
-      for (let h=0; h<H.length; h++) {
-        for (let a=0; a<A.length; a++) {
-          const p = H[h]*A[a];
-          if (h>a) pH += p; else if (a>h) pA += p; else pT += p;
-        }
-      }
-      pHomeMost = pH; pAwayMost = pA; pTied = pT;
+      H = simResult.homeGoalsPMF; A = simResult.awayGoalsPMF;
     } else {
-      const shift=s.winnerGoalShift??0.15;
-      ({pHomeMost,pAwayMost,pTied}=computeTeamMostGoals(hwp,awp,shift));
+      H = computeTeamGoalsPMF(effG, "home", 50);
+      A = computeTeamGoalsPMF(effG, "away", 50);
     }
+    let pH=0, pA=0, pT=0;
+    for (let h=0; h<H.length; h++) {
+      const ph = H[h]; if (!ph) continue;
+      for (let a=0; a<A.length; a++) {
+        const pa = A[a]; if (!pa) continue;
+        const p = ph*pa;
+        if (h>a) pH += p; else if (a>h) pA += p; else pT += p;
+      }
+    }
+    pHomeMost = pH; pAwayMost = pA; pTied = pT;
     // Settled: home can't lose if (realizedH - realizedA) > maxRemaining*12
     const maxAdd = realized.gamesRemaining * 12;
     const homeLead = realized.goalsH - realized.goalsA;
@@ -4553,7 +4661,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
     else if (settledAway) { pHomeMost = 0; pAwayMost = 1; pTied = 0; }
     const [ah,aa] = (settledHome || settledAway) ? [pHomeMost, pAwayMost] : applyMargin([pHomeMost,pAwayMost],margins.teamMostGoals);
     return {pHomeMost,pAwayMost,pTied,ah,aa,_settled: settledHome || settledAway, _settledSide: settledHome ? "home" : settledAway ? "away" : null};
-  },[effKey,margins.teamMostGoals,s.winnerGoalShift,hwp,awp,simResult,realized]);
+  },[effKey,margins.teamMostGoals,s.winnerGoalShift,hwp,awp,simResult,realized,effG]);
 
   // Per-team goals O/U — v31: sim PMFs when available
   const teamGoalsMkt=useMemo(()=>{
@@ -4977,7 +5085,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><TH cols={["Outcome",...(showTrue?["True%"]:[]),"Adj%","American","Decimal"]}/>
             <tbody>{e8.map((o,i)=>(
               <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:o._settled?0.4:1,textDecoration:o._settled?"line-through":"none"}}>
-                <td style={{padding:"5px 8px"}}>{o.l}{o._settled&&<span style={{marginLeft:6,fontSize:9,color:"#ef4444",textDecoration:"none",display:"inline-block"}}>impossible</span>}</td>
+                <td style={{padding:"5px 8px"}}>{o.l}{o._settled&&<span style={{marginLeft:6,fontSize:9,color:"#ef4444",textDecoration:"none",display:"inline-block"}}>impossible</span>}{o._collapse&&<span style={{marginLeft:6,fontSize:9,padding:"1px 5px",borderRadius:2,background:"rgba(34,197,94,0.15)",color:"#4ade80",letterSpacing:0.3,fontWeight:500}} title="Priced at next-game moneyline (single-game collapse)">ML</span>}</td>
                 {showTrue&&<td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{(o.tp*100).toFixed(1)}%</td>}
                 <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11}}>{(o.ap*100).toFixed(1)}%</td>
                 <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:12,fontWeight:500,color:o.ap>=0.5?"#4ade80":"var(--color-text-primary)"}}>{o._settled?"—":fmt(o.ap)}</td>
@@ -5072,7 +5180,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
                   <TH cols={["Sequence","Winner","Games",...(showTrue?["True%"]:[]),"Adj%","American","Dec"]}/>
                   <tbody>{winOrders.map((o,i)=>(
                     <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)")}}>
-                      <td style={{padding:"3px 8px",fontSize:10}}>{seqLabel(o.seq)}</td>
+                      <td style={{padding:"3px 8px",fontSize:10}}>{seqLabel(o.seq)}{o._collapse&&<span style={{marginLeft:6,fontSize:8,padding:"1px 5px",borderRadius:2,background:"rgba(34,197,94,0.15)",color:"#4ade80",letterSpacing:0.3,fontWeight:500}} title="Priced at next-game moneyline (single-game collapse)">ML</span>}</td>
                       <td style={{padding:"3px 8px",fontSize:10,color:"var(--color-text-secondary)"}}>{o.hw===4?hn:an}</td>
                       <td style={{padding:"3px 8px",textAlign:"right",fontSize:10}}>{o.seq.length}</td>
                       {showTrue&&<td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(o.tp*100).toFixed(2)}%</td>}
@@ -5208,6 +5316,22 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
                 </tr>
               ))}</tbody>
             </table>
+            {/* v80: exact shutout count market */}
+            <div style={{marginTop:14,paddingTop:10,borderTop:"0.5px solid var(--color-border-tertiary)"}}>
+              <div style={{fontSize:10,fontWeight:500,letterSpacing:"0.1em",textTransform:"uppercase",color:"var(--color-text-secondary)",marginBottom:6}}>Exact Shutouts</div>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                <TH cols={["Count",...(showTrue?["True%"]:[]),"Adj%","American","Decimal"]}/>
+                <tbody>{shutoutMkt.exactRows.map((r,i)=>(
+                  <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:r._settled?0.4:1}}>
+                    <td style={{padding:"5px 8px",fontFamily:"var(--font-mono)",fontWeight:500}}>{r.label}</td>
+                    {showTrue&&<td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(r.tp*100).toFixed(2)}%</td>}
+                    <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{r._settled?"—":(r.ap*100).toFixed(2)+"%"}</td>
+                    <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500,color:r.ap>=0.5?"#4ade80":"var(--color-text-primary)"}}>{r._settled?"—":fmt(r.ap)}</td>
+                    <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{r._settled?"—":toDec(r.ap).toFixed(2)}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
           </Card>}
 
           {mkt==="otscorer"&&(()=>{
