@@ -1199,6 +1199,250 @@ function withGoalieRollups(g) {
 // - For player tables, we look for blocks like "<TeamName>" followed by a "Rk\tPlayer\t..." header.
 // - Two skater tables (one per team), two goalie tables.
 // - "Advanced" tables (one per team) provide HIT/BLK columns.
+// v78: Natural Stat Trick game-report paste parser. Used as alternate to HR for morning-after
+// uploads when HR hasn't refreshed yet. Returns same shape as parseHRFullPage so downstream
+// commit logic is unchanged.
+//
+// NST paste format (per user's reference paste):
+//   Header lines (in order, near top):
+//     "Philadelphia Flyers @ Pittsburgh Penguins"      ← away @ home
+//     "2026-04-27"                                      ← date
+//     "2 - 3"                                           ← away score - home score
+//     "Final" or "Final OT" or "Final SO"
+//
+//   Per-team skater section headers: "Penguins - Individual" / "Flyers - Individual"
+//   Followed by a column header row starting with "Player\tPosition\tTOI\t..." then data rows.
+//   Each skater row is TAB-separated; the columns we need:
+//     Player, Position, TOI, Goals, Total Assists, [...], Total Points, Shots, [...],
+//     PIM, [...], Giveaways, Takeaways, Hits, [...], Shots Blocked
+//
+//   After skaters, a "Goalies" sub-header then a goalie table:
+//     Player, TOI, Shots Against, Saves, Goals Against, [...] SV%, GAA, [...]
+function parseNSTGameReport(text) {
+  const NAME_TO_ABBR = {
+    "Anaheim Ducks":"ANA","Boston Bruins":"BOS","Buffalo Sabres":"BUF","Calgary Flames":"CGY",
+    "Carolina Hurricanes":"CAR","Chicago Blackhawks":"CHI","Colorado Avalanche":"COL",
+    "Columbus Blue Jackets":"CBJ","Dallas Stars":"DAL","Detroit Red Wings":"DET",
+    "Edmonton Oilers":"EDM","Florida Panthers":"FLA","Los Angeles Kings":"LAK",
+    "Minnesota Wild":"MIN","Montreal Canadiens":"MTL","Montréal Canadiens":"MTL",
+    "Nashville Predators":"NSH","New Jersey Devils":"NJD","New York Islanders":"NYI",
+    "New York Rangers":"NYR","Ottawa Senators":"OTT","Philadelphia Flyers":"PHI",
+    "Pittsburgh Penguins":"PIT","San Jose Sharks":"SJS","Seattle Kraken":"SEA",
+    "St. Louis Blues":"STL","St Louis Blues":"STL","Tampa Bay Lightning":"TBL",
+    "Toronto Maple Leafs":"TOR","Utah Mammoth":"UTA","Utah Hockey Club":"UTA",
+    "Vancouver Canucks":"VAN","Vegas Golden Knights":"VEG","Washington Capitals":"WSH",
+    "Winnipeg Jets":"WPG"
+  };
+  // Map "Penguins" → "PIT" via short last-word lookup against NAME_TO_ABBR.
+  const SHORT_TO_ABBR = {};
+  for (const [full, abbr] of Object.entries(NAME_TO_ABBR)) {
+    const last = full.split(" ").pop();
+    SHORT_TO_ABBR[last] = abbr;
+  }
+  // Special cases / multi-word short names that the simple last-word logic misses:
+  SHORT_TO_ABBR["Maple Leafs"] = "TOR";
+  SHORT_TO_ABBR["Blue Jackets"] = "CBJ";
+  SHORT_TO_ABBR["Red Wings"] = "DET";
+  SHORT_TO_ABBR["Golden Knights"] = "VEG";
+
+  const lines = text.split(/\r?\n/).map(l=>l.replace(/\s+$/,""));
+
+  // ── 1. HEADER (away @ home) ────────────────────────────────────────────────
+  // First line containing " @ " between two team-name strings.
+  let awayName=null, homeName=null, awayAbbr=null, homeAbbr=null, dateISO=null;
+  let awayScore=null, homeScore=null, ot=false, so=false;
+  for (let i=0; i<Math.min(lines.length, 30); i++) {
+    const L = lines[i].trim();
+    const m = L.match(/^(.+?)\s+@\s+(.+)$/);
+    if (m && NAME_TO_ABBR[m[1].trim()] && NAME_TO_ABBR[m[2].trim()]) {
+      awayName = m[1].trim(); homeName = m[2].trim();
+      awayAbbr = NAME_TO_ABBR[awayName]; homeAbbr = NAME_TO_ABBR[homeName];
+      // Date should be 1-2 lines below
+      for (let j=i+1; j<Math.min(i+5, lines.length); j++) {
+        const d = lines[j].trim();
+        if (/^\d{4}-\d{2}-\d{2}$/.test(d)) { dateISO = d; break; }
+      }
+      // Score: a line with "<n> - <n>" pattern within 5 lines after
+      for (let j=i+1; j<Math.min(i+8, lines.length); j++) {
+        const sm = lines[j].trim().match(/^(\d+)\s*-\s*(\d+)$/);
+        if (sm) { awayScore = +sm[1]; homeScore = +sm[2]; break; }
+      }
+      // OT/SO marker on the "Final" line
+      for (let j=i+1; j<Math.min(i+10, lines.length); j++) {
+        const fl = lines[j].trim();
+        if (fl.startsWith("Final")) {
+          if (/OT/i.test(fl)) ot = true;
+          if (/SO/i.test(fl)) so = true;
+          break;
+        }
+      }
+      break;
+    }
+  }
+  if (!awayAbbr || !homeAbbr) return {error:"Could not find header row 'Away @ Home' with recognized team names. Make sure you copied from the top of the NST report."};
+  if (awayScore == null) return {error:"Could not find score line (e.g. '2 - 3') near the header."};
+
+  // ── 2. PARSE SKATER TABLES ─────────────────────────────────────────────────
+  // Find each team's "<Short> - Individual" section. Within it, find the table header line
+  // starting with "Player" + tab/whitespace + "Position", then read rows until a blank line
+  // or a non-data line (e.g. "Goalies").
+  function findIndividualSection(teamShortName) {
+    for (let i=0; i<lines.length; i++) {
+      const L = lines[i].trim();
+      if (L === `${teamShortName} - Individual`) return i;
+    }
+    return -1;
+  }
+  function parseSkaterRows(startIdx) {
+    // Find header row
+    let headerIdx = -1;
+    for (let i=startIdx; i<Math.min(startIdx+80, lines.length); i++) {
+      const L = lines[i].trim();
+      // Skip the "Skaters" sub-header if present
+      if (/^Player\s+Position\s+TOI/.test(L) || /^Player\tPosition\tTOI/.test(L)) {
+        headerIdx = i; break;
+      }
+    }
+    if (headerIdx === -1) return {players:[], endLine:startIdx};
+    // Parse header to find column indices we care about.
+    // NST headers are tab-separated when copied from the table.
+    const headerCols = lines[headerIdx].split(/\t/).map(s=>s.trim());
+    // Fallback: if there's only 1 col, the paste may be space-separated — try collapsing whitespace.
+    const cols = headerCols.length >= 5 ? headerCols : lines[headerIdx].split(/\s{2,}|\t/).map(s=>s.trim());
+    const idx = {};
+    cols.forEach((h,i)=>{ idx[h]=i; });
+    // Required columns
+    const COL = {
+      name: idx["Player"],
+      pos: idx["Position"],
+      toi: idx["TOI"],
+      g: idx["Goals"],
+      a: idx["Total Assists"],
+      sog: idx["Shots"],
+      pim: idx["PIM"],
+      give: idx["Giveaways"],
+      tk: idx["Takeaways"],
+      hit: idx["Hits"],
+      blk: idx["Shots Blocked"],
+    };
+    if (COL.name == null || COL.g == null) {
+      return {players:[], endLine:headerIdx, _err:`NST skater header missing required columns. Found: ${cols.slice(0,15).join(" | ")}`};
+    }
+    const players = [];
+    let i = headerIdx + 1;
+    for (; i < lines.length; i++) {
+      const raw = lines[i];
+      if (!raw.trim()) break; // blank line ends table
+      // Stop on next sub-header ("Goalies", "<Team> - On Ice", ...)
+      if (/^Goalies\s*$/.test(raw.trim())) break;
+      if (/ - (On Ice|Shift Report|Forward Lines|Linemates|Opposition|Individual Event Maps)\s*$/.test(raw.trim())) break;
+      // Split row on tabs (preferred) or 2+ spaces
+      const row = raw.includes("\t") ? raw.split(/\t/) : raw.split(/\s{2,}/);
+      const name = (row[COL.name]||"").trim();
+      if (!name) continue;
+      // Skip aggregate rows like "Forwards" / "Defense"
+      if (name === "Forwards" || name === "Defense" || name === "Defensemen") continue;
+      const num = (j)=>{ if (j==null) return 0; const v=row[j]?.trim(); if (!v||v==="-") return 0; const n=parseFloat(v); return isFinite(n)?n:0; };
+      const toi = (row[COL.toi]||"").trim() || "0:00";
+      players.push({
+        name,
+        g: num(COL.g)|0,
+        a: num(COL.a)|0,
+        sog: num(COL.sog)|0,
+        pim: num(COL.pim)|0,
+        toi,
+        hit: num(COL.hit)|0,
+        blk: num(COL.blk)|0,
+        tk: num(COL.tk)|0,
+        give: num(COL.give)|0,
+      });
+    }
+    return {players, endLine:i};
+  }
+
+  function parseGoalieRows(startIdx) {
+    // Find "Goalies" sub-header, then header row starting with "Player".
+    let headerIdx = -1;
+    for (let i=startIdx; i<Math.min(startIdx+200, lines.length); i++) {
+      const L = lines[i].trim();
+      if (/^Player\s+TOI\s+Shots Against/.test(L) || /^Player\tTOI\tShots Against/.test(L)) {
+        headerIdx = i; break;
+      }
+    }
+    if (headerIdx === -1) return {goalies:[], endLine:startIdx};
+    const headerCols = lines[headerIdx].split(/\t/).map(s=>s.trim());
+    const cols = headerCols.length >= 5 ? headerCols : lines[headerIdx].split(/\s{2,}|\t/).map(s=>s.trim());
+    const idx = {};
+    cols.forEach((h,i)=>{ idx[h]=i; });
+    const COL = {
+      name: idx["Player"], toi: idx["TOI"],
+      sa: idx["Shots Against"], sv: idx["Saves"], ga: idx["Goals Against"],
+    };
+    if (COL.name == null || COL.sa == null) return {goalies:[], endLine:headerIdx};
+    const goalies = [];
+    let i = headerIdx + 1;
+    for (; i < lines.length; i++) {
+      const raw = lines[i];
+      if (!raw.trim()) break;
+      if (/ - (On Ice|Shift Report|Forward Lines|Linemates|Opposition|Individual Event Maps|Individual)\s*$/.test(raw.trim())) break;
+      // Stop on a new sub-header "Skaters" or "Goalies" (would mean we're past this table)
+      if (/^(Skaters|Goalies)\s*$/.test(raw.trim())) break;
+      const row = raw.includes("\t") ? raw.split(/\t/) : raw.split(/\s{2,}/);
+      const name = (row[COL.name]||"").trim();
+      if (!name) continue;
+      // Skip what looks like another table's header repeated
+      if (name === "Player") continue;
+      const num = (j)=>{ if (j==null) return 0; const v=row[j]?.trim(); if (!v||v==="-") return 0; const n=parseFloat(v); return isFinite(n)?n:0; };
+      // Sanity: TOI cell must look like mm:ss; if it's a position letter (D/R/L/C), this isn't a goalie row.
+      const toiRaw = (row[COL.toi]||"").trim();
+      if (!/^\d+:\d{2}$/.test(toiRaw)) continue;
+      goalies.push({
+        name,
+        sa: num(COL.sa)|0,
+        sv: num(COL.sv)|0,
+        ga: num(COL.ga)|0,
+        toi: toiRaw,
+        dec:"", so:0,
+      });
+    }
+    return {goalies, endLine:i};
+  }
+
+  // Identify each team's short name (last word of "<City> <Nickname>"):
+  const homeShort = homeName.split(" ").pop();
+  const awayShort = awayName.split(" ").pop();
+
+  const teamData = {};
+  for (const [abbr, short] of [[homeAbbr, homeShort], [awayAbbr, awayShort]]) {
+    const sectionStart = findIndividualSection(short);
+    if (sectionStart === -1) {
+      teamData[abbr] = {players:[], goalies:[]};
+      continue;
+    }
+    const sk = parseSkaterRows(sectionStart);
+    const gl = parseGoalieRows(sk.endLine);
+    teamData[abbr] = {players: sk.players, goalies: gl.goalies};
+    if (sk._err) teamData[abbr]._err = sk._err;
+  }
+
+  if ((teamData[homeAbbr]?.players.length||0) === 0 && (teamData[awayAbbr]?.players.length||0) === 0) {
+    const dbg = teamData[homeAbbr]?._err || teamData[awayAbbr]?._err || "";
+    return {error: `Could not parse skater tables for either team. ${dbg}`};
+  }
+
+  return {
+    awayAbbr, homeAbbr,
+    awayName, homeName,
+    awayScore, homeScore,
+    ot, so, dateISO,
+    awayPlayers: teamData[awayAbbr]?.players || [],
+    homePlayers: teamData[homeAbbr]?.players || [],
+    awayGoalies: teamData[awayAbbr]?.goalies || [],
+    homeGoalies: teamData[homeAbbr]?.goalies || [],
+  };
+}
+
+
 function parseHRFullPage(text) {
   const NAME_TO_ABBR = {
     "Anaheim Ducks":"ANA","Boston Bruins":"BOS","Buffalo Sabres":"BUF","Calgary Flames":"CGY",
@@ -6460,6 +6704,8 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
   const [unmatchedDecisions,setUnmatchedDecisions]=useState({}); // name -> "skip"|"add"
   const [result,setResult]=useState(null);
   const [err,setErr]=useState("");
+  // v78: format selector. "auto" detects from paste; "hr" forces Hockey Reference; "nst" forces Natural Stat Trick.
+  const [format,setFormat]=useState("auto");
 
   // Imports log persisted to localStorage. Each entry covers BOTH teams of one game.
   // Schema: {id, ts, seriesIdx, seriesLabel, round, game, hash, awayAbbr, homeAbbr,
@@ -6496,7 +6742,18 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
     if(!players){setErr("Load skaters.csv first.");return;}
     if(!paste.trim()) return;
 
-    const r = parseHRFullPage(paste);
+    // v78: select parser based on format selector. "auto" sniffs the paste for NST signature
+    // (the unique "<Team> - Individual" section header) — falls back to HR otherwise.
+    let r;
+    let detectedFormat = format;
+    if (format === "auto") {
+      detectedFormat = / - Individual\s*$/m.test(paste) ? "nst" : "hr";
+    }
+    if (detectedFormat === "nst") {
+      r = parseNSTGameReport(paste);
+    } else {
+      r = parseHRFullPage(paste);
+    }
     if (r.error) { setErr(r.error); return; }
 
     const detectedSeries = detectSeriesIdx(r.awayAbbr, r.homeAbbr);
@@ -6758,13 +7015,27 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
 
   return <div>
     <div style={{fontSize:10,color:"var(--color-text-tertiary)",marginBottom:8,lineHeight:1.5}}>
-      Paste the <strong>entire</strong> Hockey Reference game page (Ctrl+A → Ctrl+C from the page).
-      Includes scoring summary, both teams' skater + goalie tables, and advanced stats.
+      Paste an <strong>entire</strong> Hockey Reference game page (Ctrl+A → Ctrl+C from hockey-reference.com)
+      OR a Natural Stat Trick game report (Ctrl+A → Ctrl+C from naturalstattrick.com).
       Series + game # auto-detected. One paste covers both teams.
     </div>
 
+    {/* v78: format selector */}
+    <div style={{display:"flex",gap:0,marginBottom:8,borderRadius:"var(--border-radius-md)",overflow:"hidden",
+      border:"0.5px solid var(--color-border-secondary)",width:"fit-content"}}>
+      {[{id:"auto",l:"Auto-detect"},{id:"hr",l:"Hockey Reference"},{id:"nst",l:"Natural Stat Trick"}].map(f => (
+        <button key={f.id} onClick={()=>setFormat(f.id)}
+          style={{padding:"5px 14px",fontSize:11,border:"none",
+            borderRight:"0.5px solid var(--color-border-tertiary)",cursor:"pointer",
+            background:format===f.id?"#3b82f6":"var(--color-background-secondary)",
+            color:format===f.id?"white":"var(--color-text-secondary)",fontWeight:format===f.id?500:400}}>
+          {f.l}
+        </button>
+      ))}
+    </div>
+
     <textarea value={paste} onChange={e=>{setPaste(e.target.value); setPreview(null); setResult(null); setErr("");}}
-      placeholder={"Paste full HR game page here (Ctrl+A then Ctrl+C from hockey-reference.com/boxscores/...)"}
+      placeholder={"Paste HR or NST game page here…"}
       style={{width:"100%",height:140,fontSize:10,fontFamily:"var(--font-mono)",
         background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",
         borderRadius:"var(--border-radius-md)",padding:10,color:"var(--color-text-primary)",
