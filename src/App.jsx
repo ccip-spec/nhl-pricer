@@ -2683,9 +2683,9 @@ function Seg({options,value,onChange,accent="#3b82f6"}) {
 const SEL = {padding:"4px 8px",fontSize:11,background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",color:"var(--color-text-primary)"};
 function roleColor(r) {
   return {
-    TOP6:"#10b981", MID6:"#64748b", BOT6:"#f59e0b",
+    TOP6:"#10b981", MID6:"#64748b", BOT6:"#cbd5e1",
     ACTIVE:"#0ea5e9", ON_ROSTER:"#0ea5e9",
-    D2D:"#fbbf24",
+    D2D:"#f97316",
     SCRATCHED:"#ef4444", INACTIVE:"#f87171", IR:"#dc2626", CUT:"#7f1d1d",
     D1:"#3b82f6", D2:"#60a5fa", D3:"#93c5fd",
     STARTER:"#a78bfa", BACKUP:"#7c3aed",
@@ -7797,9 +7797,12 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
   useEffect(()=>{try{localStorage.setItem("nhl_imports_v28",JSON.stringify(imports));}catch{}},[imports]);
 
   function hashStr(str){let h=0;for(let i=0;i<str.length;i++){h=((h<<5)-h)+str.charCodeAt(i);h|=0;}return (h>>>0).toString(36);}
-  // v28.1: NFD-normalize then strip combining diacritics (ö → o, č → c, ü → u, etc.)
-  // Critical for matching HR-style names with accents against ASCII-stripped CSV names (or vice versa).
-  const norm=s=>(s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().replace(/[^a-z0-9]/g,"");
+  // v97 — use the canonical normPlayerName (with NICKNAME_MAP + LAST_NAME_MAP + multi-word collapse).
+  // Previous local impl just stripped diacritics and case → missed "Oskar Bck" ↔ "Oskar Bäck",
+  // "Joshua Norris" ↔ "Josh Norris", suffix variants like Slafkovsky/Slafkovsk, etc.
+  // When matching fails, the importer prompted to "add as new player" → silently created duplicate
+  // records, splitting future stats across them. THAT is the points-undercount root cause.
+  const norm = normPlayerName;
 
   // Auto-detect series from team abbrs in parsed result
   function detectSeriesIdx(awayAbbr, homeAbbr){
@@ -8428,7 +8431,9 @@ function UploadTab({players,setPlayers,goalies,setGoalies,linemates,setLinemates
   // If no match, add as a new player.
   function mergeHRRoster(hrPlayers) {
     if (!hrPlayers || !hrPlayers.length) return;
-    const norm = s => (s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().replace(/[^a-z0-9]/g,"");
+    // v97 — use canonical normPlayerName (handles aliases). Previously bare diacritic strip,
+    // which let HR roster paste create duplicate records when nickname/suffix variants existed.
+    const norm = normPlayerName;
     const existing = players || [];
     // Index existing by (normName + team) for fast lookup
     const byKey = new Map(existing.map(p => [norm(p.name)+"|"+p.team, p]));
@@ -8565,7 +8570,7 @@ function UploadTab({players,setPlayers,goalies,setGoalies,linemates,setLinemates
         // the existing record while keeping lineRole and pG/pA/pSOG/etc.
         const existing = players || [];
         if (existing.length) {
-          const normName = (s) => (s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().replace(/[^a-z0-9]/g,"");
+          const normName = normPlayerName;
           const byKey = new Map(existing.map(p => [normName(p.name)+"|"+(p.team||""), p]));
           const byNameOnly = new Map(existing.map(p => [normName(p.name), p]));
           const PRESERVE_FIELDS = ["lineRole","pGP","pG","pA","pPts","pSOG","pHIT","pBLK","pTK","pGV","pPIM","pTOI","pTSA","pGIVE"];
@@ -9139,6 +9144,79 @@ function RolesTab({players,setPlayers,allSeries,dark}) {
   function setRole(name,team,role){setPlayers(prev=>prev.map(p=>p.name===name&&p.team===team?{...p,lineRole:role}:p));}
   function bulkSet(role){if(!filterTeam||filterTeam==="ALL")return;setPlayers(prev=>prev.map(p=>p.team===filterTeam?{...p,lineRole:role}:p));}
 
+  // v96: Duplicate detection — group players by normalized-name + team. Groups with >1 entry are dupes.
+  // Two records may exist when a stat-paste names a player differently than MoneyPuck (e.g. "Oskar Bck" vs "Oskar Bäck").
+  // The lookup-side normalization folds these (LAST_NAME_MAP), but the player records themselves never merged.
+  const [showMergePanel, setShowMergePanel] = useState(false);
+  const dupeGroups = useMemo(()=>{
+    if (!players) return [];
+    const groups = {};
+    for (const p of players) {
+      const key = normPlayerName(p.name) + "|" + p.team;
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(p);
+    }
+    // Filter to groups with >1 player
+    const dupes = [];
+    for (const [key, arr] of Object.entries(groups)) {
+      if (arr.length > 1) dupes.push({key, players: arr});
+    }
+    return dupes;
+  }, [players]);
+
+  // v96: Pick canonical name from a group of dupes. Prefers names with diacritics, then longer names.
+  function pickCanonicalName(group) {
+    let best = group[0].name;
+    let bestScore = -1;
+    for (const p of group) {
+      const hasDiacritic = p.name !== p.name.normalize("NFD").replace(/[\u0300-\u036f]/g,"");
+      const score = p.name.length + (hasDiacritic ? 100 : 0);
+      if (score > bestScore) { bestScore = score; best = p.name; }
+    }
+    return best;
+  }
+  // v96: Merge a duplicate group into one player record.
+  function mergeGroup(group) {
+    const canonicalName = pickCanonicalName(group);
+    // Pick canonical role: prefer non-MID6/non-default; else first.
+    const roleScore = r => {
+      const c = canonicalRole(r);
+      if (c === "MID6") return 1;
+      if (c === "ACTIVE") return 2;
+      return 3;
+    };
+    const canonical = group.reduce((best, p) =>
+      roleScore(p.lineRole) > roleScore(best.lineRole) ? p : best,
+      group[0]);
+    // Merge pGames — concat all entries, dedupe by (round, game)
+    const allGames = [];
+    const seen = new Set();
+    for (const p of group) {
+      for (const e of (p.pGames || [])) {
+        const k = `${e.round}|${e.game}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
+        allGames.push(e);
+      }
+    }
+    // Build merged record from canonical, with pGames union and recomputed rollups
+    const merged = withRollups({
+      ...canonical,
+      name: canonicalName,
+      pGames: allGames,
+    });
+    // Update players: remove all in group, add merged
+    setPlayers(prev => {
+      const groupKeys = new Set(group.map(p => p.name + "|" + p.team));
+      const filtered = prev.filter(p => !groupKeys.has(p.name + "|" + p.team));
+      return [...filtered, merged];
+    });
+  }
+  function mergeAll() {
+    if (!confirm(`Merge all ${dupeGroups.length} duplicate groups? This will combine pGames arrays, recompute rollups, and keep the longer/diacritic-preserving name as canonical. Cannot be undone (you'll need to re-import games if wrong).`)) return;
+    for (const g of dupeGroups) mergeGroup(g.players);
+  }
+
   if(!players) return <Card><div style={{color:"var(--color-text-secondary)",fontSize:12,padding:8}}>Load player data first</div></Card>;
 
   // v91: full taxonomy. Legacy roles (ON_ROSTER/SCRATCHED/INACTIVE) are auto-migrated on load
@@ -9177,7 +9255,7 @@ function RolesTab({players,setPlayers,allSeries,dark}) {
           <div style={{color:"var(--color-text-secondary)",lineHeight:1.7}}>
             <span style={{color:"#10b981",fontWeight:500}}>TOP6</span> — first/second-line F (×1.12 scoring)<br/>
             <span style={{color:"#64748b",fontWeight:500}}>MID6</span> — third-line F (baseline)<br/>
-            <span style={{color:"#f59e0b",fontWeight:500}}>BOT6</span> — fourth-line F (×0.90 scoring, ×1.10 hits)
+            <span style={{color:"#cbd5e1",fontWeight:500}}>BOT6</span> — fourth-line F (×0.90 scoring, ×1.10 hits)
           </div>
         </div>
         <div>
@@ -9200,13 +9278,13 @@ function RolesTab({players,setPlayers,allSeries,dark}) {
           <div style={{fontWeight:500,color:"#0ea5e9",fontSize:10,letterSpacing:0.4,marginBottom:4}}>STATUS (FLEX)</div>
           <div style={{color:"var(--color-text-secondary)",lineHeight:1.7}}>
             <span style={{color:"#0ea5e9",fontWeight:500}}>ACTIVE</span> — healthy scratch (on roster, not playing)<br/>
-            <span style={{color:"#fbbf24",fontWeight:500}}>D2D</span> — out next game only, plays rest of series
+            <span style={{color:"#f97316",fontWeight:500}}>D2D</span> — out next game only, plays rest of series
           </div>
         </div>
         <div>
           <div style={{fontWeight:500,color:"#dc2626",fontSize:10,letterSpacing:0.4,marginBottom:4}}>STATUS (OUT)</div>
           <div style={{color:"var(--color-text-secondary)",lineHeight:1.7}}>
-            <span style={{color:"#dc2626",fontWeight:500}}>IR</span> — out for series (excluded from this series's props only)<br/>
+            <span style={{color:"#dc2626",fontWeight:500}}>IR</span> — out for this player until you change it (excluded from all props for any series)<br/>
             <span style={{color:"#7f1d1d",fontWeight:500}}>CUT</span> — not on active roster (excluded from ALL props, grayed out)
           </div>
         </div>
@@ -9214,7 +9292,7 @@ function RolesTab({players,setPlayers,allSeries,dark}) {
           <div style={{fontWeight:500,color:"var(--color-text-tertiary)",fontSize:10,letterSpacing:0.4,marginBottom:4}}>BEHAVIOR</div>
           <div style={{color:"var(--color-text-secondary)",lineHeight:1.6,fontSize:10}}>
             D2D players project for (remaining_games − 1). After their next game, update the tag (D2D → BOT6 if back, or stays D2D if still out).<br/>
-            IR is per-series; player remains in DB and unflags between rounds.
+            IR set here is global and persists until you change it. For one-series-only IR, use the 🚑 panel inside the Series Pricer for that series.
           </div>
         </div>
       </div>
@@ -9238,7 +9316,7 @@ function RolesTab({players,setPlayers,allSeries,dark}) {
         Typical NHL game lineup: 6 TOP6 + 6 MID6/BOT6 + 6 D (2/2/2) + 1 STARTER. Expected counts —
         <span style={{color:"#10b981",fontWeight:500}}> TOP6:6</span> ·
         <span style={{color:"#64748b",fontWeight:500}}> MID6:3</span> ·
-        <span style={{color:"#f59e0b",fontWeight:500}}> BOT6:3</span> ·
+        <span style={{color:"#cbd5e1",fontWeight:500}}> BOT6:3</span> ·
         <span style={{color:"#3b82f6",fontWeight:500}}> D1:2</span> ·
         <span style={{color:"#60a5fa",fontWeight:500}}> D2:2</span> ·
         <span style={{color:"#93c5fd",fontWeight:500}}> D3:2</span> ·
@@ -9259,11 +9337,69 @@ function RolesTab({players,setPlayers,allSeries,dark}) {
           <span style={{fontSize:10,color:"var(--color-text-secondary)"}}>Bulk (all):</span>
           {["IR","CUT"].map(r=><button key={r} onClick={()=>bulkSet(r)} style={{padding:"3px 8px",fontSize:9,borderRadius:3,border:"none",cursor:"pointer",fontWeight:500,background:`${roleColor(r)}20`,color:roleColor(r)}}>→{r}</button>)}
         </>}
+        {dupeGroups.length > 0 && <button onClick={()=>setShowMergePanel(v=>!v)}
+          style={{padding:"3px 10px",fontSize:10,borderRadius:3,border:"0.5px solid #f59e0b",cursor:"pointer",fontWeight:600,background:"rgba(245,158,11,0.15)",color:"#f59e0b"}}
+          title="Detected duplicate player records (e.g. 'Oskar Bck' + 'Oskar Bäck'). Merge to consolidate stats.">
+          ⚠ {dupeGroups.length} dupes
+        </button>}
         <div style={{marginLeft:"auto",display:"flex",gap:4,flexWrap:"wrap"}}>
           {ALL_ROLES.map(r=>{const cnt=players.filter(p=>canonicalRole(p.lineRole)===r).length;if(!cnt)return null;const c=roleColor(r);return <div key={r} style={{fontSize:9,padding:"2px 7px",borderRadius:3,background:`${c}20`,color:c,fontWeight:500}}>{r}: {cnt}</div>;})}
         </div>
       </div>
     </Card>
+
+    {/* v96: Duplicate Merge Panel */}
+    {showMergePanel && dupeGroups.length > 0 && <Card style={{marginBottom:12,borderColor:"#f59e0b"}}>
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+        <SH title={`${dupeGroups.length} Duplicate Player Group${dupeGroups.length===1?"":"s"} Detected`} sub="Records that hash to the same normalized name+team. Stats may be split across these records — merge to consolidate."/>
+        <button onClick={mergeAll} style={{marginLeft:"auto",padding:"5px 12px",fontSize:11,fontWeight:600,borderRadius:4,border:"none",cursor:"pointer",background:"#dc2626",color:"#fff"}}>
+          Merge All ({dupeGroups.length})
+        </button>
+      </div>
+      <div style={{maxHeight:400,overflowY:"auto"}}>
+        {dupeGroups.map((grp,gi) => {
+          const canonicalName = pickCanonicalName(grp.players);
+          return <div key={gi} style={{padding:"8px 10px",marginBottom:8,background:"rgba(245,158,11,0.06)",border:"0.5px solid rgba(245,158,11,0.3)",borderRadius:4}}>
+            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6}}>
+              <div style={{fontSize:11,fontWeight:600,color:"#f59e0b"}}>
+                {grp.players[0].team} · {canonicalName} <span style={{color:"var(--color-text-tertiary)",fontWeight:400}}>(canonical)</span>
+              </div>
+              <button onClick={()=>mergeGroup(grp.players)} style={{marginLeft:"auto",padding:"3px 10px",fontSize:10,fontWeight:500,borderRadius:3,border:"none",cursor:"pointer",background:"#10b981",color:"#fff"}}>
+                Merge
+              </button>
+            </div>
+            <table style={{width:"100%",fontSize:10,fontFamily:"var(--font-mono)"}}>
+              <thead>
+                <tr style={{color:"var(--color-text-tertiary)",textAlign:"left"}}>
+                  <th style={{padding:"2px 6px"}}>Name in record</th>
+                  <th style={{padding:"2px 6px"}}>Role</th>
+                  <th style={{padding:"2px 6px",textAlign:"right"}}>pGP</th>
+                  <th style={{padding:"2px 6px",textAlign:"right"}}>pG</th>
+                  <th style={{padding:"2px 6px",textAlign:"right"}}>pA</th>
+                  <th style={{padding:"2px 6px",textAlign:"right"}}>pSOG</th>
+                  <th style={{padding:"2px 6px",textAlign:"right"}}>pGames len</th>
+                  <th style={{padding:"2px 6px",textAlign:"right"}}>Season GP</th>
+                </tr>
+              </thead>
+              <tbody>
+                {grp.players.map((p,pi)=>(
+                  <tr key={pi} style={{color:p.name===canonicalName?"#10b981":"var(--color-text-secondary)"}}>
+                    <td style={{padding:"2px 6px"}}>{p.name===canonicalName?"★ ":""}{p.name}</td>
+                    <td style={{padding:"2px 6px"}}>{canonicalRole(p.lineRole)}</td>
+                    <td style={{padding:"2px 6px",textAlign:"right"}}>{p.pGP||0}</td>
+                    <td style={{padding:"2px 6px",textAlign:"right"}}>{p.pG||0}</td>
+                    <td style={{padding:"2px 6px",textAlign:"right"}}>{p.pA||0}</td>
+                    <td style={{padding:"2px 6px",textAlign:"right"}}>{p.pSOG||0}</td>
+                    <td style={{padding:"2px 6px",textAlign:"right"}}>{(p.pGames||[]).length}</td>
+                    <td style={{padding:"2px 6px",textAlign:"right"}}>{p.gp||0}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>;
+        })}
+      </div>
+    </Card>}
 
     <Card>
       <div style={{overflowX:"auto"}}>
