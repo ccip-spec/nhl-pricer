@@ -2166,26 +2166,56 @@ function computeShutoutLambda(shutoutRate, expG, effG) {
 }
 
 // OT games in series: enumerate paths, P(k OT games) using Poisson per game
-function computeOTSeriesDist(effG, outcomes, kMax=8) {
-  // Use Poisson with lambda = sum over paths of (sum of pOT[g]) * P(path)
-  // v61 fix: for PLAYED games, OT contribution is 1 if it went to OT, else 0 — not the prior pOT.
-  let lambda = 0;
-  function rec(gi, hw, aw, prob, otAcc) {
-    if (hw===4||aw===4) { lambda += prob * otAcc; return; }
+// v87: returns full PMF [p(k=0), p(k=1), ...] for total OT games in series.
+// CRITICAL: realized OT games are a deterministic offset, NOT part of the random distribution.
+// Earlier code used Poisson(lambda) where lambda included realized — wrong, because Poisson treats
+// realized events as random. With realizedOT=3 already in the books, P(final=2) MUST be 0; with the
+// old code it was small but non-zero (e.g. 21% adj → +264 American), badly mispricing the market.
+//
+// The right model: total = realizedOT (fixed) + futureOT (random). Future OT count is a sum of
+// independent Bernoulli(pOT) over the unplayed games on each branch — i.e., Poisson-binomial.
+// Since pOT≈0.22 is roughly constant per game, we approximate future with Poisson(lambda_future).
+// PMF[k] = P(future = k - realizedOT). For k < realizedOT, PMF[k] = 0.
+function computeOTSeriesPMF(effG, kMax=10) {
+  // 1) Realized OT count from played games
+  let realizedOT = 0;
+  for (const g of effG) {
+    if (g.result && (g.wentOT || g.ot || g.result === "ot")) realizedOT++;
+  }
+  // 2) Expected FUTURE OT count = E[# unplayed games in series] × avg pOT, computed via tree.
+  //    We accumulate (over all branching paths of unplayed games) the path-prob × sum_of_pOT_for_unplayed_games_on_path.
+  let lamFuture = 0;
+  function rec(gi, hw, aw, prob, futureAcc) {
+    if (hw===4||aw===4) { lamFuture += prob * futureAcc; return; }
     if (gi>=7) return;
     const g = effG[gi];
     if (g.result) {
-      const realizedOT = (g.wentOT || g.ot || g.result === "ot") ? 1 : 0;
-      if (g.result==="home") rec(gi+1, hw+1, aw, prob, otAcc+realizedOT);
-      else if (g.result==="away") rec(gi+1, hw, aw+1, prob, otAcc+realizedOT);
+      // Played games contribute nothing to future (they're already in the realized offset)
+      if (g.result==="home") rec(gi+1, hw+1, aw, prob, futureAcc);
+      else if (g.result==="away") rec(gi+1, hw, aw+1, prob, futureAcc);
     } else {
       const pot = g.pOT ?? 0.22;
-      rec(gi+1, hw+1, aw, prob*g.winPct, otAcc+pot);
-      rec(gi+1, hw, aw+1, prob*(1-g.winPct), otAcc+pot);
+      rec(gi+1, hw+1, aw, prob*g.winPct, futureAcc+pot);
+      rec(gi+1, hw, aw+1, prob*(1-g.winPct), futureAcc+pot);
     }
   }
   rec(0,0,0,1,0);
-  return { lambda: Math.max(0.0001, lambda) };
+  lamFuture = Math.max(0, lamFuture);
+  // 3) Future PMF via Poisson approximation, then shift by realizedOT.
+  const pmf = new Array(kMax+1).fill(0);
+  for (let k=0; k<=kMax; k++) {
+    const futureK = k - realizedOT;
+    if (futureK < 0) { pmf[k] = 0; continue; }
+    pmf[k] = poissonPMF(futureK, lamFuture);
+  }
+  // Total lambda for display = realized + future
+  return { pmf, lambda: realizedOT + lamFuture, realizedOT, lamFuture };
+}
+
+function computeOTSeriesDist(effG, outcomes, kMax=8) {
+  // Backward-compat shim — kept for any older call sites. New code should use computeOTSeriesPMF.
+  const { lambda } = computeOTSeriesPMF(effG, kMax);
+  return { lambda };
 }
 
 // Spread: home wins - away wins differential.
@@ -4768,9 +4798,12 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
     if (simResult && !simStale && simResult.seriesOTPMF) {
       pmf = simResult.seriesOTPMF;
     } else {
-      const {lambda:lam}=computeOTSeriesDist(effG,outcomes);
-      pmf = [];
-      for (let k=0; k<8; k++) pmf.push(poissonPMF(k, lam));
+      // v87: closed-form PMF that respects realized OT count as a fixed offset.
+      // Old code built Poisson(realized + future) which gave nonzero probability to k < realized
+      // (impossible — you can't undo OT games already played). New code uses Poisson(future) shifted
+      // by realized, so k < realized is exactly 0.
+      const r = computeOTSeriesPMF(effG, 8);
+      pmf = r.pmf;
     }
     let lambda=0; for (let k=0;k<pmf.length;k++) lambda += k*pmf[k];
     const exactLines=[0,1,2,3,4,5,6,7];
@@ -5427,40 +5460,43 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
               <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
                 <TH cols={["Line",...(showTrue?["True O%","True U%"]:[]),"O Adj%","U Adj%","Over","Under"]}/>
                 <tbody>{(()=>{
-                  // Cumulative prob of going > line, evaluated at 4.5, 5.5, 6.5.
-                  // P(over 4.5) = P(len >= 5) = len5 + len6 + len7
-                  // P(over 5.5) = len6 + len7
-                  // P(over 6.5) = len7
-                  const rawLens = [len4, len5, len6, len7];
+                  // v86: use closed-form when sim is stale (matches the top "Series Length" section logic).
+                  // Previously used stale sim probs, which gave wrong O/U numbers after input changes.
+                  // Cumulative prob of going > line:
+                  //   P(over 4.5) = P(len >= 5) = len5 + len6 + len7
+                  //   P(over 5.5) = len6 + len7
+                  //   P(over 6.5) = len7
+                  const cf = [len4, len5, len6, len7];
                   const sim = simResult && simResult.seriesLengthProb;
-                  const srcLens = sim ? [sim[4]||0, sim[5]||0, sim[6]||0, sim[7]||0] : rawLens;
+                  const useSim = sim && !simStale;
+                  const srcLens = useSim ? [sim[4]||0, sim[5]||0, sim[6]||0, sim[7]||0] : cf;
                   const lines = [
                     {line:4.5, pO: srcLens[1]+srcLens[2]+srcLens[3]},
                     {line:5.5, pO: srcLens[2]+srcLens[3]},
                     {line:6.5, pO: srcLens[3]},
                   ];
                   return lines.map((L,i)=>{
-                    // Settled when realized.gamesPlayed > line (OVER settled) or series decided and length < line (UNDER settled)
-                    const maxPossible = 4 + realized.gamesRemaining + Math.min(realized.hw, realized.aw);
-                    // Simpler: determine actual min/max finishable length
-                    // min final length = max(realized.gamesPlayed, 4 + max(realized.hw,realized.aw) - max(realized.hw,realized.aw))... just trust probs == 0 signal
                     const over = L.pO;
                     const under = 1 - over;
-                    const settledO = over <= 0.0001 ? false : (realized.gamesPlayed > L.line);
-                    const settledU = over >= 0.9999 || (over <= 0.0001 && realized.gamesPlayed >= 4);
+                    // v86: settled detection corrected. Previously settledU/settledO were swapped:
+                    // when over≥0.9999 (e.g. series tied 2-2 means OVER 4.5 will absolutely happen),
+                    // we should set OVER=settled-yes (apO=1, apU=0), but old code set UNDER=settled.
+                    const settledOverYes = over >= 0.9999 || (realized.gamesPlayed > L.line);
+                    const settledOverNo  = over <= 0.0001;
                     let apO, apU;
-                    if (settledO) { apO=1; apU=0; }
-                    else if (settledU) { apO=0; apU=1; }
+                    if (settledOverYes) { apO = 1; apU = 0; }
+                    else if (settledOverNo) { apO = 0; apU = 1; }
                     else { [apO,apU] = applyMargin([over,under], effMargins.length); }
+                    const settled = settledOverYes || settledOverNo;
                     return (
-                      <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:(settledO||settledU)?0.55:1}}>
-                        <td style={{padding:"5px 8px",fontFamily:"var(--font-mono)"}}>{L.line}</td>
+                      <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:settled?0.55:1}}>
+                        <td style={{padding:"5px 8px",fontFamily:"var(--font-mono)"}}>{L.line}{settled&&<span style={{marginLeft:6,fontSize:9,color:settledOverYes?"#10b981":"#ef4444"}}>{settledOverYes?"OVER ✓":"UNDER ✓"}</span>}</td>
                         {showTrue&&<td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{(over*100).toFixed(1)}%</td>}
                         {showTrue&&<td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{(under*100).toFixed(1)}%</td>}
                         <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11}}>{(apO*100).toFixed(1)}%</td>
                         <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11}}>{(apU*100).toFixed(1)}%</td>
-                        <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:12,fontWeight:500,color:apO>=0.5?"#4ade80":"var(--color-text-primary)"}}>{fmt(apO)}</td>
-                        <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:12,fontWeight:500,color:apU>=0.5?"#4ade80":"var(--color-text-primary)"}}>{fmt(apU)}</td>
+                        <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:12,fontWeight:500,color:apO>=0.5?"#4ade80":"var(--color-text-primary)"}}>{settled&&apO===0?"—":fmt(apO)}</td>
+                        <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:12,fontWeight:500,color:apU>=0.5?"#4ade80":"var(--color-text-primary)"}}>{settled&&apU===0?"—":fmt(apU)}</td>
                       </tr>
                     );
                   });
