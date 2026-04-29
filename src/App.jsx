@@ -9107,11 +9107,16 @@ function RolesTab({players,setPlayers,allSeries,dark}) {
     }):[];
 
   // v94: compute remaining games in current series for each team — used for Proj GP column.
-  // Walks active (non-completed) series; uses gamesRemaining count per team.
+  // allSeries is a round-keyed dict {r1, r2, r3, f}, each value is an array of series.
   const remainingGamesByTeam = useMemo(()=>{
     const m = {};
-    if (!allSeries) return m;
-    for (const s of allSeries) {
+    if (!allSeries || typeof allSeries !== "object") return m;
+    const flat = [];
+    for (const k of ["r1","r2","r3","f"]) {
+      const arr = allSeries[k];
+      if (Array.isArray(arr)) flat.push(...arr);
+    }
+    for (const s of flat) {
       if (!s || !s.games) continue;
       const homeWins = s.games.filter(g=>g.result==="home").length;
       const awayWins = s.games.filter(g=>g.result==="away").length;
