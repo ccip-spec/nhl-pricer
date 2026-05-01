@@ -417,7 +417,7 @@ function multinomialDraws(k, weights, total, rng) {
 // Build simulation inputs once per (series, player, stat) call: future-lambda per player per stat per game.
 // Returns a SimInputs object capturing everything the sim needs.
 // NOTE: the caller must precompute effG (with winPct, expTotal, pOT, result applied) and the goalie multipliers per game.
-function buildSimInputs(effG, homeAbbr, awayAbbr, players, globals, goalieQualityFaced, pGamePlayed, linemates) {
+function buildSimInputs(effG, homeAbbr, awayAbbr, players, globals, goalieQualityFaced, pGamePlayed, linemates, currentRound) {
   const BASELINE = 5.82;
   const STATS = ["g","a","sog","hit","blk","tk","pim","give"];
   // Filter to active skaters on either team
@@ -425,7 +425,11 @@ function buildSimInputs(effG, homeAbbr, awayAbbr, players, globals, goalieQualit
   // For each player, precompute per-stat per-game future lambda.
   // (If user has already entered per-game stats in pGames, those contribute to realized `actual`; the sim only models FUTURE games.)
   const pgKey = (stat) => stat==="tk"?"take_pg":stat==="give"?"give_pg":stat==="pim"?"pim_pg":stat+"_pg";
-  const actKey = (stat) => stat==="tk"?"pTK":stat==="give"?"pGIVE":stat==="pim"?"pPIM":"p"+stat.toUpperCase();
+  // v98: actual seed must be ROUND-FILTERED. Previously used p.pG/p.pA/etc which are cumulative across all rounds.
+  // For an R2 series sim, that meant a player's R1 goals were seeded as already-scored R2 series goals,
+  // wildly inflating their leader probability. e.g. Boldy (6G in R1) showed 95% to lead R2 because
+  // the sim treated him as starting R2 already up 6-0 on everyone else.
+  // Now: use readActual(p, stat, currentRound) which filters pGames by round.
   const playerData = pool.map(p => {
     const isHome = p.team === homeAbbr;
     const perStat = {};
@@ -436,7 +440,8 @@ function buildSimInputs(effG, homeAbbr, awayAbbr, players, globals, goalieQualit
       // v68: NO blend here. Sim drives N+ / O/U / 1+ markets — blend was over-weighting
       // playoff sample for those markets. Series Leader has its own blend at site 2.
       const rr = shrunk * rm * globals.rateDiscount * statRateMultiplier(stat);
-      const actual = p[actKey(stat)] || 0;
+      // v98: round-aware realized seed (was cumulative across all rounds)
+      const actual = readActual(p, stat, currentRound) || 0;
       // Per-game future lambda for game i (if game played already -> 0; else rr × scale × goalieMult)
       const perGameFuture = [];
       for (let i = 0; i < 7; i++) {
@@ -2683,9 +2688,9 @@ function Seg({options,value,onChange,accent="#3b82f6"}) {
 const SEL = {padding:"4px 8px",fontSize:11,background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",color:"var(--color-text-primary)"};
 function roleColor(r) {
   return {
-    TOP6:"#10b981", MID6:"#64748b", BOT6:"#cbd5e1",
+    TOP6:"#10b981", MID6:"#64748b", BOT6:"#f59e0b",
     ACTIVE:"#0ea5e9", ON_ROSTER:"#0ea5e9",
-    D2D:"#f97316",
+    D2D:"#fbbf24",
     SCRATCHED:"#ef4444", INACTIVE:"#f87171", IR:"#dc2626", CUT:"#7f1d1d",
     D1:"#3b82f6", D2:"#60a5fa", D3:"#93c5fd",
     STARTER:"#a78bfa", BACKUP:"#7c3aed",
@@ -3521,7 +3526,8 @@ function AppInner() {
         effG.push({gameNum:gi+1, winPct: gameWinPct, expTotal: tot, pOT: 0.22, result, homeScore, awayScore, wentOT, homeGoalie:null, awayGoalie:null});
       }
       const goalieQualityFaced = effG.map(()=>({faceByHome:1.0, faceByAway:1.0}));
-      const inputs = buildSimInputs(effG, m.homeAbbr, m.awayAbbr, players, globals, goalieQualityFaced, pGamePlayedCache, linemates);
+      // v98: this market is R1-only (line 3506 guard); pass "r1" so realized seed is R1 stats only
+      const inputs = buildSimInputs(effG, m.homeAbbr, m.awayAbbr, players, globals, goalieQualityFaced, pGamePlayedCache, linemates, "r1");
       if (!inputs.pool.length) return null;
       return simulateSeries(inputs, r, 5000, 70001 + mi);
     }).filter(x => x);
@@ -3662,7 +3668,7 @@ function AppInner() {
           onGameUploaded={bumpGameUpload} currentRound={currentRound}/>}
         {tab==="compare"&&<CompareTab leaderMarket={leaderMarket} STATS={STATS} lStat={lStat} setLStat={setLStat} lScope={lScope} setLScope={setLScope} dark={dark}/>}
         {tab==="stats"&&<PlayerStatsTab players={players} setPlayers={setP} dark={dark}/>}
-        {tab==="roles"&&<RolesTab players={players} setPlayers={setP} allSeries={allSeries} dark={dark}/>}
+        {tab==="roles"&&<RolesTab players={players} setPlayers={setP} dark={dark}/>}
         {tab==="settings"&&<SettingsTab globals={globals} setGlobals={setGlobals}
           margins={margins} setMargins={setMargins}
           showTrue={showTrue} setShowTrue={setShowTrue} showDec={showDec} setShowDec={setShowDec}
@@ -4706,7 +4712,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
     setSimRunning(true);
     setTimeout(()=>{
       try {
-        const inputs = buildSimInputs(effG, s.homeAbbr, s.awayAbbr, players, globals, goalieQualityFaced, pGamePlayed, linemates);
+        const inputs = buildSimInputs(effG, s.homeAbbr, s.awayAbbr, players, globals, goalieQualityFaced, pGamePlayed, linemates, currentRound);
         if (!inputs.pool.length) { setSimForSeries(seriesKey, null); setSimRunning(false); return; }
         const t0 = (typeof performance!=="undefined"?performance.now():Date.now());
         const result = simulateSeries(inputs, globals.dispersion, 20000, 31337);
@@ -5976,15 +5982,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             pFutureOT = Math.min(1, pFutureOT);
             const pool = (players||[])
               .filter(p => (p.team === s.homeAbbr || p.team === s.awayAbbr) && eligibleRoles.has(p.lineRole));
-            // v94: build pool of realized OT scorers separately — they get credited regardless of role filter.
-            // This handles cases where the OT scorer's role isn't in eligibleRoles (e.g. legacy ON_ROSTER, IR-tagged after fact, etc.)
-            const realizedNames = new Set(Object.keys(realizedOTByPlayer));
-            const poolNamesSet = new Set(pool.map(p => p.name));
-            const extraRealized = (players||[])
-              .filter(p => (p.team === s.homeAbbr || p.team === s.awayAbbr)
-                        && realizedNames.has(p.name)
-                        && !poolNamesSet.has(p.name));
-            const rows = [...pool, ...extraRealized].map(p => {
+            const rows = pool.map(p => {
               const teamRate = p.team === s.homeAbbr ? homeG : awayG;
               const share = teamRate > 0 ? shrunkGoalRate(p) / teamRate : 0;
               const roleMult =
@@ -6003,8 +6001,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             });
             const or = effMargins.otScorer || 1.20;
             // Players with realized OT goals → settled YES (adjP = 1.0). Others → standard pricing.
-            // v94: only sum non-realized rows in totalRaw — realized rows shouldn't pull rate away from active players.
-            const totalRaw = rows.filter(r => r.realizedOT === 0).reduce((s,r)=>s+r.rawP, 0);
+            const totalRaw = rows.reduce((s,r)=>s+r.rawP, 0);
             const scale = totalRaw > 0 ? (pFutureOT / totalRaw) : 1;
             const adjusted = rows.map(r => {
               if (r.realizedOT > 0) return {...r, adjP: 1, _settled: true};
@@ -6084,16 +6081,6 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             const awayShareOfOT = awayOTWeight / totalOTWeight;
             const pool = (players||[])
               .filter(p => (p.team === s.homeAbbr || p.team === s.awayAbbr) && eligibleRoles.has(p.lineRole));
-            // v94: ensure realized first-OT scorer is in the rows even if not in eligible pool.
-            if (firstOTScorer) {
-              const inPool = pool.some(p => p.name === firstOTScorer);
-              if (!inPool) {
-                const extra = (players||[]).find(p =>
-                  p.name === firstOTScorer &&
-                  (p.team === s.homeAbbr || p.team === s.awayAbbr));
-                if (extra) pool.push(extra);
-              }
-            }
             const playerRows = pool.map(p => {
               const teamRate = p.team === s.homeAbbr ? homeG : awayG;
               const share = teamRate > 0 ? shrunkGoalRate(p) / teamRate : 0;
@@ -7797,12 +7784,9 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
   useEffect(()=>{try{localStorage.setItem("nhl_imports_v28",JSON.stringify(imports));}catch{}},[imports]);
 
   function hashStr(str){let h=0;for(let i=0;i<str.length;i++){h=((h<<5)-h)+str.charCodeAt(i);h|=0;}return (h>>>0).toString(36);}
-  // v97 — use the canonical normPlayerName (with NICKNAME_MAP + LAST_NAME_MAP + multi-word collapse).
-  // Previous local impl just stripped diacritics and case → missed "Oskar Bck" ↔ "Oskar Bäck",
-  // "Joshua Norris" ↔ "Josh Norris", suffix variants like Slafkovsky/Slafkovsk, etc.
-  // When matching fails, the importer prompted to "add as new player" → silently created duplicate
-  // records, splitting future stats across them. THAT is the points-undercount root cause.
-  const norm = normPlayerName;
+  // v28.1: NFD-normalize then strip combining diacritics (ö → o, č → c, ü → u, etc.)
+  // Critical for matching HR-style names with accents against ASCII-stripped CSV names (or vice versa).
+  const norm=s=>(s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().replace(/[^a-z0-9]/g,"");
 
   // Auto-detect series from team abbrs in parsed result
   function detectSeriesIdx(awayAbbr, homeAbbr){
@@ -8431,9 +8415,7 @@ function UploadTab({players,setPlayers,goalies,setGoalies,linemates,setLinemates
   // If no match, add as a new player.
   function mergeHRRoster(hrPlayers) {
     if (!hrPlayers || !hrPlayers.length) return;
-    // v97 — use canonical normPlayerName (handles aliases). Previously bare diacritic strip,
-    // which let HR roster paste create duplicate records when nickname/suffix variants existed.
-    const norm = normPlayerName;
+    const norm = s => (s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().replace(/[^a-z0-9]/g,"");
     const existing = players || [];
     // Index existing by (normName + team) for fast lookup
     const byKey = new Map(existing.map(p => [norm(p.name)+"|"+p.team, p]));
@@ -8570,7 +8552,7 @@ function UploadTab({players,setPlayers,goalies,setGoalies,linemates,setLinemates
         // the existing record while keeping lineRole and pG/pA/pSOG/etc.
         const existing = players || [];
         if (existing.length) {
-          const normName = normPlayerName;
+          const normName = (s) => (s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().replace(/[^a-z0-9]/g,"");
           const byKey = new Map(existing.map(p => [normName(p.name)+"|"+(p.team||""), p]));
           const byNameOnly = new Map(existing.map(p => [normName(p.name), p]));
           const PRESERVE_FIELDS = ["lineRole","pGP","pG","pA","pPts","pSOG","pHIT","pBLK","pTK","pGV","pPIM","pTOI","pTSA","pGIVE"];
@@ -9097,7 +9079,7 @@ function PlayerStatEditModal({editing,onSave,onDelete,onClose,dark}) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // ROLES TAB
 // ═══════════════════════════════════════════════════════════════════════════════
-function RolesTab({players,setPlayers,allSeries,dark}) {
+function RolesTab({players,setPlayers,dark}) {
   const [filterTeam,setFilterTeam]=useState("ALL");
   const [search,setSearch]=useState("");
   const teams=players?[...new Set(players.map(p=>p.team))].sort():[];
@@ -9111,139 +9093,14 @@ function RolesTab({players,setPlayers,allSeries,dark}) {
       return 0;
     }):[];
 
-  // v94: compute remaining games in current series for each team — used for Proj GP column.
-  // allSeries is a round-keyed dict {r1, r2, r3, f}, each value is an array of series.
-  const remainingGamesByTeam = useMemo(()=>{
-    const m = {};
-    if (!allSeries || typeof allSeries !== "object") return m;
-    const flat = [];
-    for (const k of ["r1","r2","r3","f"]) {
-      const arr = allSeries[k];
-      if (Array.isArray(arr)) flat.push(...arr);
-    }
-    for (const s of flat) {
-      if (!s || !s.games) continue;
-      const homeWins = s.games.filter(g=>g.result==="home").length;
-      const awayWins = s.games.filter(g=>g.result==="away").length;
-      if (homeWins>=4 || awayWins>=4) continue; // series done
-      const gamesPlayed = s.games.filter(g=>!!g.result).length;
-      // Naive remaining: 7 - gamesPlayed (upper bound). Better: expected remaining from outcomes,
-      // but for "Proj GP" upper bound is what user wants — assume series goes 7.
-      // More accurate: expected remaining = sum_of(p_played) for unplayed games. Use simpler bound.
-      const remaining = Math.max(0, 7 - gamesPlayed);
-      // But series can end earlier — use a more honest "expected remaining" if possible.
-      // Approximation: average between min (4-(maxWins)) and 7-played.
-      const minRemaining = Math.max(0, 4 - Math.max(homeWins, awayWins));
-      const expRemaining = (minRemaining + remaining) / 2;
-      if (s.homeAbbr) m[s.homeAbbr] = expRemaining;
-      if (s.awayAbbr) m[s.awayAbbr] = expRemaining;
-    }
-    return m;
-  }, [allSeries]);
-
   function setRole(name,team,role){setPlayers(prev=>prev.map(p=>p.name===name&&p.team===team?{...p,lineRole:role}:p));}
   function bulkSet(role){if(!filterTeam||filterTeam==="ALL")return;setPlayers(prev=>prev.map(p=>p.team===filterTeam?{...p,lineRole:role}:p));}
-
-  // v96: Duplicate detection — group players by normalized-name + team. Groups with >1 entry are dupes.
-  // Two records may exist when a stat-paste names a player differently than MoneyPuck (e.g. "Oskar Bck" vs "Oskar Bäck").
-  // The lookup-side normalization folds these (LAST_NAME_MAP), but the player records themselves never merged.
-  const [showMergePanel, setShowMergePanel] = useState(false);
-  const dupeGroups = useMemo(()=>{
-    if (!players) return [];
-    const groups = {};
-    for (const p of players) {
-      const key = normPlayerName(p.name) + "|" + p.team;
-      if (!groups[key]) groups[key] = [];
-      groups[key].push(p);
-    }
-    // Filter to groups with >1 player
-    const dupes = [];
-    for (const [key, arr] of Object.entries(groups)) {
-      if (arr.length > 1) dupes.push({key, players: arr});
-    }
-    return dupes;
-  }, [players]);
-
-  // v96: Pick canonical name from a group of dupes. Prefers names with diacritics, then longer names.
-  function pickCanonicalName(group) {
-    let best = group[0].name;
-    let bestScore = -1;
-    for (const p of group) {
-      const hasDiacritic = p.name !== p.name.normalize("NFD").replace(/[\u0300-\u036f]/g,"");
-      const score = p.name.length + (hasDiacritic ? 100 : 0);
-      if (score > bestScore) { bestScore = score; best = p.name; }
-    }
-    return best;
-  }
-  // v96: Merge a duplicate group into one player record.
-  function mergeGroup(group) {
-    const canonicalName = pickCanonicalName(group);
-    // Pick canonical role: prefer non-MID6/non-default; else first.
-    const roleScore = r => {
-      const c = canonicalRole(r);
-      if (c === "MID6") return 1;
-      if (c === "ACTIVE") return 2;
-      return 3;
-    };
-    const canonical = group.reduce((best, p) =>
-      roleScore(p.lineRole) > roleScore(best.lineRole) ? p : best,
-      group[0]);
-    // Merge pGames — concat all entries, dedupe by (round, game)
-    const allGames = [];
-    const seen = new Set();
-    for (const p of group) {
-      for (const e of (p.pGames || [])) {
-        const k = `${e.round}|${e.game}`;
-        if (seen.has(k)) continue;
-        seen.add(k);
-        allGames.push(e);
-      }
-    }
-    // Build merged record from canonical, with pGames union and recomputed rollups
-    const merged = withRollups({
-      ...canonical,
-      name: canonicalName,
-      pGames: allGames,
-    });
-    // Update players: remove all in group, add merged
-    setPlayers(prev => {
-      const groupKeys = new Set(group.map(p => p.name + "|" + p.team));
-      const filtered = prev.filter(p => !groupKeys.has(p.name + "|" + p.team));
-      return [...filtered, merged];
-    });
-  }
-  function mergeAll() {
-    if (!confirm(`Merge all ${dupeGroups.length} duplicate groups? This will combine pGames arrays, recompute rollups, and keep the longer/diacritic-preserving name as canonical. Cannot be undone (you'll need to re-import games if wrong).`)) return;
-    for (const g of dupeGroups) mergeGroup(g.players);
-  }
 
   if(!players) return <Card><div style={{color:"var(--color-text-secondary)",fontSize:12,padding:8}}>Load player data first</div></Card>;
 
   // v91: full taxonomy. Legacy roles (ON_ROSTER/SCRATCHED/INACTIVE) are auto-migrated on load
   // by migratePlayer; we still list them in the dropdown so old data displays correctly until edited.
   const ALL_ROLES=["TOP6","MID6","BOT6","D1","D2","D3","ACTIVE","D2D","STARTER","BACKUP","IR","CUT"];
-
-  // v94: per-team role count summary (only when filtering by a single team).
-  // Shows breakdown of how many players are tagged each role for the selected team.
-  const teamRoleCounts = useMemo(()=>{
-    if (filterTeam === "ALL" || !players) return null;
-    const teamPlayers = players.filter(p => p.team === filterTeam);
-    const counts = {};
-    for (const r of ALL_ROLES) counts[r] = 0;
-    for (const p of teamPlayers) {
-      const r = canonicalRole(p.lineRole);
-      counts[r] = (counts[r] || 0) + 1;
-    }
-    // Active roster = anyone NOT in IR/CUT, i.e. the players who count toward the lineup pool.
-    const totalRoster = teamPlayers.length;
-    const totalActive = teamPlayers.filter(p => {
-      const r = canonicalRole(p.lineRole);
-      return r !== "IR" && r !== "CUT";
-    }).length;
-    // Lineup-eligible (the actual playing 18 skaters typically): TOP6+MID6+BOT6+D1+D2+D3
-    const lineupEligible = (counts.TOP6||0)+(counts.MID6||0)+(counts.BOT6||0)+(counts.D1||0)+(counts.D2||0)+(counts.D3||0);
-    return { counts, totalRoster, totalActive, lineupEligible };
-  }, [players, filterTeam]);
 
   return <div>
     {/* v91: explanation card at top */}
@@ -9255,7 +9112,7 @@ function RolesTab({players,setPlayers,allSeries,dark}) {
           <div style={{color:"var(--color-text-secondary)",lineHeight:1.7}}>
             <span style={{color:"#10b981",fontWeight:500}}>TOP6</span> — first/second-line F (×1.12 scoring)<br/>
             <span style={{color:"#64748b",fontWeight:500}}>MID6</span> — third-line F (baseline)<br/>
-            <span style={{color:"#cbd5e1",fontWeight:500}}>BOT6</span> — fourth-line F (×0.90 scoring, ×1.10 hits)
+            <span style={{color:"#f59e0b",fontWeight:500}}>BOT6</span> — fourth-line F (×0.90 scoring, ×1.10 hits)
           </div>
         </div>
         <div>
@@ -9278,13 +9135,13 @@ function RolesTab({players,setPlayers,allSeries,dark}) {
           <div style={{fontWeight:500,color:"#0ea5e9",fontSize:10,letterSpacing:0.4,marginBottom:4}}>STATUS (FLEX)</div>
           <div style={{color:"var(--color-text-secondary)",lineHeight:1.7}}>
             <span style={{color:"#0ea5e9",fontWeight:500}}>ACTIVE</span> — healthy scratch (on roster, not playing)<br/>
-            <span style={{color:"#f97316",fontWeight:500}}>D2D</span> — out next game only, plays rest of series
+            <span style={{color:"#fbbf24",fontWeight:500}}>D2D</span> — out next game only, plays rest of series
           </div>
         </div>
         <div>
           <div style={{fontWeight:500,color:"#dc2626",fontSize:10,letterSpacing:0.4,marginBottom:4}}>STATUS (OUT)</div>
           <div style={{color:"var(--color-text-secondary)",lineHeight:1.7}}>
-            <span style={{color:"#dc2626",fontWeight:500}}>IR</span> — out for this player until you change it (excluded from all props for any series)<br/>
+            <span style={{color:"#dc2626",fontWeight:500}}>IR</span> — out for series (excluded from this series's props only)<br/>
             <span style={{color:"#7f1d1d",fontWeight:500}}>CUT</span> — not on active roster (excluded from ALL props, grayed out)
           </div>
         </div>
@@ -9292,38 +9149,11 @@ function RolesTab({players,setPlayers,allSeries,dark}) {
           <div style={{fontWeight:500,color:"var(--color-text-tertiary)",fontSize:10,letterSpacing:0.4,marginBottom:4}}>BEHAVIOR</div>
           <div style={{color:"var(--color-text-secondary)",lineHeight:1.6,fontSize:10}}>
             D2D players project for (remaining_games − 1). After their next game, update the tag (D2D → BOT6 if back, or stays D2D if still out).<br/>
-            IR set here is global and persists until you change it. For one-series-only IR, use the 🚑 panel inside the Series Pricer for that series.
+            IR is per-series; player remains in DB and unflags between rounds.
           </div>
         </div>
       </div>
     </Card>
-
-    {/* v94: per-team role count summary — only shown when filtering to a single team */}
-    {teamRoleCounts && <Card style={{marginBottom:12}}>
-      <SH title={`${filterTeam} Roster Summary`} sub={`${teamRoleCounts.totalRoster} total players · ${teamRoleCounts.totalActive} active (not IR/CUT) · ${teamRoleCounts.lineupEligible} lineup-eligible`}/>
-      <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:8}}>
-        {ALL_ROLES.map(r=>{
-          const cnt = teamRoleCounts.counts[r] || 0;
-          if (!cnt) return null;
-          const c = roleColor(r);
-          return <div key={r} style={{fontSize:11,padding:"3px 9px",borderRadius:4,background:`${c}22`,color:c,fontWeight:600,fontFamily:"var(--font-mono)"}}>
-            {r}: {cnt}
-          </div>;
-        })}
-      </div>
-      {/* Quick-reference targets */}
-      <div style={{marginTop:10,fontSize:10,color:"var(--color-text-tertiary)",lineHeight:1.5}}>
-        Typical NHL game lineup: 6 TOP6 + 6 MID6/BOT6 + 6 D (2/2/2) + 1 STARTER. Expected counts —
-        <span style={{color:"#10b981",fontWeight:500}}> TOP6:6</span> ·
-        <span style={{color:"#64748b",fontWeight:500}}> MID6:3</span> ·
-        <span style={{color:"#cbd5e1",fontWeight:500}}> BOT6:3</span> ·
-        <span style={{color:"#3b82f6",fontWeight:500}}> D1:2</span> ·
-        <span style={{color:"#60a5fa",fontWeight:500}}> D2:2</span> ·
-        <span style={{color:"#93c5fd",fontWeight:500}}> D3:2</span> ·
-        <span style={{color:"#a78bfa",fontWeight:500}}> STARTER:1</span> ·
-        <span style={{color:"#7c3aed",fontWeight:500}}> BACKUP:1</span>
-      </div>
-    </Card>}
 
     <Card style={{marginBottom:12}}>
       <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
@@ -9337,74 +9167,16 @@ function RolesTab({players,setPlayers,allSeries,dark}) {
           <span style={{fontSize:10,color:"var(--color-text-secondary)"}}>Bulk (all):</span>
           {["IR","CUT"].map(r=><button key={r} onClick={()=>bulkSet(r)} style={{padding:"3px 8px",fontSize:9,borderRadius:3,border:"none",cursor:"pointer",fontWeight:500,background:`${roleColor(r)}20`,color:roleColor(r)}}>→{r}</button>)}
         </>}
-        {dupeGroups.length > 0 && <button onClick={()=>setShowMergePanel(v=>!v)}
-          style={{padding:"3px 10px",fontSize:10,borderRadius:3,border:"0.5px solid #f59e0b",cursor:"pointer",fontWeight:600,background:"rgba(245,158,11,0.15)",color:"#f59e0b"}}
-          title="Detected duplicate player records (e.g. 'Oskar Bck' + 'Oskar Bäck'). Merge to consolidate stats.">
-          ⚠ {dupeGroups.length} dupes
-        </button>}
         <div style={{marginLeft:"auto",display:"flex",gap:4,flexWrap:"wrap"}}>
           {ALL_ROLES.map(r=>{const cnt=players.filter(p=>canonicalRole(p.lineRole)===r).length;if(!cnt)return null;const c=roleColor(r);return <div key={r} style={{fontSize:9,padding:"2px 7px",borderRadius:3,background:`${c}20`,color:c,fontWeight:500}}>{r}: {cnt}</div>;})}
         </div>
       </div>
     </Card>
 
-    {/* v96: Duplicate Merge Panel */}
-    {showMergePanel && dupeGroups.length > 0 && <Card style={{marginBottom:12,borderColor:"#f59e0b"}}>
-      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
-        <SH title={`${dupeGroups.length} Duplicate Player Group${dupeGroups.length===1?"":"s"} Detected`} sub="Records that hash to the same normalized name+team. Stats may be split across these records — merge to consolidate."/>
-        <button onClick={mergeAll} style={{marginLeft:"auto",padding:"5px 12px",fontSize:11,fontWeight:600,borderRadius:4,border:"none",cursor:"pointer",background:"#dc2626",color:"#fff"}}>
-          Merge All ({dupeGroups.length})
-        </button>
-      </div>
-      <div style={{maxHeight:400,overflowY:"auto"}}>
-        {dupeGroups.map((grp,gi) => {
-          const canonicalName = pickCanonicalName(grp.players);
-          return <div key={gi} style={{padding:"8px 10px",marginBottom:8,background:"rgba(245,158,11,0.06)",border:"0.5px solid rgba(245,158,11,0.3)",borderRadius:4}}>
-            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6}}>
-              <div style={{fontSize:11,fontWeight:600,color:"#f59e0b"}}>
-                {grp.players[0].team} · {canonicalName} <span style={{color:"var(--color-text-tertiary)",fontWeight:400}}>(canonical)</span>
-              </div>
-              <button onClick={()=>mergeGroup(grp.players)} style={{marginLeft:"auto",padding:"3px 10px",fontSize:10,fontWeight:500,borderRadius:3,border:"none",cursor:"pointer",background:"#10b981",color:"#fff"}}>
-                Merge
-              </button>
-            </div>
-            <table style={{width:"100%",fontSize:10,fontFamily:"var(--font-mono)"}}>
-              <thead>
-                <tr style={{color:"var(--color-text-tertiary)",textAlign:"left"}}>
-                  <th style={{padding:"2px 6px"}}>Name in record</th>
-                  <th style={{padding:"2px 6px"}}>Role</th>
-                  <th style={{padding:"2px 6px",textAlign:"right"}}>pGP</th>
-                  <th style={{padding:"2px 6px",textAlign:"right"}}>pG</th>
-                  <th style={{padding:"2px 6px",textAlign:"right"}}>pA</th>
-                  <th style={{padding:"2px 6px",textAlign:"right"}}>pSOG</th>
-                  <th style={{padding:"2px 6px",textAlign:"right"}}>pGames len</th>
-                  <th style={{padding:"2px 6px",textAlign:"right"}}>Season GP</th>
-                </tr>
-              </thead>
-              <tbody>
-                {grp.players.map((p,pi)=>(
-                  <tr key={pi} style={{color:p.name===canonicalName?"#10b981":"var(--color-text-secondary)"}}>
-                    <td style={{padding:"2px 6px"}}>{p.name===canonicalName?"★ ":""}{p.name}</td>
-                    <td style={{padding:"2px 6px"}}>{canonicalRole(p.lineRole)}</td>
-                    <td style={{padding:"2px 6px",textAlign:"right"}}>{p.pGP||0}</td>
-                    <td style={{padding:"2px 6px",textAlign:"right"}}>{p.pG||0}</td>
-                    <td style={{padding:"2px 6px",textAlign:"right"}}>{p.pA||0}</td>
-                    <td style={{padding:"2px 6px",textAlign:"right"}}>{p.pSOG||0}</td>
-                    <td style={{padding:"2px 6px",textAlign:"right"}}>{(p.pGames||[]).length}</td>
-                    <td style={{padding:"2px 6px",textAlign:"right"}}>{p.gp||0}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>;
-        })}
-      </div>
-    </Card>}
-
     <Card>
       <div style={{overflowX:"auto"}}>
         <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-          <TH cols={["Player","Team","Pos","GP","G","A","PTS","SOG","HIT","BLK","Role","PO GP","Proj GP","pGP","pG","pA","pSOG","pHIT","pBLK","pTK","pTSA","pGV"]}/>
+          <TH cols={["Player","Team","Pos","GP","G","A","PTS","SOG","HIT","BLK","Role","pGP","pG","pA","pSOG","pHIT","pBLK","pTK","pTSA","pGV"]}/>
           <tbody>{displayed.slice(0,300).map((p,i)=>{
             const roles=rolesForPos(p.pos);
             const cur=canonicalRole(p.lineRole);
@@ -9429,22 +9201,6 @@ function RolesTab({players,setPlayers,allSeries,dark}) {
                   {roles.map(r=><option key={r} value={r} style={{background:dark?"#131625":"#fff",color:dark?"#e7e9ee":"#0f172a"}}>{r}</option>)}
                 </select>
               </td>
-              {/* v94: read-only GP this playoffs + projected total (current + remaining series games for team) */}
-              {(() => {
-                const poGP = p.pGP || 0;
-                const teamRem = remainingGamesByTeam[p.team] || 0;
-                // D2D player loses one game; IR/CUT lose all remaining; ACTIVE plays only ~20% of games (healthy scratch).
-                let projAdd = teamRem;
-                const eff = canonicalRole(p.lineRole);
-                if (eff === "IR" || eff === "CUT") projAdd = 0;
-                else if (eff === "D2D") projAdd = Math.max(0, teamRem - 1);
-                else if (eff === "ACTIVE") projAdd = teamRem * 0.20;
-                const projGP = poGP + projAdd;
-                return <>
-                  <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:poGP>0?"#4ade80":"var(--color-text-tertiary)"}}>{poGP}</td>
-                  <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{projGP.toFixed(1)}</td>
-                </>;
-              })()}
               {["pGP","pG","pA","pSOG","pHIT","pBLK","pTK","pTSA","pGIVE"].map(f=>(
                 <td key={f} style={{padding:"1px 3px"}}>
                   <input type="number" value={p[f]||0} min={0} step={1}
@@ -9456,7 +9212,7 @@ function RolesTab({players,setPlayers,allSeries,dark}) {
             </tr>
             );
           })}
-          {displayed.length>300&&<tr><td colSpan={22} style={{padding:8,textAlign:"center",color:"var(--color-text-tertiary)",fontSize:10}}>Showing 300/{displayed.length} — filter by team</td></tr>}
+          {displayed.length>300&&<tr><td colSpan={20} style={{padding:8,textAlign:"center",color:"var(--color-text-tertiary)",fontSize:10}}>Showing 300/{displayed.length} — filter by team</td></tr>}
           </tbody>
         </table>
       </div>
