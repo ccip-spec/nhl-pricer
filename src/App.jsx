@@ -598,12 +598,23 @@ function simulateSeries(inputs, r, trials = 20000, seed = 31337) {
       const lamA = Math.max(0.01, total * (1 - goalShare) * fA);
       let goalsH = samplePoisson(lamH, rng);
       let goalsA = samplePoisson(lamA, rng);
-      // Enforce winner >= loser+1 if game was close/OT-to-regulation-winner — we keep it simple: if winner has fewer goals, flip or bump.
-      // In an ice-hockey game the winner MUST have more goals. If sampled the wrong way, bump winner by 1 (OT-style tiebreaker).
+      // v100: previously, when Poisson sampling produced the "wrong" winner, we force-bumped the
+      // intended winner to loser+1 and tagged the game as OT. That made ~40% of all games count
+      // as OT (since the Poisson sampling disagrees with the pre-determined winner that often).
+      // Result: avgOT was 3.4 in a 5.6-game series (60% of games OT) — wildly wrong vs reality (~20%).
+      // Fix: resample wrong-direction games with a small budget. Independently roll pOT for OT tag.
       let wentOT = false;
+      let retries = 0;
+      while (((homeWins && goalsH <= goalsA) || (!homeWins && goalsA <= goalsH)) && retries < 8) {
+        goalsH = samplePoisson(lamH, rng);
+        goalsA = samplePoisson(lamA, rng);
+        retries++;
+      }
+      // If still wrong after resampling (rare), fall back to bump (and tag as OT honestly).
       if (homeWins && goalsH <= goalsA) { goalsH = goalsA + 1; wentOT = true; }
       else if (!homeWins && goalsA <= goalsH) { goalsA = goalsH + 1; wentOT = true; }
-      // Apply OT tag using the game's pOT as a probability on close games where goalsH===goalsA+1 or goalsA===goalsH+1
+      // Apply OT tag using the game's pOT as a probability on close games where margin === 1.
+      // (Independent of the resample loop above — natural 1-goal games can go to OT.)
       if (!wentOT && Math.abs(goalsH - goalsA) === 1) {
         if (rng() < (g.pOT || 0.22)) wentOT = true;
       }
