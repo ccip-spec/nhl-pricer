@@ -1111,25 +1111,44 @@ function ouFromPMF(pmf, lines) {
 // shrunkRate = (gp*rawRate + k*prior) / (gp + k), with k=20 game-equivalent prior weight.
 // stat = "g"|"a"|"pts"|"sog"|"hit"|"blk"|"tk"|"pim"|"give"
 const PRIOR_RATES = {g:0.1, a:0.18, pts:0.28, sog:1.3, hit:1.0, blk:0.7, tk:0.4, pim:0.3, give:0.4};
+// v105: role-aware priors. Default PRIOR_RATES is the league-average; for small-sample players,
+//       it's more accurate to shrink toward the average rate FOR THEIR ROLE rather than
+//       toward the all-skater average. A 9-GP TOP6 forward like Martone shouldn't be pulled
+//       toward 0.10 g/g (4th-liner average) — he should be pulled toward TOP6 average ~0.30.
+//       This gets us most of the way to a fair price for rookies/recent call-ups WITHOUT
+//       requiring manual overrides.
+//       Stat keys here match SHRINK rate stat arg (g/a/sog/hit/blk/tk/give/pim).
+const ROLE_PRIORS = {
+  TOP6:   {g:0.30, a:0.50, sog:2.6, hit:1.0, blk:0.5, tk:0.4, give:0.4, pim:0.3},
+  MID6:   {g:0.18, a:0.25, sog:1.8, hit:1.5, blk:0.7, tk:0.4, give:0.4, pim:0.3},
+  BOT6:   {g:0.10, a:0.12, sog:1.2, hit:2.5, blk:0.8, tk:0.4, give:0.4, pim:0.3},
+  ACTIVE: {g:0.08, a:0.10, sog:1.0, hit:1.5, blk:0.7, tk:0.3, give:0.3, pim:0.3},  // healthy scratch — modest prior
+  D2D:    {g:0.10, a:0.18, sog:1.3, hit:1.5, blk:1.0, tk:0.4, give:0.4, pim:0.3},  // day-to-day generic
+  D1:     {g:0.08, a:0.45, sog:2.0, hit:1.5, blk:1.5, tk:0.4, give:0.4, pim:0.3},
+  D2:     {g:0.06, a:0.20, sog:1.4, hit:2.0, blk:2.0, tk:0.4, give:0.4, pim:0.3},
+  D3:     {g:0.04, a:0.10, sog:1.0, hit:2.5, blk:2.0, tk:0.3, give:0.3, pim:0.3},
+};
+function priorForStat(stat, role) {
+  const r = canonicalRole(role||"MID6");
+  if (ROLE_PRIORS[r] && ROLE_PRIORS[r][stat] != null) return ROLE_PRIORS[r][stat];
+  return PRIOR_RATES[stat] ?? 0.1;
+}
 // v103: lowered shrinkage. K=20/threshold=20 was over-penalizing rookies and recent call-ups
 //       (e.g. Martone with 9 GP @ 0.44 g/g being shrunk to 0.21). Lower K + threshold give
 //       small samples more weight while still pulling truly tiny samples toward the prior.
 const SHRINK_K = 10;
 const SHRINK_THRESHOLD_GP = 15;
-function shrinkRate(rawRate, gp, stat) {
-  const prior = PRIOR_RATES[stat] ?? 0.1;
+// v105: shrinkRate now takes an optional role parameter. When provided, shrinkage pulls toward
+//       the role-specific prior (e.g. TOP6 → 0.30 g/g) rather than the league-average.
+//       Old callers (no role) still work — they use the league-average prior.
+function shrinkRate(rawRate, gp, stat, role) {
+  const prior = role != null ? priorForStat(stat, role) : (PRIOR_RATES[stat] ?? 0.1);
   if (!gp || gp <= 0) return prior;
-  // Veterans (gp >= 20): use raw rate untouched
+  // Veterans (gp >= threshold): use raw rate untouched
   if (gp >= SHRINK_THRESHOLD_GP) return rawRate || 0;
-  // Small sample: shrink toward prior
+  // Small sample: shrink toward role-aware prior
   return (gp * (rawRate||0) + SHRINK_K * prior) / (gp + SHRINK_K);
 }
-// v104: per-player rate override. Set p.rateOverrides[stat_pg] (or _pg-mapped key) to bypass
-// shrinkage entirely for this player. Useful for rookies/recent call-ups whose small-sample
-// rate is more reliable than shrinkage suggests (e.g. Martone — 9 GP, clearly TOP6 producer
-// based on TOI + role + playoff performance, but shrunk 50%+ by default).
-// Keys match the same _pg fields used elsewhere: g_pg, a_pg, sog_pg, hit_pg, blk_pg,
-//   take_pg, give_pg, pim_pg.
 function effectiveRate(p, stat) {
   const pgKey = stat==="tk" ? "take_pg" : stat==="give" ? "give_pg" :
                 stat==="pim" ? "pim_pg" : stat==="tsa" ? "tsa_pg" : stat+"_pg";
@@ -1137,7 +1156,8 @@ function effectiveRate(p, stat) {
     const v = +p.rateOverrides[pgKey];
     if (Number.isFinite(v) && v >= 0) return v;
   }
-  return shrinkRate(p ? p[pgKey] : 0, p ? p.gp : 0, stat);
+  // v105: pass role so shrinkage uses role-aware prior (TOP6 → 0.30 g/g, BOT6 → 0.10, etc.)
+  return shrinkRate(p ? p[pgKey] : 0, p ? p.gp : 0, stat, p ? p.lineRole : null);
 }
 // v66: recent-form blending. Blends regular-season rate with realized playoff per-game rate,
 // weighted by playoff sample size.
