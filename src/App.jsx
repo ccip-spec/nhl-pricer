@@ -1120,12 +1120,34 @@ function shrinkRate(rawRate, gp, stat) {
 // Formula: effective = (1-w) × season + w × playoff, w = min(0.50, pGP × 0.10).
 // Only applies to scoring stats (g/a/sog) where reg→playoff signal transfers cleanly.
 const BLEND_STATS = new Set(["g","a","sog"]);
-function blendedRate(p, stat, seasonRate) {
+// v99: round-aware blend. Previously used cumulative p.pG / p.pGP regardless of which
+// round's market we were pricing. For R2 pricing, that meant a player's R1 hot stretch
+// (e.g. Couturier 5G in 5 R1 games → 1.0 g/g rate) was blended into his R2 rate at 50% weight,
+// making him an artificial favorite in R2 leader markets. Fix: filter pGames by `scope`.
+//   scope = "r1" | "r2" | "conf" | "cup" | "full" (or null/undefined → cumulative for back-compat)
+function blendedRate(p, stat, seasonRate, scope) {
   if (!p || !BLEND_STATS.has(stat)) return seasonRate;
-  const pGP = p.pGP || 0;
+  let pGP, poTotal;
+  if (scope && scope !== "full" && Array.isArray(p.pGames)) {
+    const roundNum = scope === "r1" ? 1 : scope === "r2" ? 2 : scope === "conf" ? 3 : scope === "cup" ? 4 : null;
+    if (roundNum != null) {
+      pGP = 0; poTotal = 0;
+      for (const e of p.pGames) {
+        if (e.round !== roundNum) continue;
+        pGP++;
+        if (stat === "g") poTotal += e.g||0;
+        else if (stat === "a") poTotal += e.a||0;
+        else if (stat === "sog") poTotal += e.sog||0;
+      }
+    } else {
+      pGP = p.pGP || 0;
+      poTotal = stat==="g" ? (p.pG||0) : stat==="a" ? (p.pA||0) : (p.pSOG||0);
+    }
+  } else {
+    pGP = p.pGP || 0;
+    poTotal = stat==="g" ? (p.pG||0) : stat==="a" ? (p.pA||0) : (p.pSOG||0);
+  }
   if (pGP <= 0) return seasonRate;
-  // Map stat → playoff field
-  const poTotal = stat==="g" ? (p.pG||0) : stat==="a" ? (p.pA||0) : (p.pSOG||0);
   const poRate = poTotal / pGP;
   const w = Math.min(0.50, pGP * 0.10);
   return (1 - w) * seasonRate + w * poRate;
@@ -3439,7 +3461,8 @@ function AppInner() {
     // v13: shrink rate with Bayesian prior for <20 GP (shrinkRate handles threshold internally)
     const shrunk = shrinkRate(p[pgKey], p.gp, stat);
     // v66: blend with playoff per-game rate (scoring stats only)
-    const blended = blendedRate(p, stat, shrunk);
+    // v99: scope-aware blend — was using cumulative pG/pGP, now filters by round
+    const blended = blendedRate(p, stat, shrunk, scope);
     // v21: stat-category rate adjustment (scoring = raw discount; physical stats go up; neutral stats mild up)
     const rr = blended * rm * globals.rateDiscount * statRateMultiplier(stat);
     let expTotal,actualGP;
