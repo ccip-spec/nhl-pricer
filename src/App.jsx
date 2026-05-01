@@ -2836,11 +2836,16 @@ function roleMultiplier(r, stat) {
   if (role === "STARTER" || role === "BACKUP") return 0;
   if (stat == null) return 1.0;
   if (scoringStats) {
+    // v106: widened role multipliers. BOT6 was 0.90 — too close to MID6, didn't reflect
+    //       the actual TOI gap (TOP6 ~17min vs BOT6 ~10min = ~40% less opportunity).
+    //       Players moved from TOP6 (regular season) to BOT6 (playoffs) like Foerster
+    //       were pricing too high because their RAW rate was earned at TOP6 minutes.
+    //       BOT6 0.75, D3 0.75 brings the spread closer to actual TOI ratios.
     return {
-      TOP6:1.12, MID6:1.00, BOT6:0.90,
+      TOP6:1.12, MID6:1.00, BOT6:0.75,
       ACTIVE:0.20,  // healthy scratch — token value (won't play unless promoted)
       D2D:1.00,     // when active, plays normal role; D2D handled at game-count level
-      D1:1.03, D2:1.00, D3:0.85,
+      D1:1.03, D2:1.00, D3:0.75,
     }[role] ?? 1.0;
   }
   if (physicalStats) {
@@ -9230,7 +9235,7 @@ function RolesTab({players,setPlayers,dark}) {
           <div style={{color:"var(--color-text-secondary)",lineHeight:1.7}}>
             <span style={{color:"#10b981",fontWeight:500}}>TOP6</span> — first/second-line F (×1.12 scoring)<br/>
             <span style={{color:"#64748b",fontWeight:500}}>MID6</span> — third-line F (baseline)<br/>
-            <span style={{color:"#f59e0b",fontWeight:500}}>BOT6</span> — fourth-line F (×0.90 scoring, ×1.10 hits)
+            <span style={{color:"#f59e0b",fontWeight:500}}>BOT6</span> — fourth-line F (×0.75 scoring, ×1.10 hits)
           </div>
         </div>
         <div>
@@ -9238,7 +9243,7 @@ function RolesTab({players,setPlayers,dark}) {
           <div style={{color:"var(--color-text-secondary)",lineHeight:1.7}}>
             <span style={{color:"#3b82f6",fontWeight:500}}>D1</span> — top pair (×1.03 scoring)<br/>
             <span style={{color:"#60a5fa",fontWeight:500}}>D2</span> — second pair (baseline)<br/>
-            <span style={{color:"#93c5fd",fontWeight:500}}>D3</span> — third pair (×0.85 scoring, ×1.08 blocks)
+            <span style={{color:"#93c5fd",fontWeight:500}}>D3</span> — third pair (×0.75 scoring, ×1.08 blocks)
           </div>
         </div>
         <div>
