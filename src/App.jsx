@@ -3204,9 +3204,28 @@ function AppInner() {
   // v77: same for R2
   const teamExpGR2 = useMemo(()=>{
     const m={};
+    // Primary: matchups.r2 (older path, may be empty if user populated allSeries instead)
     for(const x of (matchups.r2||[])){if(x.homeAbbr)m[x.homeAbbr]=(m[x.homeAbbr]||0)+x.expGames;if(x.awayAbbr)m[x.awayAbbr]=(m[x.awayAbbr]||0)+x.expGames;}
+    // v101: fallback to allSeries.r2 — compute closed-form expGames from games[0].winPct.
+    // R2 wide leader market was returning 0 expTotal for all R2 players because matchups.r2
+    // wasn't populated (user uses allSeries.r2 instead). That made every player's λ = 0,
+    // so the leader market was just 1/N noise (Couturier as random "favorite").
+    for (const sr of (allSeries.r2 || [])) {
+      if (!sr || !sr.homeAbbr || !sr.awayAbbr) continue;
+      if (m[sr.homeAbbr] != null && m[sr.awayAbbr] != null) continue; // already set from matchups
+      const wp = (sr.games && sr.games[0] && sr.games[0].winPct) || 0.55;
+      const hw = wp, aw = 1 - wp;
+      const p4 = Math.pow(hw,4) + Math.pow(aw,4);
+      const p5 = 4 * (Math.pow(hw,4)*aw + Math.pow(aw,4)*hw);
+      const p6 = 10 * (Math.pow(hw,4)*aw*aw + Math.pow(aw,4)*hw*hw);
+      const p7 = 20 * (Math.pow(hw,4)*aw*aw*aw + Math.pow(aw,4)*hw*hw*hw);
+      const tot = p4+p5+p6+p7;
+      const expG = tot > 0 ? (4*p4+5*p5+6*p6+7*p7)/tot : 5.82;
+      if (m[sr.homeAbbr] == null) m[sr.homeAbbr] = expG;
+      if (m[sr.awayAbbr] == null) m[sr.awayAbbr] = expG;
+    }
     return m;
-  },[matchups.r2]);
+  },[matchups.r2, allSeries.r2]);
 
   // v73: detect teams whose R1 series is decided. Used to zero out future games for
   // eliminated players in leader markets (so a guy whose series ended 4-1 doesn't keep
