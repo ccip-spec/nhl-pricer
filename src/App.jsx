@@ -1111,8 +1111,11 @@ function ouFromPMF(pmf, lines) {
 // shrunkRate = (gp*rawRate + k*prior) / (gp + k), with k=20 game-equivalent prior weight.
 // stat = "g"|"a"|"pts"|"sog"|"hit"|"blk"|"tk"|"pim"|"give"
 const PRIOR_RATES = {g:0.1, a:0.18, pts:0.28, sog:1.3, hit:1.0, blk:0.7, tk:0.4, pim:0.3, give:0.4};
-const SHRINK_K = 20;
-const SHRINK_THRESHOLD_GP = 20;
+// v103: lowered shrinkage. K=20/threshold=20 was over-penalizing rookies and recent call-ups
+//       (e.g. Martone with 9 GP @ 0.44 g/g being shrunk to 0.21). Lower K + threshold give
+//       small samples more weight while still pulling truly tiny samples toward the prior.
+const SHRINK_K = 10;
+const SHRINK_THRESHOLD_GP = 15;
 function shrinkRate(rawRate, gp, stat) {
   const prior = PRIOR_RATES[stat] ?? 0.1;
   if (!gp || gp <= 0) return prior;
@@ -6230,6 +6233,11 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             const orHat = effMargins.hatTrick || 1.20;
 
             // Realized hat tricks (per player) — count games where this player scored 3+.
+            // v102: e.round is a NUMBER (1/2/3/4), currentRound is a STRING ("r1"/"r2"/etc).
+            //       Comparing them directly never matches → realized hat tricks always showed 0.
+            //       Convert currentRound to round number for comparison.
+            const _curRoundNum = currentRound === "r1" ? 1 : currentRound === "r2" ? 2 :
+                                 currentRound === "conf" ? 3 : currentRound === "cup" ? 4 : null;
             const realizedHatByPlayer = {};
             const realizedAnyHat = (()=>{
               let any = false;
@@ -6238,8 +6246,8 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
                 if (p.team !== s.homeAbbr && p.team !== s.awayAbbr) continue;
                 let count = 0;
                 for (const e of p.pGames) {
-                  // Filter to current round only
-                  if ((e.round||1) !== currentRound) continue;
+                  // Filter to current round only (round numbers match)
+                  if (_curRoundNum != null && (e.round||1) !== _curRoundNum) continue;
                   if ((e.g||0) >= 3) count++;
                 }
                 if (count > 0) {
@@ -6439,7 +6447,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
           {mkt==="props"&&<PropsPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={effMargins} showTrue={showTrue} dark={dark} mode="ou" simResult={simResult} currentRound={currentRound}/>}
           {mkt==="binary"&&<PropsPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={effMargins} showTrue={showTrue} dark={dark} mode="binary" simResult={simResult} currentRound={currentRound}/>}
           {mkt==="propcombos"&&<PropCombosPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={effMargins} showTrue={showTrue} dark={dark} currentRound={currentRound}/>}
-          {mkt==="goaliesaves"&&<GoalieSavesPanel s={s} expG={expG} goalies={goalies} margins={effMargins} showTrue={showTrue} dark={dark}/>}
+          {mkt==="goaliesaves"&&<GoalieSavesPanel s={s} expG={expG} goalies={goalies} margins={effMargins} showTrue={showTrue} dark={dark} currentRound={currentRound}/>}
           {mkt==="playerdetail"&&<PlayerDetailPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={effMargins} showTrue={showTrue} dark={dark} currentRound={currentRound}/>}
           {mkt==="seriesleader"&&<SeriesLeaderPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={effMargins} showTrue={showTrue} dark={dark} simResult={simResult} simStale={simStale} currentRound={currentRound}/>}
         </div>
@@ -7044,8 +7052,24 @@ function PropCombosPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalents
 // ─── GOALIE SAVES PANEL ──────────────────────────────────────────────────────
 // Model: lambda = starter_share × saves_pg × expGames (Poisson O/U)
 // Line auto-set to round(lambda) - 0.5 (nearest under). Matches Goalie Series Props sheet.
-function GoalieSavesPanel({s,expG,goalies,margins,showTrue,dark}) {
+function GoalieSavesPanel({s,expG,goalies,margins,showTrue,dark,currentRound}) {
   const or = margins.propsGoals||1.05; // reuse saves margin setting
+  // v102: round-aware goalie stats. Previously used cumulative g.pGP / g.pSaves,
+  //       which bled R1 starts and saves into R2 series totals.
+  const _curRoundNum = currentRound === "r1" ? 1 : currentRound === "r2" ? 2 :
+                       currentRound === "conf" ? 3 : currentRound === "cup" ? 4 : null;
+  const roundGoalieStats = (g) => {
+    if (!Array.isArray(g.pGames) || _curRoundNum == null) {
+      return { pGP: g.pGP || 0, pSaves: g.pSaves || 0 };
+    }
+    let pGP = 0, pSaves = 0;
+    for (const e of g.pGames) {
+      if (e.round !== _curRoundNum) continue;
+      pGP++;
+      pSaves += e.sv || 0;
+    }
+    return { pGP, pSaves };
+  };
 
   const seriesGoalies = useMemo(()=>{
     if(!goalies) return [];
@@ -7084,8 +7108,10 @@ function GoalieSavesPanel({s,expG,goalies,margins,showTrue,dark}) {
         //      Previously we always used `share * saves_pg * expG` which ignored saves already banked.
         //      Now: lam = realized_saves + (share * saves_pg * remainingGames_this_goalie)
         //      where remainingGames_this_goalie = expG - (g.pGP || 0)  [goalie has played pGP of the series already]
-        const realizedSaves = g.pSaves || 0;
-        const remainingGoalieGames = Math.max(0, expG - (g.pGP || 0));
+        // v102: pull round-filtered stats so R1 saves don't seed R2 series.
+        const { pGP: roundGP, pSaves: roundSaves } = roundGoalieStats(g);
+        const realizedSaves = roundSaves;
+        const remainingGoalieGames = Math.max(0, expG - roundGP);
         const futureLam = Math.max(0, effectiveShare * (g.saves_pg || 0) * remainingGoalieGames);
         const lam = Math.max(0.0001, realizedSaves + futureLam);
         const autoLine = Math.max(0.5, Math.round(lam) - 0.5);
@@ -7093,7 +7119,7 @@ function GoalieSavesPanel({s,expG,goalies,margins,showTrue,dark}) {
       })
       .filter(g => g.effectiveShare > 0 || g.realizedSaves > 0)  // v61: also show goalies with realized saves even if role=0 now
       .sort((a,b) => b.lam - a.lam);
-  },[goalies, s.homeAbbr, s.awayAbbr, expG]);
+  },[goalies, s.homeAbbr, s.awayAbbr, expG, currentRound]);
 
   if(!goalies) return <Card><div style={{color:"var(--color-text-secondary)",fontSize:12}}>Load goalies CSV in Upload tab to enable goalie saves props</div></Card>;
   if(!s.homeAbbr||!s.awayAbbr) return <Card><div style={{color:"var(--color-text-secondary)",fontSize:12}}>Set team abbreviations to load goalie props</div></Card>;
