@@ -436,7 +436,7 @@ function buildSimInputs(effG, homeAbbr, awayAbbr, players, globals, goalieQualit
     for (const stat of STATS) {
       // v53: role multiplier is stat-aware now (TOP6 +bump for scoring, -penalty for hits)
       const rm = roleMultiplier(p.lineRole, stat);
-      const shrunk = shrinkRate(p[pgKey(stat)], p.gp, stat);
+      const shrunk = effectiveRate(p, stat);
       // v68: NO blend here. Sim drives N+ / O/U / 1+ markets — blend was over-weighting
       // playoff sample for those markets. Series Leader has its own blend at site 2.
       const rr = shrunk * rm * globals.rateDiscount * statRateMultiplier(stat);
@@ -1123,6 +1123,21 @@ function shrinkRate(rawRate, gp, stat) {
   if (gp >= SHRINK_THRESHOLD_GP) return rawRate || 0;
   // Small sample: shrink toward prior
   return (gp * (rawRate||0) + SHRINK_K * prior) / (gp + SHRINK_K);
+}
+// v104: per-player rate override. Set p.rateOverrides[stat_pg] (or _pg-mapped key) to bypass
+// shrinkage entirely for this player. Useful for rookies/recent call-ups whose small-sample
+// rate is more reliable than shrinkage suggests (e.g. Martone — 9 GP, clearly TOP6 producer
+// based on TOI + role + playoff performance, but shrunk 50%+ by default).
+// Keys match the same _pg fields used elsewhere: g_pg, a_pg, sog_pg, hit_pg, blk_pg,
+//   take_pg, give_pg, pim_pg.
+function effectiveRate(p, stat) {
+  const pgKey = stat==="tk" ? "take_pg" : stat==="give" ? "give_pg" :
+                stat==="pim" ? "pim_pg" : stat==="tsa" ? "tsa_pg" : stat+"_pg";
+  if (p && p.rateOverrides && p.rateOverrides[pgKey] != null && p.rateOverrides[pgKey] !== "") {
+    const v = +p.rateOverrides[pgKey];
+    if (Number.isFinite(v) && v >= 0) return v;
+  }
+  return shrinkRate(p ? p[pgKey] : 0, p ? p.gp : 0, stat);
 }
 // v66: recent-form blending. Blends regular-season rate with realized playoff per-game rate,
 // weighted by playoff sample size.
@@ -3492,7 +3507,8 @@ function AppInner() {
     // stat key mapping: tsa->tsa_pg, give->give_pg, tk->take_pg, else stat_pg
     const pgKey=stat==="tk"?"take_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
     // v13: shrink rate with Bayesian prior for <20 GP (shrinkRate handles threshold internally)
-    const shrunk = shrinkRate(p[pgKey], p.gp, stat);
+    // v104: effectiveRate respects per-player rate overrides for cases like Martone
+    const shrunk = effectiveRate(p, stat);
     // v66: blend with playoff per-game rate (scoring stats only)
     // v99: scope-aware blend — was using cumulative pG/pGP, now filters by round
     const blended = blendedRate(p, stat, shrunk, scope);
@@ -6007,7 +6023,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             // Players who already scored an OT goal in this series are settled YES (sent to bottom, ✓).
             // Everyone else: priced as P(any OT goal among remaining games) × team OT-share × goal share.
             const eligibleRoles = new Set(["TOP6","MID6","BOT6","ACTIVE","ON_ROSTER","D1","D2","D3"]);
-            const shrunkGoalRate = (p) => shrinkRate(p.g_pg || 0, p.gp || 0, "g");
+            const shrunkGoalRate = (p) => effectiveRate(p, "g"); // v104: respects per-player rate overrides
             const teamGoalRate = (team) => {
               const pool = (players||[]).filter(p => p.team === team && eligibleRoles.has(p.lineRole));
               return pool.reduce((s,p) => s + shrunkGoalRate(p), 0) || 1;
@@ -6101,7 +6117,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             // (including "No OT in series") is settled NO.
             // If no OT yet: standard market with "No OT scored" option = P(zero future OT).
             const eligibleRoles = new Set(["TOP6","MID6","BOT6","ACTIVE","ON_ROSTER","D1","D2","D3"]);
-            const shrunkGoalRate = (p) => shrinkRate(p.g_pg || 0, p.gp || 0, "g");
+            const shrunkGoalRate = (p) => effectiveRate(p, "g"); // v104: respects per-player rate overrides
             const teamGoalRate = (team) => {
               const pool = (players||[]).filter(p => p.team === team && eligibleRoles.has(p.lineRole));
               return pool.reduce((s,p) => s + shrunkGoalRate(p), 0) || 1;
@@ -6270,7 +6286,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             const rows = pool.map(p => {
               const role = effectiveRole(p, s);
               const rm = roleMultiplier(role, "g");
-              const goalRateShrunk = shrinkRate(p.g_pg||0, p.gp||0, "g");
+              const goalRateShrunk = effectiveRate(p, "g"); // v104: respects per-player rate overrides
               const perGameLam = goalRateShrunk * rm * rateDiscount * statRateMultiplier("g");
               const roundGP = readActualGP(p, currentRound);
               const remainingGames = remainingGamesForPlayer(p, s, expG, roundGP);
@@ -6490,7 +6506,8 @@ function PropsPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,p
       // stat key mapping
       const pgKey=stat==="tk"?"take_pg":stat==="pim"?"pim_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
       // v13: shrink rate for <20 GP; scratched already filtered out above
-      const shrunk=shrinkRate(p[pgKey],p.gp,stat);
+      // v104: effectiveRate respects per-player rate overrides
+      const shrunk=effectiveRate(p,stat);
       // v68: NO blend in Props. Goal is market-consensus matching; v67 blend caused
       // 200+ cent gaps on N+ markets (Kapanen 4+ -676 vs FD -115).
       // v21: stat-category rate adjustment (physical stats go up, scoring stays at baseline discount)
@@ -6746,7 +6763,7 @@ function PropCombosPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalents
       const rm = roleMultiplier(p.lineRole, stat);
       if (rm === 0) return {p, stat, futureLam:0.0001, actual:0, r, lam:0.0001};
       const pgKey = stat==="tk"?"take_pg":stat==="pim"?"pim_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
-      const shrunk = shrinkRate(p[pgKey], p.gp, stat);
+      const shrunk = effectiveRate(p, stat); // v104: respects per-player rate overrides
       const rm_rate_disc = shrunk*rm*rateDiscount*statRateMultiplier(stat);
       const roundGP = readActualGP(p, currentRound);
       const remainingGames = remainingGamesForPlayer(p, s, expG, roundGP);
@@ -7198,7 +7215,8 @@ function PlayerDetailPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalen
     const rm = roleMultiplier(player.lineRole, stat);
     const pgKey = stat==="tk"?"take_pg":stat==="pim"?"pim_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
     // v68: NO blend in Player Detail (alt-line table for N+ markets). Same reasoning as Props.
-    const rr_base = shrinkRate(player[pgKey],player.gp,stat)*rm*rateDiscount*statRateMultiplier(stat);
+    // v104: effectiveRate respects per-player rate overrides
+    const rr_base = effectiveRate(player, stat)*rm*rateDiscount*statRateMultiplier(stat);
     const roundGP = readActualGP(player, currentRound);
     const remainingGames = remainingGamesForPlayer(p, s, expG, roundGP);
     const gEq = SCORING_STATS.has(stat) && gameEquivalentsFor
@@ -7335,7 +7353,7 @@ function SeriesLeaderPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalen
     const entries=pool.map(p=>{
       const rm=roleMultiplier(p.lineRole, stat);
       const pgKey=stat==="tk"?"take_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat==="pim"?"pim_pg":stat+"_pg";
-      const rr_base=shrinkRate(p[pgKey],p.gp,stat)*rm*rateDiscount*statRateMultiplier(stat);
+      const rr_base=effectiveRate(p,stat)*rm*rateDiscount*statRateMultiplier(stat); // v104: respects per-player rate overrides
       const roundGP = readActualGP(p, currentRound);
       const remainingGames = remainingGamesForPlayer(p, s, expG, roundGP);
       const gEq = SCORING_STATS.has(stat) && gameEquivalentsFor
@@ -9161,6 +9179,7 @@ function PlayerStatEditModal({editing,onSave,onDelete,onClose,dark}) {
 function RolesTab({players,setPlayers,dark}) {
   const [filterTeam,setFilterTeam]=useState("ALL");
   const [search,setSearch]=useState("");
+  const [rateOverrideEditing, setRateOverrideEditing] = useState(null); // {name, team} or null
   const teams=players?[...new Set(players.map(p=>p.team))].sort():[];
   // v91: sort CUT players to bottom
   const displayed=players?players
@@ -9270,6 +9289,21 @@ function RolesTab({players,setPlayers,dark}) {
                 {(p.pG||p.pA) ? <span style={{marginLeft:8,fontSize:9,padding:"1px 5px",borderRadius:3,background:"rgba(34,197,94,0.15)",color:"#4ade80",fontFamily:"var(--font-mono)"}} title="Current playoff G-A-Pts">
                   {p.pG||0}G-{p.pA||0}A
                 </span> : null}
+                {/* v104: rate override gear icon */}
+                {(() => {
+                  const hasOverride = p.rateOverrides && Object.values(p.rateOverrides).some(v => v != null && v !== "");
+                  return (
+                    <button onClick={()=>setRateOverrideEditing({name:p.name, team:p.team})}
+                      title={hasOverride ? "Rate override ACTIVE — click to edit" : "Set per-stat rate override (bypass shrinkage)"}
+                      style={{marginLeft:6, fontSize:10, padding:"1px 5px", borderRadius:3,
+                        background: hasOverride ? "rgba(245,158,11,0.20)" : "transparent",
+                        border: `0.5px solid ${hasOverride ? "#f59e0b" : "var(--color-border-secondary)"}`,
+                        color: hasOverride ? "#f59e0b" : "var(--color-text-tertiary)",
+                        cursor: "pointer"}}>
+                      ⚙{hasOverride ? "*" : ""}
+                    </button>
+                  );
+                })()}
               </td>
               <td style={{padding:"3px 8px",textAlign:"right"}}><span style={{fontSize:9,padding:"1px 4px",borderRadius:2,background:"rgba(59,130,246,0.12)",color:"#60a5fa"}}>{p.team}</span></td>
               <td style={{padding:"3px 8px",textAlign:"right",color:"var(--color-text-secondary)"}}>{p.pos}</td>
@@ -9296,6 +9330,92 @@ function RolesTab({players,setPlayers,dark}) {
         </table>
       </div>
     </Card>
+
+    {/* v104: Per-player rate override modal */}
+    {rateOverrideEditing && (() => {
+      const editP = players.find(p => p.name === rateOverrideEditing.name && p.team === rateOverrideEditing.team);
+      if (!editP) { setRateOverrideEditing(null); return null; }
+      const o = editP.rateOverrides || {};
+      const STAT_ROWS = [
+        {key:"g_pg",   label:"Goals/g",     raw: editP.g_pg},
+        {key:"a_pg",   label:"Assists/g",   raw: editP.a_pg},
+        {key:"sog_pg", label:"SOG/g",       raw: editP.sog_pg},
+        {key:"hit_pg", label:"Hits/g",      raw: editP.hit_pg},
+        {key:"blk_pg", label:"Blocks/g",    raw: editP.blk_pg},
+        {key:"take_pg",label:"Takeaways/g", raw: editP.take_pg},
+        {key:"give_pg",label:"Giveaways/g", raw: editP.give_pg},
+        {key:"pim_pg", label:"PIM/g",       raw: editP.pim_pg},
+      ];
+      const setOverride = (k, v) => {
+        setPlayers(prev => prev.map(p => {
+          if (p.name !== editP.name || p.team !== editP.team) return p;
+          const newOv = {...(p.rateOverrides||{})};
+          if (v === "" || v == null) delete newOv[k];
+          else newOv[k] = v;
+          return {...p, rateOverrides: Object.keys(newOv).length ? newOv : undefined};
+        }));
+      };
+      const clearAll = () => {
+        setPlayers(prev => prev.map(p => p.name === editP.name && p.team === editP.team ? {...p, rateOverrides: undefined} : p));
+      };
+      return (
+        <div onClick={()=>setRateOverrideEditing(null)} style={{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000}}>
+          <div onClick={e=>e.stopPropagation()} style={{background:dark?"#131625":"#fff",borderRadius:8,padding:20,maxWidth:480,width:"90%",border:"1px solid var(--color-border-secondary)"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+              <div style={{fontSize:14,fontWeight:600,color:"var(--color-text-primary)"}}>Rate Override</div>
+              <button onClick={()=>setRateOverrideEditing(null)} style={{background:"transparent",border:"none",color:"var(--color-text-tertiary)",fontSize:16,cursor:"pointer"}}>✕</button>
+            </div>
+            <div style={{fontSize:11,color:"var(--color-text-secondary)",marginBottom:12}}>
+              <strong style={{color:"var(--color-text-primary)"}}>{editP.name}</strong> · {editP.team} · {editP.pos} · {editP.gp || 0} GP · role: {editP.lineRole}
+            </div>
+            <div style={{fontSize:10,color:"var(--color-text-tertiary)",marginBottom:10,lineHeight:1.5}}>
+              Override the per-game rate used in pricing. Leave blank to use shrunk regular-season rate.
+              Useful for rookies/recent call-ups whose small-sample rate is more reliable than shrinkage suggests.
+              Affects all markets (Props, Series Leader, Sim, etc.).
+            </div>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+              <thead><tr style={{borderBottom:"1px solid var(--color-border-secondary)"}}>
+                <th style={{textAlign:"left",padding:"4px 8px",fontSize:9,color:"var(--color-text-tertiary)",fontWeight:500,letterSpacing:0.4}}>STAT</th>
+                <th style={{textAlign:"right",padding:"4px 8px",fontSize:9,color:"var(--color-text-tertiary)",fontWeight:500,letterSpacing:0.4}}>RAW (reg-szn)</th>
+                <th style={{textAlign:"right",padding:"4px 8px",fontSize:9,color:"var(--color-text-tertiary)",fontWeight:500,letterSpacing:0.4}}>OVERRIDE</th>
+              </tr></thead>
+              <tbody>
+                {STAT_ROWS.map(({key,label,raw}) => (
+                  <tr key={key} style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                    <td style={{padding:"5px 8px",color:"var(--color-text-secondary)"}}>{label}</td>
+                    <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-tertiary)"}}>
+                      {raw != null ? Number(raw).toFixed(3) : "—"}
+                    </td>
+                    <td style={{padding:"3px 6px",textAlign:"right"}}>
+                      <input type="text" inputMode="decimal" placeholder="—"
+                        defaultValue={o[key] != null ? o[key] : ""}
+                        onBlur={e => {
+                          const v = e.target.value.trim();
+                          if (v === "") setOverride(key, "");
+                          else {
+                            const n = parseFloat(v);
+                            if (Number.isFinite(n) && n >= 0) setOverride(key, n);
+                          }
+                        }}
+                        style={{width:80,fontSize:11,textAlign:"right",padding:"3px 6px",fontFamily:"var(--font-mono)",
+                          background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-primary)"}}/>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div style={{display:"flex",justifyContent:"space-between",marginTop:14,gap:8}}>
+              <button onClick={clearAll} style={{fontSize:10,padding:"5px 10px",background:"transparent",border:"0.5px solid var(--color-border-secondary)",borderRadius:4,color:"var(--color-text-secondary)",cursor:"pointer"}}>
+                Clear All Overrides
+              </button>
+              <button onClick={()=>setRateOverrideEditing(null)} style={{fontSize:11,padding:"5px 14px",background:"#7c3aed",border:"none",borderRadius:4,color:"#fff",cursor:"pointer",fontWeight:500}}>
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    })()}
   </div>;
 }
 
