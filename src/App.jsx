@@ -3573,18 +3573,37 @@ function AppInner() {
       const r1 = (autoR1ByTeam[p.team] != null && !adv.manualR1) ? autoR1ByTeam[p.team] : adv.winR1;
       const conf = ((autoConfByTeamFinal||{})[p.team] != null && !adv.manualConf) ? autoConfByTeamFinal[p.team] : adv.winConf;
       const cup = ((autoCupByTeamFinal||{})[p.team] != null && !adv.manualCup) ? autoCupByTeamFinal[p.team] : adv.winCup;
-      // v46: E[games] = GPR × (P(plays R1) + P(plays R2) + P(plays R3) + P(plays F))
-      //              = GPR × (1 + P(wins R1) + P(wins R2) + P(wins R3))
-      // P(wins R1) = r1; P(wins R3) = conf (= P(makes F)); P(wins Cup) = cup.
       // P(wins R2) = P(makes R3): use autoR2ByTeam if available, else interpolate between r1 and conf.
       const autoR2 = (autoR2ByTeam||{})[p.team];
       const r2 = (autoR2 != null && !adv.manualConf) ? autoR2 : Math.sqrt(Math.max(0, r1 * conf));
-      // v73: if R1 series is over and team lost, expTotal locks to gamesPlayed (no future).
-      // If they won, advancement probs handle further-round expectation correctly.
+      // v107: properly partition expTotal between REALIZED games (already played, fixed)
+      //       and FUTURE expected games (driven by advancement probs).
+      //       Old formula (v46) was 5.82*(1 + r1 + r2 + conf) which ALWAYS assumed every round
+      //       contributes 5.82 — but if R1 is over and team played 5 R1 games, those 5 are realized
+      //       (no longer probabilistic). And if R1 lost, future = 0.
       if (r1status && r1status.over && !r1status.won) {
+        // Eliminated in R1 — locks to actual games played.
         expTotal = r1status.gamesPlayed;
+      } else if (r2status && r2status.over && !r2status.won) {
+        // Eliminated in R2 — total = R1 played + R2 played (both realized).
+        expTotal = (r1status?.gamesPlayed || 0) + r2status.gamesPlayed;
+      } else if (r1status && r1status.over && r1status.won) {
+        // R1 over, won; in R2 (or beyond). R1 games are realized (fixed offset).
+        // R2 contribution: if R2 over and won, use r2.gamesPlayed + project R3/F. Else project full R2.
+        const r1G = r1status.gamesPlayed;
+        if (r2status && r2status.over && r2status.won) {
+          // In R3 (or beyond). R1+R2 realized; R3 contributes 5.82 (in it) × P(in R3 | won R2)=1, R3 win prob = conf, F win prob = cup.
+          const r2G = r2status.gamesPlayed;
+          // From here: in R3 with prob 1, win R3 with prob conf, win F with prob cup.
+          // expTotal = r1G + r2G + 5.82 (R3 played) + 5.82 × conf (F if win R3)
+          expTotal = r1G + r2G + 5.82 * (1 + conf);
+        } else {
+          // In R2. R2 contributes 5.82 (they're in it). R3 contributes 5.82 × r2 (P(advance)). F contributes 5.82 × conf.
+          expTotal = r1G + 5.82 * (1 + r2 + conf);
+        }
       } else {
-        expTotal=5.82*(1 + r1 + r2 + conf);
+        // R1 not yet over (still in progress for some pairing) — full forward projection.
+        expTotal = 5.82 * (1 + r1 + r2 + conf);
       }
       // Full playoff scope: use cumulative pGP.
       actualGP=p.pGP||0;
