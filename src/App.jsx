@@ -7908,12 +7908,11 @@ function ExportImportPanel({exportState,importState}) {
 // - Per-game dedup via paste hash + (seriesIdx, gameNum) key
 // - Undo restores both teams' player + goalie state and clears the game result
 function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAllSeries,onGameUploaded,currentRound}) {
-  // v108: currentRound is "r1"|"r2"|"conf"|"cup". Convert to round number for pGames entries.
-  //       Series array is allSeries[currentRound] (was assumed to be flat array — broke once
-  //       round-keyed dict was introduced).
+  // v108/109: currentRound is "r1"|"r2"|"conf"|"cup". Convert to round number for pGames entries.
+  //       NOTE: allSeries here is ALREADY the round-scoped flat array (parent passes seriesForRound).
+  //       setAllSeries here is setSeriesForRound — it handles the round-keyed dict update transparently.
   const currentRoundNum = currentRound === "r1" ? 1 : currentRound === "r2" ? 2 :
                           currentRound === "conf" ? 3 : currentRound === "cup" ? 4 : 1;
-  const seriesForRound = (allSeries && allSeries[currentRound]) || [];
   const [paste,setPaste]=useState("");
   const [preview,setPreview]=useState(null); // parsed preview before commit
   const [overrideGame,setOverrideGame]=useState(null); // null = use auto-detected
@@ -7937,14 +7936,14 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
 
   // Auto-detect series from team abbrs in parsed result
   function detectSeriesIdx(awayAbbr, homeAbbr){
-    if (!seriesForRound) return -1;
+    if (!allSeries) return -1;
     const teams = new Set([awayAbbr, homeAbbr]);
-    return seriesForRound.findIndex(sr => teams.has(sr.homeAbbr) && teams.has(sr.awayAbbr));
+    return allSeries.findIndex(sr => teams.has(sr.homeAbbr) && teams.has(sr.awayAbbr));
   }
 
   // Auto-detect next game# = max gameNum with a recorded result + 1
   function detectGameNum(seriesIdx){
-    const sr = seriesForRound?.[seriesIdx];
+    const sr = allSeries?.[seriesIdx];
     if (!sr || !sr.games) return 1;
     let maxPlayed = 0;
     sr.games.forEach((g, idx) => {
@@ -8045,7 +8044,7 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
 
     const seriesIdx = overrideSeries != null ? overrideSeries : preview.detectedSeries;
     const gameNum = overrideGame != null ? overrideGame : preview.detectedGame;
-    const sr = seriesForRound?.[seriesIdx];
+    const sr = allSeries?.[seriesIdx];
     if (!sr) { setErr("Series not found."); return; }
 
     const hash = hashStr(paste.trim());
@@ -8142,10 +8141,11 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
     // games[gameNum-1] convention: home/away are determined by the series record's homeAbbr/awayAbbr,
     // NOT by HR's away/home. So map preview's away/home → series's home/away.
     if (setAllSeries) {
-      // v108: allSeries is a round-keyed dict, not a flat array. Update only the current round's series list.
+      // v108/109: setAllSeries here is setSeriesForRound — it handles the round-keyed dict
+      //          transparently. We just update the flat array as if it weren't a dict.
       setAllSeries(prev => {
-        const arr = [...((prev||{})[currentRound] || [])];
-        const s2 = arr[seriesIdx];
+        const u = [...(prev || [])];
+        const s2 = u[seriesIdx];
         if (!s2) return prev;
         const games = [...s2.games];
         const idx = gameNum - 1;
@@ -8161,8 +8161,8 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
           ot: !!preview.ot,
           otScorer: preview.otScorer || null,
         };
-        arr[seriesIdx] = {...s2, games};
-        return {...prev, [currentRound]: arr};
+        u[seriesIdx] = {...s2, games};
+        return u;
       });
     }
 
