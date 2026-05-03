@@ -5051,23 +5051,32 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
 
   // Series OT games distribution — v31: sim PMF when available
   const otSeriesMkts=useMemo(()=>{
-    let pmf;
-    if (simResult && !simStale && simResult.seriesOTPMF) {
-      pmf = simResult.seriesOTPMF;
-    } else {
-      // v87: closed-form PMF that respects realized OT count as a fixed offset.
-      // Old code built Poisson(realized + future) which gave nonzero probability to k < realized
-      // (impossible — you can't undo OT games already played). New code uses Poisson(future) shifted
-      // by realized, so k < realized is exactly 0.
-      const r = computeOTSeriesPMF(effG, 8);
-      pmf = r.pmf;
-    }
+    // v110: ALWAYS use closed-form. Sim's seriesOTPMF historically over-counted OTs because
+    //       wentOT flag was set whenever Poisson sampling produced wrong-direction games (force-bumped
+    //       to OT). Even after v100's resampling fix, sim numbers diverge from closed-form ~by ~30%.
+    //       Closed-form is mathematically correct: lamFuture = Σ over paths (path_prob × Σ pOT for unplayed).
+    //       This ALSO makes OT Series consistent with First OT Scorer banner (which already uses closed-form).
+    const r = computeOTSeriesPMF(effG, 8);
+    const pmf = r.pmf;
     let lambda=0; for (let k=0;k<pmf.length;k++) lambda += k*pmf[k];
-    const exactLines=[0,1,2,3,4,5,6,7];
-    // Settled exact: realized.otGames > k means "exactly k" is impossible (won't decrease).
-    // realized.otGames == k AND no games remaining means "exactly k" is settled YES.
-    const exactProbs = exactLines.map(k => pmf[k] || 0);
+    // v110: exact 0..3 + a "4+" bucket aggregating P(k>=4). Series rarely have 4+ OTs but it's
+    //       a real outcome to display.
+    const exactLines=[0,1,2,3,"4+"];
+    const exactProbs = exactLines.map(k => {
+      if (k === "4+") {
+        let s = 0;
+        for (let i=4; i<pmf.length; i++) s += pmf[i] || 0;
+        return s;
+      }
+      return pmf[k] || 0;
+    });
     const exactSettled = exactLines.map(k => {
+      if (k === "4+") {
+        // Settled YES if already at 4+. Settled NO if can't reach 4 (realized + remaining < 4).
+        if (realized.otGames >= 4) return "yes";
+        if (realized.otGames + realized.gamesRemaining < 4) return "no";
+        return null;
+      }
       if (realized.otGames > k) return "no"; // already exceeded
       if (realized.otGames + realized.gamesRemaining < k) return "no"; // can't reach
       if (realized.gamesRemaining === 0 && realized.otGames === k) return "yes";
@@ -5077,13 +5086,12 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
       const st = exactSettled[i];
       if (st === "yes") return 1;
       if (st === "no") return 0;
-      // Margin-adjust: just multiply this single-event probability by margin (1+margin/2 standard)
       return Math.min(1, p * effMargins.otExact);
     });
     const ouLines=[0.5,1.5,2.5,3.5];
     const ouRows = ouFromSimPMF(pmf, ouLines, effMargins.otGames, realized.otGames, realized.gamesRemaining);
     return {lambda, exactLines, exactProbs, exactAdj, exactSettled, ouLines, ouRows: sortSettled(ouRows)};
-  },[effKey,effMargins.otExact,effMargins.otGames,simResult,realized]);
+  },[effKey,effMargins.otExact,effMargins.otGames,realized]);
 
   // Spread market — v31: sim's exactScoreProb when available; per-row settled detection.
   // Lines are wins-spread (e.g., "-3.5" = win series by 4 wins, i.e., 4-0).
@@ -5280,7 +5288,9 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
     {id:"winner",l:"Winner"},{id:"eightway",l:"Correct Score"},{id:"length",l:"Length"},
     {id:"spread",l:"Spread"},{id:"totalgoals",l:"Total Goals"},{id:"shutouts",l:"Shutouts"},
     {id:"winorder",l:"Win Order"},{id:"score3",l:"Score @G3"},
-    {id:"ot",l:"OT/Game"},{id:"otseries",l:"OT Series"},{id:"otscorer",l:"OT Scorer"},
+    // v110: OT/Game tab removed — that's a per-game market, not a series market. Series-level
+    //       OT pricing lives in OT Series and First OT Scorer tabs.
+    {id:"otseries",l:"OT Series"},{id:"otscorer",l:"OT Scorer"},
     {id:"firstotscorer",l:"First OT Scorer"},
     {id:"hattricks",l:"Hat Tricks"},
     {id:"mostgoals",l:"Most Goals"},{id:"teamgoals",l:"Team Goals"},
@@ -5968,7 +5978,10 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
                     rows.sort((a,b)=>{
                       const aS = !!a.settled, bS = !!b.settled;
                       if (aS !== bS) return aS ? 1 : -1;
-                      return a.k - b.k;
+                      // v110: "4+" sorts after 3 numerically
+                      const av = a.k === "4+" ? 4 : a.k;
+                      const bv = b.k === "4+" ? 4 : b.k;
+                      return av - bv;
                     });
                     return rows.map((o,i)=>(
                       <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",opacity:o.settled?0.4:1}}>
