@@ -3610,7 +3610,30 @@ function AppInner() {
     }
     // v76/77: actual stat for R1 scope is R1-only; R2 is R2-only; full scope is cumulative.
     const actual = readActual(p, stat, scope==="r1" ? "r1" : scope==="r2" ? "r2" : "full");
-    const futureLam = Math.max(0.0001, rr * Math.max(0, expTotal - actualGP));
+    // v111: participation-rate weighted future games.
+    //       Old code: `futureLam = rr * (expTotal - actualGP)` assumed every healthy/active player
+    //       plays every remaining game in the playoff. That dramatically inflates lambdas for
+    //       rotation/scratch types (e.g. Deslauriers played 1 of CAR's 6 playoff games but model
+    //       assumes he plays all 16 future games at his per-game rate → 88 future hits).
+    //       New: estimate participation = (player_pGP) / (team_pGP_total). Apply that rate to
+    //       remaining games. If the player has 0 pGP we keep the old "100%" logic since we have
+    //       no signal yet (e.g. healthy starter who hasn't played because his series hasn't started).
+    let teamPGPTotal = 0;
+    {
+      const r1G = (teamR1Status[p.team] && teamR1Status[p.team].over) ? (teamR1Status[p.team].gamesPlayed || 0)
+                : (teamR1Status[p.team] && teamR1Status[p.team].gamesPlayed) || 0;
+      const r2G = (teamR2Status[p.team] && teamR2Status[p.team].gamesPlayed) || 0;
+      teamPGPTotal = r1G + r2G;  // (extend later for conf/cup as those start)
+    }
+    const remainingTeamGames = Math.max(0, expTotal - teamPGPTotal);
+    let participationRate = 1.0;
+    if (teamPGPTotal > 0 && actualGP < teamPGPTotal) {
+      // Player has missed some team games — apply participation rate to future games.
+      // Floor at 0.10 to avoid zeroing a player who genuinely could re-enter the lineup.
+      participationRate = Math.max(0.10, actualGP / teamPGPTotal);
+    }
+    const playerFutureGames = remainingTeamGames * participationRate;
+    const futureLam = Math.max(0.0001, rr * playerFutureGames);
     const lam = Math.max(0.0001, actual + futureLam);
     return {actual, futureLam, lam};
   },[globals.rateDiscount,teamExpGR1,teamExpGR2,teamR1Status,teamR2Status,advancement,autoR1ByTeam,autoConfByTeamFinal,autoCupByTeamFinal,autoR2ByTeam]);
