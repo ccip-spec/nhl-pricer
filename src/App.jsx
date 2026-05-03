@@ -7907,7 +7907,13 @@ function ExportImportPanel({exportState,importState}) {
 // - Shows warnings for unmatched players (late callups not in skaters.csv)
 // - Per-game dedup via paste hash + (seriesIdx, gameNum) key
 // - Undo restores both teams' player + goalie state and clears the game result
-function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAllSeries,onGameUploaded}) {
+function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAllSeries,onGameUploaded,currentRound}) {
+  // v108: currentRound is "r1"|"r2"|"conf"|"cup". Convert to round number for pGames entries.
+  //       Series array is allSeries[currentRound] (was assumed to be flat array — broke once
+  //       round-keyed dict was introduced).
+  const currentRoundNum = currentRound === "r1" ? 1 : currentRound === "r2" ? 2 :
+                          currentRound === "conf" ? 3 : currentRound === "cup" ? 4 : 1;
+  const seriesForRound = (allSeries && allSeries[currentRound]) || [];
   const [paste,setPaste]=useState("");
   const [preview,setPreview]=useState(null); // parsed preview before commit
   const [overrideGame,setOverrideGame]=useState(null); // null = use auto-detected
@@ -7931,14 +7937,14 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
 
   // Auto-detect series from team abbrs in parsed result
   function detectSeriesIdx(awayAbbr, homeAbbr){
-    if (!allSeries) return -1;
+    if (!seriesForRound) return -1;
     const teams = new Set([awayAbbr, homeAbbr]);
-    return allSeries.findIndex(sr => teams.has(sr.homeAbbr) && teams.has(sr.awayAbbr));
+    return seriesForRound.findIndex(sr => teams.has(sr.homeAbbr) && teams.has(sr.awayAbbr));
   }
 
   // Auto-detect next game# = max gameNum with a recorded result + 1
   function detectGameNum(seriesIdx){
-    const sr = allSeries?.[seriesIdx];
+    const sr = seriesForRound?.[seriesIdx];
     if (!sr || !sr.games) return 1;
     let maxPlayed = 0;
     sr.games.forEach((g, idx) => {
@@ -8039,13 +8045,14 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
 
     const seriesIdx = overrideSeries != null ? overrideSeries : preview.detectedSeries;
     const gameNum = overrideGame != null ? overrideGame : preview.detectedGame;
-    const sr = allSeries?.[seriesIdx];
+    const sr = seriesForRound?.[seriesIdx];
     if (!sr) { setErr("Series not found."); return; }
 
     const hash = hashStr(paste.trim());
-    const dup = imports.find(x => x.seriesIdx===seriesIdx && x.game===gameNum);
+    // v108: dup check now includes round so R1G1 and R2G1 are tracked separately
+    const dup = imports.find(x => x.seriesIdx===seriesIdx && x.game===gameNum && (x.round||1)===currentRoundNum);
     if (dup) {
-      setErr(`G${gameNum} already imported for ${sr.homeAbbr} vs ${sr.awayAbbr} at ${dup.ts}. Undo it first to re-import.`);
+      setErr(`R${currentRoundNum}G${gameNum} already imported for ${sr.homeAbbr} vs ${sr.awayAbbr} at ${dup.ts}. Undo it first to re-import.`);
       return;
     }
 
@@ -8057,10 +8064,11 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
       sideMatched.forEach(({u, p}) => {
         const base = migratePlayer(p);
         const existingGames = base.pGames || [];
-        const already = existingGames.some(e => e.round===1 && e.game===gameNum);
+        // v108: scope dup check + new entry by current round (was hardcoded round===1)
+        const already = existingGames.some(e => e.round===currentRoundNum && e.game===gameNum);
         if (already) return;
         const newEntry = {
-          round: 1, game: gameNum,
+          round: currentRoundNum, game: gameNum,
           g: u.g||0, a: u.a||0, sog: u.sog||0,
           hit: u.hit||0, blk: u.blk||0, tk: 0, pim: u.pim||0, give: 0,
           toi: u.toi||0,
@@ -8068,7 +8076,7 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
         };
         const updated = withRollups({...base, pGames:[...existingGames, newEntry]});
         playersById.set(p.name+"|"+p.team, updated);
-        deltaPlayers.push({name:p.name, team:p.team, round:1, game:gameNum});
+        deltaPlayers.push({name:p.name, team:p.team, round:currentRoundNum, game:gameNum});
       });
     };
     applySide(preview.awayMatched, preview.awayAbbr);
@@ -8089,7 +8097,7 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
             lineRole: "MID6",
             _addedViaImport: true,
             pGames: [{
-              round: 1, game: gameNum,
+              round: currentRoundNum, game: gameNum,
               g: u.g||0, a: u.a||0, sog: u.sog||0,
               hit: u.hit||0, blk: u.blk||0, tk: 0, pim: u.pim||0, give: 0,
               toi: u.toi||0, _source: "hr_full_v28",
@@ -8097,7 +8105,7 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
           };
           const rolled = withRollups(newP);
           playersById.set(rolled.name+"|"+rolled.team, rolled);
-          deltaPlayers.push({name:rolled.name, team:rolled.team, round:1, game:gameNum, _added:true});
+          deltaPlayers.push({name:rolled.name, team:rolled.team, round:currentRoundNum, game:gameNum, _added:true});
           unmatchedAdded.push(rolled.name);
         }
       });
@@ -8111,15 +8119,15 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
     const applyGoalies = (sideMatched) => {
       sideMatched.forEach(({u, g}) => {
         const existing = g.pGames || [];
-        const already = existing.some(e => e.round===1 && e.game===gameNum);
+        const already = existing.some(e => e.round===currentRoundNum && e.game===gameNum);
         if (already) return;
         const newEntry = {
-          round:1, game:gameNum, ga:u.ga||0, sa:u.sa||0, sv:u.sv||0,
+          round:currentRoundNum, game:gameNum, ga:u.ga||0, sa:u.sa||0, sv:u.sv||0,
           so:u.so||0, toi:u.toi||0, dec:u.dec||"",
         };
         const rolled = withGoalieRollups({...g, pGames:[...existing, newEntry]});
         goaliesById.set(g.name+"|"+g.team, rolled);
-        deltaGoalies.push({name:g.name, team:g.team, round:1, game:gameNum});
+        deltaGoalies.push({name:g.name, team:g.team, round:currentRoundNum, game:gameNum});
       });
     };
     applyGoalies(preview.awayGoaliesMatched);
@@ -8134,12 +8142,13 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
     // games[gameNum-1] convention: home/away are determined by the series record's homeAbbr/awayAbbr,
     // NOT by HR's away/home. So map preview's away/home → series's home/away.
     if (setAllSeries) {
+      // v108: allSeries is a round-keyed dict, not a flat array. Update only the current round's series list.
       setAllSeries(prev => {
-        const u = [...prev];
-        const s2 = u[seriesIdx];
+        const arr = [...((prev||{})[currentRound] || [])];
+        const s2 = arr[seriesIdx];
+        if (!s2) return prev;
         const games = [...s2.games];
         const idx = gameNum - 1;
-        // Resolve which score corresponds to series.homeAbbr
         const homeIsAway = preview.awayAbbr === s2.homeAbbr;
         const homeScore = homeIsAway ? preview.awayScore : preview.homeScore;
         const awayScore = homeIsAway ? preview.homeScore : preview.awayScore;
@@ -8149,13 +8158,11 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
           homeScore, awayScore,
           result: winResult || games[idx].result,
           wentOT: !!preview.ot,
-          ot: !!preview.ot,  // legacy alias kept for compat
-          // v89: persist OT scorer if present in the parsed paste.
-          // Resolve to canonical roster name if possible — parser may have spelling that differs slightly.
+          ot: !!preview.ot,
           otScorer: preview.otScorer || null,
         };
-        u[seriesIdx] = {...s2, games};
-        return u;
+        arr[seriesIdx] = {...s2, games};
+        return {...prev, [currentRound]: arr};
       });
     }
 
@@ -8166,7 +8173,7 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
     const entry = {
       id: Date.now()+"-"+Math.random().toString(36).slice(2,7),
       ts: new Date().toLocaleString(),
-      seriesIdx, seriesLabel, round:1, game:gameNum, hash,
+      seriesIdx, seriesLabel, round:currentRoundNum, game:gameNum, hash,
       awayAbbr: preview.awayAbbr, homeAbbr: preview.homeAbbr,
       awayScore: preview.awayScore, homeScore: preview.homeScore,
       ot: !!preview.ot,
@@ -8803,7 +8810,7 @@ function UploadTab({players,setPlayers,goalies,setGoalies,linemates,setLinemates
         <Card style={{marginBottom:14}}>
           <SH title="Game Stat Import" sub="Paste a Hockey Reference box score — stats are added to each player's running playoff totals"/>
           {/* Series + Game selector */}
-          <GameStatImporter players={players} setPlayers={setPlayers} goalies={goalies} setGoalies={setGoalies} allSeries={allSeries} setAllSeries={setAllSeries} onGameUploaded={onGameUploaded}/>
+          <GameStatImporter players={players} setPlayers={setPlayers} goalies={goalies} setGoalies={setGoalies} allSeries={allSeries} setAllSeries={setAllSeries} onGameUploaded={onGameUploaded} currentRound={currentRound}/>
         </Card>
         <Card style={{marginBottom:14}}>
           <SH title="Live Playoff Totals" sub="Post-import verification — any player with pGP > 0 appears here"/>
