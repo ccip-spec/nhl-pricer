@@ -9525,7 +9525,7 @@ function RolesTab({players,setPlayers,dark}) {
 // So a team in lottery row N has a pre-lottery position of N+2 (worst possible outcome).
 // Movement up means landing at any position 1..N+1; keeping means landing at exactly N+2.
 function LotteryTab({dark, margins}) {
-  const STORAGE_KEY = "nhl_lottery_v1";
+  const STORAGE_KEY = "nhl_lottery_v2";  // v114: bumped from v1 — matrix rows 13-16 had column-alignment errors
   const ROWS = 16;
   const COLS = 16;
   // Default to the matrix the user provided (NHL 2025 lottery odds, %).
@@ -9544,10 +9544,10 @@ function LotteryTab({dark, margins}) {
       [3.5,3.7,0.1,0,0,0,0,0,0,73.3,18.4,0.9,0,0,0,0],
       [3.0,3.2,0.1,0,0,0,0,0,0,0,79.9,13.4,0.5,0,0,0],
       [0,5.1,0.1,0.1,0,0,0,0,0,0,0,85.7,8.9,0.2,0,0],
-      [0,4.2,0,0,0,0,0,0,0,0,0,0,90.7,5.1,0,0],
-      [0,3.2,0,0,0,0,0,0,0,0,0,0,0,94.7,2.1,0],
-      [0,1.1,0,0,0,0,0,0,0,0,0,0,0,0,97.9,1.1],
-      [0,1.1,0,0,0,0,0,0,0,0,0,0,0,0,0,98.9],
+      [0,0,0,4.2,0.05,0.05,0,0,0,0,0,0,90.7,5.1,0.05,0],
+      [0,0,0,0,3.2,0.05,0.05,0,0,0,0,0,0,94.7,2.1,0.05],
+      [0,0,0,0,1.1,0,0.05,0,0,0,0,0,0,0,97.9,1.1],
+      [0,0,0,0,0,1.1,0,0,0,0,0,0,0,0,0,98.9],
     ],
   };
   const [data, setData] = useState(() => {
@@ -9575,6 +9575,10 @@ function LotteryTab({dark, margins}) {
   }, [marginOverrides]);
 
   const [showTrue, setShowTrue] = useState(false);
+  const [showDec, setShowDec] = useState(false);
+  // v114: optional max-odds cap. When enabled, any priced odd >= capDec gets clamped to capDec.
+  const [capEnabled, setCapEnabled] = useState(false);
+  const [capDec, setCapDec] = useState(50);
   const lotteryOR = marginOverrides.lottery != null ? marginOverrides.lottery : (margins.lottery || 1.08);
   const lotteryTopOR = marginOverrides.lotteryTopN != null ? marginOverrides.lotteryTopN : (margins.lotteryTopN || 1.06);
 
@@ -9632,16 +9636,24 @@ function LotteryTab({dark, margins}) {
     return Math.min(0.999, p * or);
   }
 
+  // v114: capped probability — if cap is enabled and decimal odds >= capDec, force prob = 1/capDec
+  function capProb(prob) {
+    if (!capEnabled || capDec <= 1 || prob <= 0 || prob >= 1) return prob;
+    const minProb = 1 / capDec;
+    return prob < minProb ? minProb : prob;
+  }
   function fmtAmer(prob) {
-    if (prob <= 0) return "—";
-    if (prob >= 1) return "—";
-    const dec = 1/prob;
+    const p = capProb(prob);
+    if (p <= 0) return "—";
+    if (p >= 1) return "—";
+    const dec = 1/p;
     if (dec >= 2) return "+" + Math.round((dec-1)*100);
     return "-" + Math.round(100/(dec-1));
   }
   function fmtDec(prob) {
-    if (prob <= 0 || prob >= 1) return "—";
-    return (1/prob).toFixed(2);
+    const p = capProb(prob);
+    if (p <= 0 || p >= 1) return "—";
+    return (1/p).toFixed(2);
   }
 
   const [activeMarket, setActiveMarket] = useState("exact"); // exact | topN | move
@@ -9671,6 +9683,15 @@ function LotteryTab({dark, margins}) {
       </label>
       <label style={{fontSize:11,color:"var(--color-text-secondary)",display:"flex",alignItems:"center",gap:6}}>
         <input type="checkbox" checked={showTrue} onChange={e=>setShowTrue(e.target.checked)}/>True %
+      </label>
+      <label style={{fontSize:11,color:"var(--color-text-secondary)",display:"flex",alignItems:"center",gap:6}}>
+        <input type="checkbox" checked={showDec} onChange={e=>setShowDec(e.target.checked)}/>Dec
+      </label>
+      <label style={{fontSize:11,color:"var(--color-text-secondary)",display:"flex",alignItems:"center",gap:6}}>
+        <input type="checkbox" checked={capEnabled} onChange={e=>setCapEnabled(e.target.checked)}/>CAP
+        <input type="text" inputMode="decimal" value={capDec} disabled={!capEnabled}
+          onChange={e=>{const v=parseFloat(e.target.value); if(Number.isFinite(v)&&v>1) setCapDec(v);}}
+          style={{width:50,fontSize:11,padding:"3px 6px",textAlign:"right",fontFamily:"var(--font-mono)",background:capEnabled?"var(--color-background-secondary)":"transparent",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:capEnabled?"var(--color-text-primary)":"var(--color-text-tertiary)",opacity:capEnabled?1:0.5}}/>
       </label>
       <button onClick={resetDefault} style={{fontSize:10,padding:"5px 10px",background:"transparent",border:"0.5px solid var(--color-border-secondary)",borderRadius:4,color:"var(--color-text-secondary)",cursor:"pointer"}}>Reset to Default</button>
       <button onClick={clearAll} style={{fontSize:10,padding:"5px 10px",background:"transparent",border:"0.5px solid var(--color-border-secondary)",borderRadius:4,color:"var(--color-text-secondary)",cursor:"pointer"}}>Clear</button>
@@ -9755,6 +9776,7 @@ function LotteryTab({dark, margins}) {
                   const adj = applyExact(ep.p, lotteryOR);
                   return <td key={j} style={{padding:"3px 4px",textAlign:"center",fontFamily:"var(--font-mono)",fontSize:10}}>
                     <div style={{fontWeight:500}}>{fmtAmer(adj)}</div>
+                    {showDec && <div style={{fontSize:8,color:"var(--color-text-secondary)"}}>{fmtDec(adj)}</div>}
                     {showTrue && <div style={{fontSize:8,color:"var(--color-text-tertiary)"}}>{(ep.p*100).toFixed(1)}%</div>}
                   </td>;
                 })}
@@ -9773,6 +9795,7 @@ function LotteryTab({dark, margins}) {
           <th style={{padding:"6px 10px",textAlign:"left",fontWeight:500,fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4}}>TEAM</th>
           {["Top 2","Top 3","Top 4","Top 5"].map(l => <Fragment key={l}>
             <th style={{padding:"6px 8px",textAlign:"right",fontWeight:500,fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4}}>{l}</th>
+            {showDec && <th style={{padding:"6px 4px",textAlign:"right",fontWeight:500,fontSize:8,color:"var(--color-text-tertiary)"}}>Dec</th>}
             {showTrue && <th style={{padding:"6px 4px",textAlign:"right",fontWeight:500,fontSize:8,color:"var(--color-text-tertiary)"}}>True%</th>}
           </Fragment>)}
         </tr></thead>
@@ -9784,6 +9807,7 @@ function LotteryTab({dark, margins}) {
                 const adj = applyTwoWay(p, lotteryTopOR);
                 return <Fragment key={j}>
                   <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{fmtAmer(adj)}</td>
+                  {showDec && <td style={{padding:"5px 4px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{fmtDec(adj)}</td>}
                   {showTrue && <td style={{padding:"5px 4px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:9,color:"var(--color-text-tertiary)"}}>{p>0?(p*100).toFixed(1)+"%":"—"}</td>}
                 </Fragment>;
               })}
@@ -9801,8 +9825,10 @@ function LotteryTab({dark, margins}) {
           <th style={{padding:"6px 10px",textAlign:"left",fontWeight:500,fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4}}>TEAM</th>
           <th style={{padding:"6px 8px",textAlign:"right",fontWeight:500,fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4}}>Lot Row</th>
           <th style={{padding:"6px 8px",textAlign:"right",fontWeight:500,fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4}}>Move Up</th>
+          {showDec && <th style={{padding:"6px 4px",textAlign:"right",fontWeight:500,fontSize:8,color:"var(--color-text-tertiary)"}}>Dec</th>}
           {showTrue && <th style={{padding:"6px 4px",textAlign:"right",fontWeight:500,fontSize:8,color:"var(--color-text-tertiary)"}}>True%</th>}
           <th style={{padding:"6px 8px",textAlign:"right",fontWeight:500,fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4}}>Keep</th>
+          {showDec && <th style={{padding:"6px 4px",textAlign:"right",fontWeight:500,fontSize:8,color:"var(--color-text-tertiary)"}}>Dec</th>}
           {showTrue && <th style={{padding:"6px 4px",textAlign:"right",fontWeight:500,fontSize:8,color:"var(--color-text-tertiary)"}}>True%</th>}
         </tr></thead>
         <tbody>
@@ -9813,8 +9839,10 @@ function LotteryTab({dark, margins}) {
               <td style={{padding:"5px 10px",fontWeight:500}}>{tp.teamName}</td>
               <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>#{tp.lotteryRow}</td>
               <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{tp.moveUp>0?fmtAmer(muAdj):"—"}</td>
+              {showDec && <td style={{padding:"5px 4px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{tp.moveUp>0?fmtDec(muAdj):"—"}</td>}
               {showTrue && <td style={{padding:"5px 4px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:9,color:"var(--color-text-tertiary)"}}>{tp.moveUp>0?(tp.moveUp*100).toFixed(1)+"%":"—"}</td>}
               <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{fmtAmer(kAdj)}</td>
+              {showDec && <td style={{padding:"5px 4px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{fmtDec(kAdj)}</td>}
               {showTrue && <td style={{padding:"5px 4px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:9,color:"var(--color-text-tertiary)"}}>{tp.keep>0?(tp.keep*100).toFixed(1)+"%":"—"}</td>}
             </tr>;
           })}
