@@ -2567,6 +2567,7 @@ const DEFAULT_MARGINS = {
   propsHits:1.05, propsBlocks:1.05, propsTakeaways:1.05,
   propsGiveaways:1.05,
   seriesLeader:1.5, leaderR1:1.5, leaderFull:1.5,
+  lottery:1.08, lotteryTopN:1.06,
 };
 const DEFAULT_GLOBALS = { overroundR1:1.15, overroundFull:1.15, powerFactor:1.20, rateDiscount:0.95, dispersion:1.2, seriesLeaderPF:1.15 };
 
@@ -3760,7 +3761,7 @@ function AppInner() {
     {id:"sog",label:"SOG"},{id:"hit",label:"Hits"},{id:"blk",label:"Blocks"},
     {id:"tk",label:"TK"},{id:"give",label:"GV"},
   ];
-  const NAV=[{id:"leaders",l:"Leader Markets"},{id:"series",l:"Series Pricer"},{id:"parlay",l:"Series Parlay Pricer"},{id:"compare",l:"Line Compare"},{id:"upload",l:"Upload Stats"},{id:"stats",l:"Player Stats"},{id:"roles",l:"Roles"},{id:"settings",l:"Settings"}];
+  const NAV=[{id:"leaders",l:"Leader Markets"},{id:"series",l:"Series Pricer"},{id:"parlay",l:"Series Parlay Pricer"},{id:"lottery",l:"Draft Lottery"},{id:"compare",l:"Line Compare"},{id:"upload",l:"Upload Stats"},{id:"stats",l:"Player Stats"},{id:"roles",l:"Roles"},{id:"settings",l:"Settings"}];
   const [gameModal,setGameModal] = useState(null);
 
   return (
@@ -3800,6 +3801,7 @@ function AppInner() {
           simResultsBySeries={simResultsBySeries} setSimForSeries={setSimForSeries}
           currentRound={currentRound} setCurrentRound={setCurrentRound}/>}
         {tab==="parlay"&&<ParlayTab allSeries={seriesForRound} currentRound={currentRound} margins={margins} dark={dark}/>}
+        {tab==="lottery"&&<LotteryTab dark={dark} margins={margins}/>}
         {tab==="upload"&&<UploadTab players={players} setPlayers={setP} goalies={goalies} setGoalies={setG}
           linemates={linemates} setLinemates={setLinemates}
           exportState={exportState} importState={importState} syncStatus={syncStatus}
@@ -5916,7 +5918,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
                 <button onClick={copyAll} style={{marginLeft:"auto",padding:"3px 10px",fontSize:10,borderRadius:"var(--border-radius-md)",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",color:"var(--color-text-secondary)",cursor:"pointer"}}>Copy All</button>
               </div>
               {realized.seriesOver && <div style={{padding:"6px 10px",marginBottom:8,background:"rgba(34,197,94,0.10)",border:"0.5px solid rgba(34,197,94,0.3)",borderRadius:"var(--border-radius-md)",fontSize:10,color:"#4ade80"}}>SERIES OVER — market settled</div>}
-              <div style={{maxHeight:1000,overflowY:"auto"}}>
+              <div>
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
                   <TH cols={["Sequence","Winner","Games",...(showTrue?["True%"]:[]),"Adj%","American","Dec"]}/>
                   <tbody>{winOrders.map((o,i)=>(
@@ -9514,6 +9516,315 @@ function RolesTab({players,setPlayers,dark}) {
 // 2..N teams across all current-round series. Excludes combos containing both teams
 // from the same series (mathematically impossible). Per-team price overrides are
 // LOCAL to this tab — they do not affect any other market or sheet.
+// v112: Draft Lottery pricer. User enters a 16×16 probability matrix (rows = teams in lottery
+// position order, cols = pick #1..#16). Computes prices for: each pick #N, top-2 / top-3 /
+// top-4 / top-5, "move up" (player wins lottery and improves their pre-lottery position),
+// and "keep the pick" (lands at exactly their pre-lottery position).
+//
+// NHL lottery rules: only top-2 picks can be won. A team's pick can fall by max 2 spots.
+// So a team in lottery row N has a pre-lottery position of N+2 (worst possible outcome).
+// Movement up means landing at any position 1..N+1; keeping means landing at exactly N+2.
+function LotteryTab({dark, margins}) {
+  const STORAGE_KEY = "nhl_lottery_v1";
+  const ROWS = 16;
+  const COLS = 16;
+  // Default to the matrix the user provided (NHL 2025 lottery odds, %).
+  const DEFAULT_DATA = {
+    teams: ["VAN","CHI","NYR","CGY","TOR","SEA","WPG","FLA","SJ","NSH","STL","NJ","NYI","CBJ","DET","WSH"],
+    matrix: [
+      [25.5,18.8,55.7,0,0,0,0,0,0,0,0,0,0,0,0,0],
+      [13.5,14.1,30.7,41.7,0,0,0,0,0,0,0,0,0,0,0,0],
+      [11.5,11.2,7.8,39.7,29.8,0,0,0,0,0,0,0,0,0,0,0],
+      [9.5,9.5,0.3,15.4,44.6,20.8,0,0,0,0,0,0,0,0,0,0],
+      [8.5,8.6,0.3,0,24.5,44.0,14.2,0,0,0,0,0,0,0,0,0],
+      [7.5,7.7,0.2,0,0,34.1,41.4,9.1,0,0,0,0,0,0,0,0],
+      [6.5,6.7,0.2,0,0,0,44.4,36.5,5.6,0,0,0,0,0,0,0],
+      [6.0,6.2,0.2,0,0,0,0,54.4,30.0,3.2,0,0,0,0,0,0],
+      [5.0,5.2,0.2,0,0,0,0,0,64.4,23.5,1.7,0,0,0,0,0],
+      [3.5,3.7,0.1,0,0,0,0,0,0,73.3,18.4,0.9,0,0,0,0],
+      [3.0,3.2,0.1,0,0,0,0,0,0,0,79.9,13.4,0.5,0,0,0],
+      [0,5.1,0.1,0.1,0,0,0,0,0,0,0,85.7,8.9,0.2,0,0],
+      [0,4.2,0,0,0,0,0,0,0,0,0,0,90.7,5.1,0,0],
+      [0,3.2,0,0,0,0,0,0,0,0,0,0,0,94.7,2.1,0],
+      [0,1.1,0,0,0,0,0,0,0,0,0,0,0,0,97.9,1.1],
+      [0,1.1,0,0,0,0,0,0,0,0,0,0,0,0,0,98.9],
+    ],
+  };
+  const [data, setData] = useState(() => {
+    try {
+      const v = localStorage.getItem(STORAGE_KEY);
+      if (v) return JSON.parse(v);
+    } catch {}
+    return DEFAULT_DATA;
+  });
+  useEffect(() => {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch {}
+  }, [data]);
+
+  // v113: local margin overrides — saved separately so resetting the matrix doesn't wipe them.
+  const MARGIN_KEY = "nhl_lottery_margins_v1";
+  const [marginOverrides, setMarginOverrides] = useState(() => {
+    try {
+      const v = localStorage.getItem(MARGIN_KEY);
+      if (v) return JSON.parse(v);
+    } catch {}
+    return {};
+  });
+  useEffect(() => {
+    try { localStorage.setItem(MARGIN_KEY, JSON.stringify(marginOverrides)); } catch {}
+  }, [marginOverrides]);
+
+  const [showTrue, setShowTrue] = useState(false);
+  const lotteryOR = marginOverrides.lottery != null ? marginOverrides.lottery : (margins.lottery || 1.08);
+  const lotteryTopOR = marginOverrides.lotteryTopN != null ? marginOverrides.lotteryTopN : (margins.lotteryTopN || 1.06);
+
+  function setTeam(i, name) {
+    setData(d => ({...d, teams: d.teams.map((t,ix) => ix===i ? name : t)}));
+  }
+  function setCell(i, j, v) {
+    const num = v === "" ? 0 : (parseFloat(v) || 0);
+    setData(d => ({...d, matrix: d.matrix.map((row,ix) => ix===i ? row.map((c,jx) => jx===j ? num : c) : row)}));
+  }
+  function resetDefault() {
+    if (confirm("Reset lottery matrix to default?")) setData(DEFAULT_DATA);
+  }
+  function clearAll() {
+    if (confirm("Clear all probabilities?")) setData(d => ({...d, matrix: Array.from({length:ROWS},()=>Array(COLS).fill(0))}));
+  }
+
+  // Each cell is interpreted as a percent (0-100). Convert to probability for math.
+  const teamPrices = useMemo(() => {
+    return data.teams.map((teamName, i) => {
+      const row = data.matrix[i] || [];
+      const probs = row.map(v => Math.max(0, v) / 100);
+      const rowSum = probs.reduce((a,b)=>a+b, 0);
+      // NHL lottery rules: only top-2 picks can be won. Lottery row 1 = worst record =
+      // their "natural" pick is #1 if no one below them wins the lottery. Each team can
+      // only FALL (max 2 spots) from their lottery row.
+      //   - "Keep" = lands at pick == lotteryRow (no one below won).
+      //   - "Move up" doesn't really apply for the worst teams — they can only stay or fall.
+      //     For teams in the lottery, "move up" means winning a top-2 pick from a row > 2.
+      //     i.e., for row N where N>=3, "move up" = lands at pick 1 OR 2.
+      //     For rows 1-2, they're already in the top 2; "move up" ≡ wins #1.
+      const lotteryRow = i + 1;  // 1-indexed
+      const exactPicks = probs.map((p, j) => ({pick: j+1, p}));
+      const top2 = probs.slice(0,2).reduce((a,b)=>a+b,0);
+      const top3 = probs.slice(0,3).reduce((a,b)=>a+b,0);
+      const top4 = probs.slice(0,4).reduce((a,b)=>a+b,0);
+      const top5 = probs.slice(0,5).reduce((a,b)=>a+b,0);
+      // Keep = lands at exactly lotteryRow (the team's natural pre-lottery position).
+      const keep = probs[lotteryRow - 1] || 0;
+      // Move up: lands at any pick BETTER (numerically lower) than lotteryRow.
+      const moveUp = lotteryRow > 1 ? probs.slice(0, lotteryRow - 1).reduce((a,b)=>a+b,0) : 0;
+      return {teamName, lotteryRow, exactPicks, top2, top3, top4, top5, moveUp, keep, rowSum};
+    });
+  }, [data]);
+
+  // Apply margin to two-way markets (top-N has implicit "not top-N" complement)
+  function applyTwoWay(p, or) {
+    if (p <= 0) return 0;
+    if (p >= 1) return 1;
+    const adj = Math.min(0.999, p * or);
+    return adj;
+  }
+  // For exact pick markets we apply per-cell margin (single-event multiplier)
+  function applyExact(p, or) {
+    return Math.min(0.999, p * or);
+  }
+
+  function fmtAmer(prob) {
+    if (prob <= 0) return "—";
+    if (prob >= 1) return "—";
+    const dec = 1/prob;
+    if (dec >= 2) return "+" + Math.round((dec-1)*100);
+    return "-" + Math.round(100/(dec-1));
+  }
+  function fmtDec(prob) {
+    if (prob <= 0 || prob >= 1) return "—";
+    return (1/prob).toFixed(2);
+  }
+
+  const [activeMarket, setActiveMarket] = useState("exact"); // exact | topN | move
+
+  return <div style={{padding:"20px 24px",maxWidth:1400,margin:"0 auto"}}>
+    <div style={{display:"flex",alignItems:"center",marginBottom:12,gap:12,flexWrap:"wrap"}}>
+      <h2 style={{margin:0,fontSize:18,fontWeight:500,color:"var(--color-text-primary)"}}>Draft Lottery</h2>
+      <div style={{flex:1}}/>
+      {/* v113: per-tab margin overrides */}
+      <label style={{fontSize:10,color:"var(--color-text-secondary)",display:"flex",alignItems:"center",gap:5}}>
+        Exact OR
+        <input type="text" inputMode="decimal" value={lotteryOR}
+          onChange={e=>{const v=parseFloat(e.target.value); if(Number.isFinite(v)&&v>=1&&v<=2) setMarginOverrides(m=>({...m, lottery:v}));}}
+          style={{width:50,fontSize:11,padding:"3px 6px",textAlign:"right",fontFamily:"var(--font-mono)",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-primary)"}}/>
+        <button onClick={()=>setMarginOverrides(m=>{const n={...m}; delete n.lottery; return n;})}
+          title="Reset to default (1.08)"
+          style={{fontSize:9,padding:"2px 6px",background:"transparent",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-tertiary)",cursor:"pointer"}}>↺</button>
+      </label>
+      <label style={{fontSize:10,color:"var(--color-text-secondary)",display:"flex",alignItems:"center",gap:5}}>
+        Top-N / Move OR
+        <input type="text" inputMode="decimal" value={lotteryTopOR}
+          onChange={e=>{const v=parseFloat(e.target.value); if(Number.isFinite(v)&&v>=1&&v<=2) setMarginOverrides(m=>({...m, lotteryTopN:v}));}}
+          style={{width:50,fontSize:11,padding:"3px 6px",textAlign:"right",fontFamily:"var(--font-mono)",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-primary)"}}/>
+        <button onClick={()=>setMarginOverrides(m=>{const n={...m}; delete n.lotteryTopN; return n;})}
+          title="Reset to default (1.06)"
+          style={{fontSize:9,padding:"2px 6px",background:"transparent",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-tertiary)",cursor:"pointer"}}>↺</button>
+      </label>
+      <label style={{fontSize:11,color:"var(--color-text-secondary)",display:"flex",alignItems:"center",gap:6}}>
+        <input type="checkbox" checked={showTrue} onChange={e=>setShowTrue(e.target.checked)}/>True %
+      </label>
+      <button onClick={resetDefault} style={{fontSize:10,padding:"5px 10px",background:"transparent",border:"0.5px solid var(--color-border-secondary)",borderRadius:4,color:"var(--color-text-secondary)",cursor:"pointer"}}>Reset to Default</button>
+      <button onClick={clearAll} style={{fontSize:10,padding:"5px 10px",background:"transparent",border:"0.5px solid var(--color-border-secondary)",borderRadius:4,color:"var(--color-text-secondary)",cursor:"pointer"}}>Clear</button>
+    </div>
+
+    {/* Probability matrix editor */}
+    <Card>
+      <SH title="Lottery Probability Matrix" sub={`Rows = teams in lottery position order (1 = worst record). Columns = final pick number. Values are %. Each row should sum to 100.`}/>
+      <div style={{overflowX:"auto"}}>
+        <table style={{borderCollapse:"collapse",fontSize:10,fontFamily:"var(--font-mono)"}}>
+          <thead>
+            <tr style={{borderBottom:"0.5px solid var(--color-border-secondary)"}}>
+              <th style={{padding:"4px 6px",textAlign:"left",fontWeight:500,color:"var(--color-text-tertiary)",fontSize:9}}>POS</th>
+              <th style={{padding:"4px 6px",textAlign:"left",fontWeight:500,color:"var(--color-text-tertiary)",fontSize:9}}>TEAM</th>
+              {Array.from({length:COLS}, (_,j)=>(
+                <th key={j} style={{padding:"4px 4px",textAlign:"center",fontWeight:500,color:"var(--color-text-tertiary)",fontSize:9,minWidth:34}}>{j+1}</th>
+              ))}
+              <th style={{padding:"4px 6px",textAlign:"right",fontWeight:500,color:"var(--color-text-tertiary)",fontSize:9}}>Σ</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.teams.map((teamName, i) => {
+              const rowSum = (data.matrix[i] || []).reduce((a,b)=>a+(b||0), 0);
+              const sumOff = Math.abs(rowSum - 100) > 0.5;
+              return <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                <td style={{padding:"3px 6px",color:"var(--color-text-tertiary)"}}>{i+1}</td>
+                <td style={{padding:"2px 4px"}}>
+                  <input type="text" value={teamName} onChange={e=>setTeam(i, e.target.value)}
+                    style={{width:60,fontSize:11,padding:"3px 6px",background:"transparent",border:"0.5px solid transparent",borderRadius:3,color:"var(--color-text-primary)",fontFamily:"var(--font-mono)"}}/>
+                </td>
+                {Array.from({length:COLS}, (_,j)=>{
+                  const v = (data.matrix[i] && data.matrix[i][j]) || 0;
+                  return <td key={j} style={{padding:"1px 2px"}}>
+                    <input type="text" inputMode="decimal" defaultValue={v ? v : ""}
+                      onBlur={e=>setCell(i, j, e.target.value)}
+                      placeholder="—"
+                      style={{width:36,fontSize:10,padding:"2px 3px",textAlign:"right",background:v>0?"rgba(59,130,246,0.08)":"transparent",border:"0.5px solid var(--color-border-tertiary)",borderRadius:2,color:v>0?"var(--color-text-primary)":"var(--color-text-tertiary)",fontFamily:"var(--font-mono)"}}/>
+                  </td>;
+                })}
+                <td style={{padding:"3px 6px",textAlign:"right",color:sumOff?"#f59e0b":"var(--color-text-tertiary)",fontSize:9}}>{rowSum.toFixed(1)}</td>
+              </tr>;
+            })}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+
+    {/* Market selector */}
+    <div style={{display:"flex",gap:6,margin:"16px 0 8px",flexWrap:"wrap"}}>
+      {[
+        {id:"exact",l:"Exact Pick #"},
+        {id:"topN",l:"Top N"},
+        {id:"move",l:"Move Up / Keep"},
+      ].map(t => (
+        <button key={t.id} onClick={()=>setActiveMarket(t.id)} style={{
+          padding:"6px 14px",fontSize:11,fontWeight:500,
+          background:activeMarket===t.id?"#3b82f6":"transparent",
+          color:activeMarket===t.id?"#fff":"var(--color-text-secondary)",
+          border:`0.5px solid ${activeMarket===t.id?"#3b82f6":"var(--color-border-secondary)"}`,
+          borderRadius:4,cursor:"pointer",
+        }}>{t.l}</button>
+      ))}
+    </div>
+
+    {/* Exact Pick Markets */}
+    {activeMarket==="exact" && <Card>
+      <SH title="To Receive Pick #N" sub={`OR: ${lotteryOR}x — one row per (team, pick) combination`}/>
+      <div style={{overflowX:"auto"}}>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+          <thead><tr style={{borderBottom:"0.5px solid var(--color-border-secondary)"}}>
+            <th style={{padding:"5px 8px",textAlign:"left",fontWeight:500,fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4}}>TEAM</th>
+            {Array.from({length:COLS}, (_,j)=>(
+              <th key={j} style={{padding:"5px 6px",textAlign:"center",fontWeight:500,fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4}}>#{j+1}</th>
+            ))}
+          </tr></thead>
+          <tbody>
+            {teamPrices.map((tp, i) => (
+              <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                <td style={{padding:"5px 8px",fontWeight:500}}>{tp.teamName}</td>
+                {tp.exactPicks.map((ep, j) => {
+                  if (ep.p <= 0) return <td key={j} style={{padding:"5px 6px",textAlign:"center",color:"var(--color-text-tertiary)",fontSize:9}}>—</td>;
+                  const adj = applyExact(ep.p, lotteryOR);
+                  return <td key={j} style={{padding:"3px 4px",textAlign:"center",fontFamily:"var(--font-mono)",fontSize:10}}>
+                    <div style={{fontWeight:500}}>{fmtAmer(adj)}</div>
+                    {showTrue && <div style={{fontSize:8,color:"var(--color-text-tertiary)"}}>{(ep.p*100).toFixed(1)}%</div>}
+                  </td>;
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>}
+
+    {/* Top N Markets */}
+    {activeMarket==="topN" && <Card>
+      <SH title="Top-N Markets" sub={`OR: ${lotteryTopOR}x — Top 2/3/4/5 = team lands at pick that high or better`}/>
+      <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+        <thead><tr style={{borderBottom:"0.5px solid var(--color-border-secondary)"}}>
+          <th style={{padding:"6px 10px",textAlign:"left",fontWeight:500,fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4}}>TEAM</th>
+          {["Top 2","Top 3","Top 4","Top 5"].map(l => <Fragment key={l}>
+            <th style={{padding:"6px 8px",textAlign:"right",fontWeight:500,fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4}}>{l}</th>
+            {showTrue && <th style={{padding:"6px 4px",textAlign:"right",fontWeight:500,fontSize:8,color:"var(--color-text-tertiary)"}}>True%</th>}
+          </Fragment>)}
+        </tr></thead>
+        <tbody>
+          {teamPrices.map((tp, i) => (
+            <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+              <td style={{padding:"5px 10px",fontWeight:500}}>{tp.teamName}</td>
+              {[tp.top2, tp.top3, tp.top4, tp.top5].map((p, j) => {
+                const adj = applyTwoWay(p, lotteryTopOR);
+                return <Fragment key={j}>
+                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{fmtAmer(adj)}</td>
+                  {showTrue && <td style={{padding:"5px 4px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:9,color:"var(--color-text-tertiary)"}}>{p>0?(p*100).toFixed(1)+"%":"—"}</td>}
+                </Fragment>;
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </Card>}
+
+    {/* Move Up / Keep Markets */}
+    {activeMarket==="move" && <Card>
+      <SH title="Move Up / Keep the Pick" sub={`OR: ${lotteryTopOR}x — Keep = lands at lottery row position (no movement). Move Up = lands at any pick higher than their lottery row.`}/>
+      <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+        <thead><tr style={{borderBottom:"0.5px solid var(--color-border-secondary)"}}>
+          <th style={{padding:"6px 10px",textAlign:"left",fontWeight:500,fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4}}>TEAM</th>
+          <th style={{padding:"6px 8px",textAlign:"right",fontWeight:500,fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4}}>Lot Row</th>
+          <th style={{padding:"6px 8px",textAlign:"right",fontWeight:500,fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4}}>Move Up</th>
+          {showTrue && <th style={{padding:"6px 4px",textAlign:"right",fontWeight:500,fontSize:8,color:"var(--color-text-tertiary)"}}>True%</th>}
+          <th style={{padding:"6px 8px",textAlign:"right",fontWeight:500,fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4}}>Keep</th>
+          {showTrue && <th style={{padding:"6px 4px",textAlign:"right",fontWeight:500,fontSize:8,color:"var(--color-text-tertiary)"}}>True%</th>}
+        </tr></thead>
+        <tbody>
+          {teamPrices.map((tp, i) => {
+            const muAdj = applyTwoWay(tp.moveUp, lotteryTopOR);
+            const kAdj = applyTwoWay(tp.keep, lotteryTopOR);
+            return <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+              <td style={{padding:"5px 10px",fontWeight:500}}>{tp.teamName}</td>
+              <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>#{tp.lotteryRow}</td>
+              <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{tp.moveUp>0?fmtAmer(muAdj):"—"}</td>
+              {showTrue && <td style={{padding:"5px 4px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:9,color:"var(--color-text-tertiary)"}}>{tp.moveUp>0?(tp.moveUp*100).toFixed(1)+"%":"—"}</td>}
+              <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{fmtAmer(kAdj)}</td>
+              {showTrue && <td style={{padding:"5px 4px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:9,color:"var(--color-text-tertiary)"}}>{tp.keep>0?(tp.keep*100).toFixed(1)+"%":"—"}</td>}
+            </tr>;
+          })}
+        </tbody>
+      </table>
+    </Card>}
+
+  </div>;
+}
+
 function ParlayTab({allSeries, currentRound, margins, dark}) {
   const [showDec, setShowDec] = useState(true);
   const [overrides, setOverrides] = useState({}); // key: "<rid>|<abbr>" -> decimal odds
@@ -9706,9 +10017,9 @@ function ParlayTab({allSeries, currentRound, margins, dark}) {
         </div>}
 
         {rows.length > 0 && <>
-          <div style={{maxHeight:1100,overflowY:"auto",border:"0.5px solid var(--color-border-secondary)",borderRadius:4}}>
+          <div style={{border:"0.5px solid var(--color-border-secondary)",borderRadius:4}}>
             <table style={{width:"100%",fontSize:11,borderCollapse:"collapse"}}>
-              <thead style={{position:"sticky",top:0,background:dark?"#131625":"#fff",zIndex:1}}>
+              <thead style={{background:dark?"#131625":"#fff"}}>
                 <tr style={{borderBottom:"0.5px solid var(--color-border-secondary)",color:"var(--color-text-tertiary)"}}>
                   <th style={{padding:"6px 8px",textAlign:"left",fontWeight:400,width:40}}>#</th>
                   <th onClick={()=>{
