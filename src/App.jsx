@@ -3707,6 +3707,12 @@ function AppInner() {
 
   const leaderMarket = useMemo(()=>{
     if(!players||!players.length)return[];
+    // v115: leader market is heavy (10k-trial sim over hundreds of players). Only the Leaders
+    //       and Compare tabs consume it — but it was running on EVERY render anywhere in the
+    //       app because its deps include allSeries (which changes when typing winPct etc on
+    //       the Series tab). Result: laggy typing on Series tab, especially R2 where the leader
+    //       deps cascade is fresh. Gate to relevant tabs.
+    if (tab !== "leaders" && tab !== "compare") return [];
     // v24 Phase E Pt3: prefer unified R1 market when in R1 scope and it's computable
     if (lScope === "r1" && r1LeaderMarket) return r1LeaderMarket;
     const or=lScope==="r1"?globals.overroundR1:lScope==="r2"?globals.overroundR1:globals.overroundFull;
@@ -3751,7 +3757,7 @@ function AppInner() {
     const raw = entries.length ? simulateLeader(entries, r, 10000, 12345) : [];
     const adj = applyLeaderOverround(raw, pf, or);
     return pool.map((p,i)=>({...p,lambda:computed[i].lam,futureLam:computed[i].futureLam,actualStat:computed[i].actual,trueProb:raw[i],adjProb:adj[i]})).sort((a,b)=>b.adjProb-a.adjProb).slice(0,lTopN);
-  },[players,lStat,lScope,globals,computeLambda,matchups,advancement,lTopN,r1LeaderMarket,allSeries]);
+  },[tab,players,lStat,lScope,globals,computeLambda,matchups,advancement,lTopN,r1LeaderMarket,allSeries]);
 
   function exportState(){const s={players,goalies,matchups,allSeries,advancement,globals,margins,bracket};return JSON.stringify(s,null,2);}
   function importState(text){try{const s=JSON.parse(text);if(s.players){setPlayers(s.players);scheduleSync("players",s.players);}if(s.goalies){setGoalies(s.goalies);scheduleSync("goalies",s.goalies);}if(s.matchups){setMatchups(migrateMatchups(s.matchups));}if(s.allSeries){setAllSeries(migrateSeries(s.allSeries));}if(s.advancement){setAdvancement(s.advancement);}if(s.globals)setGlobals(s.globals);if(s.margins)setMargins(s.margins);if(s.bracket)setBracket(s.bracket);return{ok:true};}catch(e){return{ok:false,error:e.message};}}
