@@ -9721,8 +9721,9 @@ function LotteryTab({dark, margins}) {
       {/* v113: per-tab margin overrides */}
       <label style={{fontSize:10,color:"var(--color-text-secondary)",display:"flex",alignItems:"center",gap:5}}>
         Exact OR
-        <input type="text" inputMode="decimal" value={lotteryOR}
-          onChange={e=>{const v=parseFloat(e.target.value); if(Number.isFinite(v)&&v>=1&&v<=2) setMarginOverrides(m=>({...m, lottery:v}));}}
+        <input key={`exact-${lotteryOR}`} type="text" inputMode="decimal" defaultValue={lotteryOR}
+          onBlur={e=>{const v=parseFloat(e.target.value); if(Number.isFinite(v)&&v>=1&&v<=2) setMarginOverrides(m=>({...m, lottery:v})); else e.target.value=lotteryOR;}}
+          onKeyDown={e=>{if(e.key==="Enter") e.target.blur();}}
           style={{width:50,fontSize:11,padding:"3px 6px",textAlign:"right",fontFamily:"var(--font-mono)",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-primary)"}}/>
         <button onClick={()=>setMarginOverrides(m=>{const n={...m}; delete n.lottery; return n;})}
           title="Reset to default (1.08)"
@@ -9730,8 +9731,9 @@ function LotteryTab({dark, margins}) {
       </label>
       <label style={{fontSize:10,color:"var(--color-text-secondary)",display:"flex",alignItems:"center",gap:5}}>
         Top-N / Move OR
-        <input type="text" inputMode="decimal" value={lotteryTopOR}
-          onChange={e=>{const v=parseFloat(e.target.value); if(Number.isFinite(v)&&v>=1&&v<=2) setMarginOverrides(m=>({...m, lotteryTopN:v}));}}
+        <input key={`topn-${lotteryTopOR}`} type="text" inputMode="decimal" defaultValue={lotteryTopOR}
+          onBlur={e=>{const v=parseFloat(e.target.value); if(Number.isFinite(v)&&v>=1&&v<=2) setMarginOverrides(m=>({...m, lotteryTopN:v})); else e.target.value=lotteryTopOR;}}
+          onKeyDown={e=>{if(e.key==="Enter") e.target.blur();}}
           style={{width:50,fontSize:11,padding:"3px 6px",textAlign:"right",fontFamily:"var(--font-mono)",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-primary)"}}/>
         <button onClick={()=>setMarginOverrides(m=>{const n={...m}; delete n.lotteryTopN; return n;})}
           title="Reset to default (1.06)"
@@ -9745,8 +9747,9 @@ function LotteryTab({dark, margins}) {
       </label>
       <label style={{fontSize:11,color:"var(--color-text-secondary)",display:"flex",alignItems:"center",gap:6}}>
         <input type="checkbox" checked={capEnabled} onChange={e=>setCapEnabled(e.target.checked)}/>CAP
-        <input type="text" inputMode="decimal" value={capDec} disabled={!capEnabled}
-          onChange={e=>{const v=parseFloat(e.target.value); if(Number.isFinite(v)&&v>1) setCapDec(v);}}
+        <input key={`cap-${capDec}`} type="text" inputMode="decimal" defaultValue={capDec} disabled={!capEnabled}
+          onBlur={e=>{const v=parseFloat(e.target.value); if(Number.isFinite(v)&&v>1) setCapDec(v); else e.target.value=capDec;}}
+          onKeyDown={e=>{if(e.key==="Enter") e.target.blur();}}
           style={{width:50,fontSize:11,padding:"3px 6px",textAlign:"right",fontFamily:"var(--font-mono)",background:capEnabled?"var(--color-background-secondary)":"transparent",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:capEnabled?"var(--color-text-primary)":"var(--color-text-tertiary)",opacity:capEnabled?1:0.5}}/>
       </label>
       <button onClick={resetDefault} style={{fontSize:10,padding:"5px 10px",background:"transparent",border:"0.5px solid var(--color-border-secondary)",borderRadius:4,color:"var(--color-text-secondary)",cursor:"pointer"}}>Reset to Default</button>
