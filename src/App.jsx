@@ -6124,14 +6124,9 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             const rows = pool.map(p => {
               const teamRate = p.team === s.homeAbbr ? homeG : awayG;
               const share = teamRate > 0 ? shrunkGoalRate(p) / teamRate : 0;
-              const roleMult =
-                p.lineRole === "TOP6"   ? 1.20 :
-                p.lineRole === "MID6"   ? 0.95 :
-                p.lineRole === "BOT6"   ? 0.70 :
-                p.lineRole === "ACTIVE" ? 0.85 :
-                p.lineRole === "D1"     ? 1.00 :
-                p.lineRole === "D2"     ? 0.75 :
-                p.lineRole === "D3"     ? 0.55 : 0.60;
+              // v120: use canonical roleMultiplier(role, "g") for consistency with rest of model
+              //       (was using a stale hardcoded table — TOP6 1.20 vs canonical 1.12, BOT6 0.70 vs 0.75, etc).
+              const roleMult = roleMultiplier(p.lineRole, "g");
               const teamOT = p.team === s.homeAbbr ? futureTeamOT.home : futureTeamOT.away;
               // P(scores OT goal in REMAINING games)
               const rawP = Math.min(0.9999, share * roleMult * teamOT);
@@ -9581,7 +9576,7 @@ function RolesTab({players,setPlayers,dark}) {
 // So a team in lottery row N has a pre-lottery position of N+2 (worst possible outcome).
 // Movement up means landing at any position 1..N+1; keeping means landing at exactly N+2.
 function LotteryTab({dark, margins}) {
-  const STORAGE_KEY = "nhl_lottery_v3";  // v117: another column-alignment fix in default matrix
+  const STORAGE_KEY = "nhl_lottery_v4";  // v119: added trades matrix
   const ROWS = 16;
   const COLS = 16;
   // Default to the matrix the user provided (NHL 2025 lottery odds, %).
@@ -9605,11 +9600,28 @@ function LotteryTab({dark, margins}) {
       [0,0,0,0,1.1,0,0.05,0,0,0,0,0,0,0,97.9,1.1],
       [0,0,0,0,0,1.1,0,0,0,0,0,0,0,0,0,98.9],
     ],
+    // v119: trades matrix — true means "if pick lands here, the team loses it (e.g. trade-conditional protection)".
+    // For TOR: pick is conditionally owed if it falls outside top 5 — so picks #6 and #7 are trade outcomes.
+    // Right-click any cell in the matrix to toggle.
+    trades: (function(){
+      const t = Array.from({length:16}, ()=>Array(16).fill(false));
+      // TOR (row 5, i=4): picks 6 and 7 are traded
+      t[4][5] = true; // pick #6
+      t[4][6] = true; // pick #7
+      return t;
+    })(),
   };
   const [data, setData] = useState(() => {
     try {
       const v = localStorage.getItem(STORAGE_KEY);
-      if (v) return JSON.parse(v);
+      if (v) {
+        const parsed = JSON.parse(v);
+        // v119: ensure trades field exists (migration from older saved data)
+        if (!parsed.trades) {
+          parsed.trades = Array.from({length:ROWS}, ()=>Array(COLS).fill(false));
+        }
+        return parsed;
+      }
     } catch {}
     return DEFAULT_DATA;
   });
@@ -9645,6 +9657,15 @@ function LotteryTab({dark, margins}) {
     const num = v === "" ? 0 : (parseFloat(v) || 0);
     setData(d => ({...d, matrix: d.matrix.map((row,ix) => ix===i ? row.map((c,jx) => jx===j ? num : c) : row)}));
   }
+  // v119: toggle trade flag on a cell (right-click). When marked, that pick is treated as
+  // "team loses pick" — excluded from Keep, Move Up, Top-N totals.
+  function toggleTrade(i, j) {
+    setData(d => {
+      const trades = (d.trades || Array.from({length:ROWS}, ()=>Array(COLS).fill(false)))
+        .map((row,ix) => ix===i ? row.map((c,jx) => jx===j ? !c : c) : row);
+      return {...d, trades};
+    });
+  }
   function resetDefault() {
     if (confirm("Reset lottery matrix to default?")) setData(DEFAULT_DATA);
   }
@@ -9656,27 +9677,34 @@ function LotteryTab({dark, margins}) {
   const teamPrices = useMemo(() => {
     return data.teams.map((teamName, i) => {
       const row = data.matrix[i] || [];
+      const tradesRow = (data.trades && data.trades[i]) || [];
       const probs = row.map(v => Math.max(0, v) / 100);
+      const traded = probs.map((_, j) => !!tradesRow[j]);
       const rowSum = probs.reduce((a,b)=>a+b, 0);
-      // NHL lottery rules: only top-2 picks can be won. Lottery row 1 = worst record =
-      // their "natural" pick is #1 if no one below them wins the lottery. Each team can
-      // only FALL (max 2 spots) from their lottery row.
-      //   - "Keep" = lands at pick == lotteryRow (no one below won).
-      //   - "Move up" doesn't really apply for the worst teams — they can only stay or fall.
-      //     For teams in the lottery, "move up" means winning a top-2 pick from a row > 2.
-      //     i.e., for row N where N>=3, "move up" = lands at pick 1 OR 2.
-      //     For rows 1-2, they're already in the top 2; "move up" ≡ wins #1.
-      const lotteryRow = i + 1;  // 1-indexed
-      const exactPicks = probs.map((p, j) => ({pick: j+1, p}));
-      const top2 = probs.slice(0,2).reduce((a,b)=>a+b,0);
-      const top3 = probs.slice(0,3).reduce((a,b)=>a+b,0);
-      const top4 = probs.slice(0,4).reduce((a,b)=>a+b,0);
-      const top5 = probs.slice(0,5).reduce((a,b)=>a+b,0);
-      // Keep = lands at exactly lotteryRow (the team's natural pre-lottery position).
-      const keep = probs[lotteryRow - 1] || 0;
-      // Move up: lands at any pick BETTER (numerically lower) than lotteryRow.
-      const moveUp = lotteryRow > 1 ? probs.slice(0, lotteryRow - 1).reduce((a,b)=>a+b,0) : 0;
-      return {teamName, lotteryRow, exactPicks, top2, top3, top4, top5, moveUp, keep, rowSum};
+      // v119: "Lose Pick" = sum of probs across all cells flagged as traded.
+      // For other markets we exclude those cells from totals (the team doesn't keep that pick).
+      const losePick = probs.reduce((sum, p, j) => sum + (traded[j] ? p : 0), 0);
+      const keptProb = (j) => traded[j] ? 0 : probs[j];
+      const lotteryRow = i + 1;
+      const exactPicks = probs.map((p, j) => ({pick: j+1, p, traded: traded[j]}));
+      // Top-N: only counts non-traded landings within top N.
+      const topRange = (n) => {
+        let s = 0;
+        for (let j = 0; j < n; j++) s += keptProb(j);
+        return s;
+      };
+      const top2 = topRange(2);
+      const top3 = topRange(3);
+      const top4 = topRange(4);
+      const top5 = topRange(5);
+      // Keep: lands at lotteryRow AND not traded.
+      const keep = keptProb(lotteryRow - 1);
+      // Move up: lands at any pick numerically lower than lotteryRow AND not traded.
+      let moveUp = 0;
+      if (lotteryRow > 1) {
+        for (let j = 0; j < lotteryRow - 1; j++) moveUp += keptProb(j);
+      }
+      return {teamName, lotteryRow, exactPicks, top2, top3, top4, top5, moveUp, keep, losePick, rowSum};
     });
   }, [data]);
 
@@ -9758,7 +9786,7 @@ function LotteryTab({dark, margins}) {
 
     {/* Probability matrix editor */}
     <Card>
-      <SH title="Lottery Probability Matrix" sub={`Rows = teams in lottery position order (1 = worst record). Columns = final pick number. Values are %. Each row should sum to 100.`}/>
+      <SH title="Lottery Probability Matrix" sub={`Rows = teams in lottery position order (1 = worst record). Columns = final pick number. Values are %. Right-click any cell to mark/unmark as a traded outcome (red = pick is lost). Each row should sum to 100.`}/>
       <div style={{overflowX:"auto"}}>
         <table style={{borderCollapse:"collapse",fontSize:10,fontFamily:"var(--font-mono)"}}>
           <thead>
@@ -9783,11 +9811,17 @@ function LotteryTab({dark, margins}) {
                 </td>
                 {Array.from({length:COLS}, (_,j)=>{
                   const v = (data.matrix[i] && data.matrix[i][j]) || 0;
-                  return <td key={j} style={{padding:"1px 2px"}}>
+                  const isTraded = !!(data.trades && data.trades[i] && data.trades[i][j]);
+                  // v119: visual = red bg if traded, blue if has prob, transparent if empty
+                  const bg = isTraded ? "rgba(239,68,68,0.18)" : (v > 0 ? "rgba(59,130,246,0.08)" : "transparent");
+                  const border = isTraded ? "0.5px solid rgba(239,68,68,0.5)" : "0.5px solid var(--color-border-tertiary)";
+                  const color = isTraded ? "#fca5a5" : (v > 0 ? "var(--color-text-primary)" : "var(--color-text-tertiary)");
+                  return <td key={j} style={{padding:"1px 2px"}} onContextMenu={e => { e.preventDefault(); toggleTrade(i, j); }}
+                    title={isTraded ? "Traded — pick lost. Right-click to unmark." : "Right-click to mark as traded outcome."}>
                     <input type="text" inputMode="decimal" defaultValue={v ? v : ""}
                       onBlur={e=>setCell(i, j, e.target.value)}
                       placeholder="—"
-                      style={{width:36,fontSize:10,padding:"2px 3px",textAlign:"right",background:v>0?"rgba(59,130,246,0.08)":"transparent",border:"0.5px solid var(--color-border-tertiary)",borderRadius:2,color:v>0?"var(--color-text-primary)":"var(--color-text-tertiary)",fontFamily:"var(--font-mono)"}}/>
+                      style={{width:36,fontSize:10,padding:"2px 3px",textAlign:"right",background:bg,border,borderRadius:2,color,fontFamily:"var(--font-mono)",textDecoration:isTraded?"line-through":"none"}}/>
                   </td>;
                 })}
                 <td style={{padding:"3px 6px",textAlign:"right",color:sumOff?"#f59e0b":"var(--color-text-tertiary)",fontSize:9}}>{rowSum.toFixed(1)}</td>
@@ -9817,7 +9851,7 @@ function LotteryTab({dark, margins}) {
 
     {/* Exact Pick Markets */}
     {activeMarket==="exact" && <Card>
-      <SH title="To Receive Pick #N" sub={`OR: ${lotteryOR}x — one row per (team, pick) combination`}/>
+      <SH title="To Receive Pick #N" sub={`OR: ${lotteryOR}x — one row per (team, pick) combination · red = traded outcome (team loses pick)`}/>
       <div style={{overflowX:"auto"}}>
         <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
           <thead><tr style={{borderBottom:"0.5px solid var(--color-border-secondary)"}}>
@@ -9833,8 +9867,10 @@ function LotteryTab({dark, margins}) {
                 {tp.exactPicks.map((ep, j) => {
                   if (ep.p <= 0) return <td key={j} style={{padding:"5px 6px",textAlign:"center",color:"var(--color-text-tertiary)",fontSize:9}}>—</td>;
                   const adj = applyExact(ep.p, lotteryOR);
-                  return <td key={j} style={{padding:"3px 4px",textAlign:"center",fontFamily:"var(--font-mono)",fontSize:10}}>
-                    <div style={{fontWeight:500}}>{showDec ? fmtDec(adj) : fmtAmer(adj)}</div>
+                  const cellBg = ep.traded ? "rgba(239,68,68,0.10)" : "transparent";
+                  const cellColor = ep.traded ? "#fca5a5" : "var(--color-text-primary)";
+                  return <td key={j} style={{padding:"3px 4px",textAlign:"center",fontFamily:"var(--font-mono)",fontSize:10,background:cellBg}} title={ep.traded?"Traded — pick lost if it lands here":""}>
+                    <div style={{fontWeight:500,color:cellColor,textDecoration:ep.traded?"line-through":"none"}}>{showDec ? fmtDec(adj) : fmtAmer(adj)}</div>
                     {showTrue && <div style={{fontSize:8,color:"var(--color-text-tertiary)"}}>{(ep.p*100).toFixed(1)}%</div>}
                   </td>;
                 })}
@@ -9875,7 +9911,7 @@ function LotteryTab({dark, margins}) {
 
     {/* Move Up / Keep Markets */}
     {activeMarket==="move" && <Card>
-      <SH title="Move Up / Keep the Pick" sub={`OR: ${lotteryTopOR}x — Keep = lands at lottery row position (no movement). Move Up = lands at any pick higher than their lottery row.`}/>
+      <SH title="Move Up / Keep / Lose the Pick" sub={`OR: ${lotteryTopOR}x — Keep = lands at lottery row & not traded. Move Up = lands higher than lottery row & not traded. Lose Pick = lands at any traded outcome.`}/>
       <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
         <thead><tr style={{borderBottom:"0.5px solid var(--color-border-secondary)"}}>
           <th style={{padding:"6px 10px",textAlign:"left",fontWeight:500,fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4}}>TEAM</th>
@@ -9884,18 +9920,23 @@ function LotteryTab({dark, margins}) {
           {showTrue && <th style={{padding:"6px 4px",textAlign:"right",fontWeight:500,fontSize:8,color:"var(--color-text-tertiary)"}}>True%</th>}
           <th style={{padding:"6px 8px",textAlign:"right",fontWeight:500,fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4}}>Keep</th>
           {showTrue && <th style={{padding:"6px 4px",textAlign:"right",fontWeight:500,fontSize:8,color:"var(--color-text-tertiary)"}}>True%</th>}
+          <th style={{padding:"6px 8px",textAlign:"right",fontWeight:500,fontSize:9,color:"#fca5a5",letterSpacing:0.4}}>Lose Pick</th>
+          {showTrue && <th style={{padding:"6px 4px",textAlign:"right",fontWeight:500,fontSize:8,color:"var(--color-text-tertiary)"}}>True%</th>}
         </tr></thead>
         <tbody>
           {teamPrices.map((tp, i) => {
             const muAdj = applyTwoWay(tp.moveUp, lotteryTopOR);
             const kAdj = applyTwoWay(tp.keep, lotteryTopOR);
+            const lpAdj = applyTwoWay(tp.losePick, lotteryTopOR);
             return <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
               <td style={{padding:"5px 10px",fontWeight:500}}>{tp.teamName}</td>
               <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>#{tp.lotteryRow}</td>
               <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{tp.moveUp>0 ? (showDec ? fmtDec(muAdj) : fmtAmer(muAdj)) : "—"}</td>
               {showTrue && <td style={{padding:"5px 4px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:9,color:"var(--color-text-tertiary)"}}>{tp.moveUp>0?(tp.moveUp*100).toFixed(1)+"%":"—"}</td>}
-              <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{showDec ? fmtDec(kAdj) : fmtAmer(kAdj)}</td>
+              <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{tp.keep>0 ? (showDec ? fmtDec(kAdj) : fmtAmer(kAdj)) : "—"}</td>
               {showTrue && <td style={{padding:"5px 4px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:9,color:"var(--color-text-tertiary)"}}>{tp.keep>0?(tp.keep*100).toFixed(1)+"%":"—"}</td>}
+              <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500,color:tp.losePick>0?"#fca5a5":"var(--color-text-tertiary)"}}>{tp.losePick>0 ? (showDec ? fmtDec(lpAdj) : fmtAmer(lpAdj)) : "—"}</td>
+              {showTrue && <td style={{padding:"5px 4px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:9,color:"var(--color-text-tertiary)"}}>{tp.losePick>0?(tp.losePick*100).toFixed(1)+"%":"—"}</td>}
             </tr>;
           })}
         </tbody>
