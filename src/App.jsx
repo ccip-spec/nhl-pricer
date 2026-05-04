@@ -5918,29 +5918,8 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
               const txt=winOrders.map(o=>`${seqLabel(o.seq)}\t${o.ap>0?"+":""}${fmt(o.ap)}\t${toDec(o.ap).toFixed(2)}`).join("\n");
               navigator.clipboard?.writeText(txt);
             };
-            return <Card>
-              <div style={{display:"flex",alignItems:"center",marginBottom:10}}>
-                <SH title="Win Order (70-Way)" sub={`OR: ${effMargins.winOrder}x — sequences show game-by-game winner`}/>
-                <button onClick={copyAll} style={{marginLeft:"auto",padding:"3px 10px",fontSize:10,borderRadius:"var(--border-radius-md)",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",color:"var(--color-text-secondary)",cursor:"pointer"}}>Copy All</button>
-              </div>
-              {realized.seriesOver && <div style={{padding:"6px 10px",marginBottom:8,background:"rgba(34,197,94,0.10)",border:"0.5px solid rgba(34,197,94,0.3)",borderRadius:"var(--border-radius-md)",fontSize:10,color:"#4ade80"}}>SERIES OVER — market settled</div>}
-              <div>
-                <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-                  <TH cols={["Sequence","Winner","Games",...(showTrue?["True%"]:[]),"Adj%","American","Dec"]}/>
-                  <tbody>{winOrders.map((o,i)=>(
-                    <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)")}}>
-                      <td style={{padding:"3px 8px",fontSize:10}}>{seqLabel(o.seq)}{o._collapse&&<span style={{marginLeft:6,fontSize:8,padding:"1px 5px",borderRadius:2,background:"rgba(34,197,94,0.15)",color:"#4ade80",letterSpacing:0.3,fontWeight:500}} title="Priced at next-game moneyline (single-game collapse)">ML</span>}</td>
-                      <td style={{padding:"3px 8px",fontSize:10,color:"var(--color-text-secondary)"}}>{o.hw===4?hn:an}</td>
-                      <td style={{padding:"3px 8px",textAlign:"right",fontSize:10}}>{o.seq.length}</td>
-                      {showTrue&&<td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(o.tp*100).toFixed(2)}%</td>}
-                      <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{(o.ap*100).toFixed(2)}%</td>
-                      <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{fmt(o.ap)}</td>
-                      <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{toDec(o.ap).toFixed(2)}</td>
-                    </tr>
-                  ))}</tbody>
-                </table>
-              </div>
-            </Card>;
+            return <WinOrderTable winOrders={winOrders} hn={hn} an={an} seqLabel={seqLabel}
+              copyAll={copyAll} effMargins={effMargins} showTrue={showTrue} dark={dark} realized={realized}/>;
           })()}
 
           {mkt==="score3"&&<Card><SH title="Correct Score After 3 Games" sub={`OR: ${effMargins.correctScore}x`}/>
@@ -6561,6 +6540,77 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
 }
 
 // ─── PROPS PANEL (shared O/U + Binary) ───────────────────────────────────────
+// v116: sortable win order table — extracted from inline JSX to a component so we can hold sort state.
+function WinOrderTable({winOrders, hn, an, seqLabel, copyAll, effMargins, showTrue, dark, realized}) {
+  const [sortKey, setSortKey] = useState("ap");  // ap | seq | winner | games | tp
+  const [sortDir, setSortDir] = useState("desc"); // asc | desc
+  function clickSort(key) {
+    if (sortKey === key) {
+      setSortDir(d => d === "asc" ? "desc" : "asc");
+    } else {
+      setSortKey(key);
+      // Sensible default direction per column (descending for probabilities, ascending for alphabetical)
+      setSortDir(key === "seq" || key === "winner" ? "asc" : "desc");
+    }
+  }
+  const sorted = useMemo(() => {
+    const arr = [...winOrders];
+    arr.sort((a, b) => {
+      let cmp;
+      if (sortKey === "seq") {
+        cmp = seqLabel(a.seq).localeCompare(seqLabel(b.seq));
+      } else if (sortKey === "winner") {
+        const aw = a.hw === 4 ? hn : an;
+        const bw = b.hw === 4 ? hn : an;
+        cmp = aw.localeCompare(bw);
+      } else if (sortKey === "games") {
+        cmp = a.seq.length - b.seq.length;
+      } else if (sortKey === "tp") {
+        cmp = a.tp - b.tp;
+      } else {
+        cmp = a.ap - b.ap;
+      }
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+    return arr;
+  }, [winOrders, sortKey, sortDir, hn, an, seqLabel]);
+  const arrow = (key) => sortKey === key ? (sortDir === "asc" ? " ▲" : " ▼") : "";
+  const headerStyle = {padding:"3px 8px",cursor:"pointer",userSelect:"none",fontSize:10,fontWeight:500,color:"var(--color-text-tertiary)",letterSpacing:0.4};
+  return <Card>
+    <div style={{display:"flex",alignItems:"center",marginBottom:10}}>
+      <SH title="Win Order (70-Way)" sub={`OR: ${effMargins.winOrder}x — sequences show game-by-game winner · click headers to sort`}/>
+      <button onClick={copyAll} style={{marginLeft:"auto",padding:"3px 10px",fontSize:10,borderRadius:"var(--border-radius-md)",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",color:"var(--color-text-secondary)",cursor:"pointer"}}>Copy All</button>
+    </div>
+    {realized.seriesOver && <div style={{padding:"6px 10px",marginBottom:8,background:"rgba(34,197,94,0.10)",border:"0.5px solid rgba(34,197,94,0.3)",borderRadius:"var(--border-radius-md)",fontSize:10,color:"#4ade80"}}>SERIES OVER — market settled</div>}
+    <div>
+      <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+        <thead>
+          <tr style={{borderBottom:"0.5px solid var(--color-border-secondary)"}}>
+            <th onClick={()=>clickSort("seq")} style={{...headerStyle,textAlign:"left"}}>Sequence{arrow("seq")}</th>
+            <th onClick={()=>clickSort("winner")} style={{...headerStyle,textAlign:"left"}}>Winner{arrow("winner")}</th>
+            <th onClick={()=>clickSort("games")} style={{...headerStyle,textAlign:"right"}}>Games{arrow("games")}</th>
+            {showTrue && <th onClick={()=>clickSort("tp")} style={{...headerStyle,textAlign:"right"}}>True%{arrow("tp")}</th>}
+            <th onClick={()=>clickSort("ap")} style={{...headerStyle,textAlign:"right"}}>Adj%{arrow("ap")}</th>
+            <th onClick={()=>clickSort("ap")} style={{...headerStyle,textAlign:"right"}}>American{arrow("ap")}</th>
+            <th onClick={()=>clickSort("ap")} style={{...headerStyle,textAlign:"right"}}>Dec{arrow("ap")}</th>
+          </tr>
+        </thead>
+        <tbody>{sorted.map((o,i)=>(
+          <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)")}}>
+            <td style={{padding:"3px 8px",fontSize:10}}>{seqLabel(o.seq)}{o._collapse&&<span style={{marginLeft:6,fontSize:8,padding:"1px 5px",borderRadius:2,background:"rgba(34,197,94,0.15)",color:"#4ade80",letterSpacing:0.3,fontWeight:500}} title="Priced at next-game moneyline (single-game collapse)">ML</span>}</td>
+            <td style={{padding:"3px 8px",fontSize:10,color:"var(--color-text-secondary)"}}>{o.hw===4?hn:an}</td>
+            <td style={{padding:"3px 8px",textAlign:"right",fontSize:10}}>{o.seq.length}</td>
+            {showTrue&&<td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(o.tp*100).toFixed(2)}%</td>}
+            <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10}}>{(o.ap*100).toFixed(2)}%</td>
+            <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{fmt(o.ap)}</td>
+            <td style={{padding:"3px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{toDec(o.ap).toFixed(2)}</td>
+          </tr>
+        ))}</tbody>
+      </table>
+    </div>
+  </Card>;
+}
+
 function PropsPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,players,globals,margins,showTrue,dark,mode,simResult,currentRound}) {
   const [stat,setStat]=useState("g");
   const [line,setLine]=useState(mode==="binary"?1:0.5);
@@ -9531,7 +9581,7 @@ function RolesTab({players,setPlayers,dark}) {
 // So a team in lottery row N has a pre-lottery position of N+2 (worst possible outcome).
 // Movement up means landing at any position 1..N+1; keeping means landing at exactly N+2.
 function LotteryTab({dark, margins}) {
-  const STORAGE_KEY = "nhl_lottery_v2";  // v114: bumped from v1 — matrix rows 13-16 had column-alignment errors
+  const STORAGE_KEY = "nhl_lottery_v3";  // v117: another column-alignment fix in default matrix
   const ROWS = 16;
   const COLS = 16;
   // Default to the matrix the user provided (NHL 2025 lottery odds, %).
@@ -9550,8 +9600,8 @@ function LotteryTab({dark, margins}) {
       [3.5,3.7,0.1,0,0,0,0,0,0,73.3,18.4,0.9,0,0,0,0],
       [3.0,3.2,0.1,0,0,0,0,0,0,0,79.9,13.4,0.5,0,0,0],
       [0,5.1,0.1,0.1,0,0,0,0,0,0,0,85.7,8.9,0.2,0,0],
-      [0,0,0,4.2,0.05,0.05,0,0,0,0,0,0,90.7,5.1,0.05,0],
-      [0,0,0,0,3.2,0.05,0.05,0,0,0,0,0,0,94.7,2.1,0.05],
+      [0,0,4.2,0.05,0.05,0,0,0,0,0,0,0,90.7,5.1,0.05,0],
+      [0,0,0,3.2,0.05,0.05,0,0,0,0,0,0,0,94.7,2.1,0.05],
       [0,0,0,0,1.1,0,0.05,0,0,0,0,0,0,0,97.9,1.1],
       [0,0,0,0,0,1.1,0,0,0,0,0,0,0,0,0,98.9],
     ],
@@ -9781,8 +9831,7 @@ function LotteryTab({dark, margins}) {
                   if (ep.p <= 0) return <td key={j} style={{padding:"5px 6px",textAlign:"center",color:"var(--color-text-tertiary)",fontSize:9}}>—</td>;
                   const adj = applyExact(ep.p, lotteryOR);
                   return <td key={j} style={{padding:"3px 4px",textAlign:"center",fontFamily:"var(--font-mono)",fontSize:10}}>
-                    <div style={{fontWeight:500}}>{fmtAmer(adj)}</div>
-                    {showDec && <div style={{fontSize:8,color:"var(--color-text-secondary)"}}>{fmtDec(adj)}</div>}
+                    <div style={{fontWeight:500}}>{showDec ? fmtDec(adj) : fmtAmer(adj)}</div>
                     {showTrue && <div style={{fontSize:8,color:"var(--color-text-tertiary)"}}>{(ep.p*100).toFixed(1)}%</div>}
                   </td>;
                 })}
@@ -9801,7 +9850,6 @@ function LotteryTab({dark, margins}) {
           <th style={{padding:"6px 10px",textAlign:"left",fontWeight:500,fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4}}>TEAM</th>
           {["Top 2","Top 3","Top 4","Top 5"].map(l => <Fragment key={l}>
             <th style={{padding:"6px 8px",textAlign:"right",fontWeight:500,fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4}}>{l}</th>
-            {showDec && <th style={{padding:"6px 4px",textAlign:"right",fontWeight:500,fontSize:8,color:"var(--color-text-tertiary)"}}>Dec</th>}
             {showTrue && <th style={{padding:"6px 4px",textAlign:"right",fontWeight:500,fontSize:8,color:"var(--color-text-tertiary)"}}>True%</th>}
           </Fragment>)}
         </tr></thead>
@@ -9812,8 +9860,7 @@ function LotteryTab({dark, margins}) {
               {[tp.top2, tp.top3, tp.top4, tp.top5].map((p, j) => {
                 const adj = applyTwoWay(p, lotteryTopOR);
                 return <Fragment key={j}>
-                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{fmtAmer(adj)}</td>
-                  {showDec && <td style={{padding:"5px 4px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{fmtDec(adj)}</td>}
+                  <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{showDec ? fmtDec(adj) : fmtAmer(adj)}</td>
                   {showTrue && <td style={{padding:"5px 4px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:9,color:"var(--color-text-tertiary)"}}>{p>0?(p*100).toFixed(1)+"%":"—"}</td>}
                 </Fragment>;
               })}
@@ -9831,10 +9878,8 @@ function LotteryTab({dark, margins}) {
           <th style={{padding:"6px 10px",textAlign:"left",fontWeight:500,fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4}}>TEAM</th>
           <th style={{padding:"6px 8px",textAlign:"right",fontWeight:500,fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4}}>Lot Row</th>
           <th style={{padding:"6px 8px",textAlign:"right",fontWeight:500,fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4}}>Move Up</th>
-          {showDec && <th style={{padding:"6px 4px",textAlign:"right",fontWeight:500,fontSize:8,color:"var(--color-text-tertiary)"}}>Dec</th>}
           {showTrue && <th style={{padding:"6px 4px",textAlign:"right",fontWeight:500,fontSize:8,color:"var(--color-text-tertiary)"}}>True%</th>}
           <th style={{padding:"6px 8px",textAlign:"right",fontWeight:500,fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4}}>Keep</th>
-          {showDec && <th style={{padding:"6px 4px",textAlign:"right",fontWeight:500,fontSize:8,color:"var(--color-text-tertiary)"}}>Dec</th>}
           {showTrue && <th style={{padding:"6px 4px",textAlign:"right",fontWeight:500,fontSize:8,color:"var(--color-text-tertiary)"}}>True%</th>}
         </tr></thead>
         <tbody>
@@ -9844,11 +9889,9 @@ function LotteryTab({dark, margins}) {
             return <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
               <td style={{padding:"5px 10px",fontWeight:500}}>{tp.teamName}</td>
               <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>#{tp.lotteryRow}</td>
-              <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{tp.moveUp>0?fmtAmer(muAdj):"—"}</td>
-              {showDec && <td style={{padding:"5px 4px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{tp.moveUp>0?fmtDec(muAdj):"—"}</td>}
+              <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{tp.moveUp>0 ? (showDec ? fmtDec(muAdj) : fmtAmer(muAdj)) : "—"}</td>
               {showTrue && <td style={{padding:"5px 4px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:9,color:"var(--color-text-tertiary)"}}>{tp.moveUp>0?(tp.moveUp*100).toFixed(1)+"%":"—"}</td>}
-              <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{fmtAmer(kAdj)}</td>
-              {showDec && <td style={{padding:"5px 4px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{fmtDec(kAdj)}</td>}
+              <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{showDec ? fmtDec(kAdj) : fmtAmer(kAdj)}</td>
               {showTrue && <td style={{padding:"5px 4px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:9,color:"var(--color-text-tertiary)"}}>{tp.keep>0?(tp.keep*100).toFixed(1)+"%":"—"}</td>}
             </tr>;
           })}
