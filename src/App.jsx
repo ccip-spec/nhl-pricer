@@ -2926,7 +2926,7 @@ function AppInner() {
     try{const s=localStorage.getItem("nhl_m");return migrateMatchups(s?JSON.parse(s):null);}
     catch{return defaultRoundedMatchups();}
   });
-  const [advancement,setAdvancement] = useState(()=>{try{const s=localStorage.getItem("nhl_adv");return s?JSON.parse(s):PLAYOFF_TEAMS.reduce((a,t)=>({...a,[t]:{winR1:0.5,winConf:0.25,winCup:0.1}}),{});}catch{return PLAYOFF_TEAMS.reduce((a,t)=>({...a,[t]:{winR1:0.5,winConf:0.25,winCup:0.1}}),{});}});
+  const [advancement,setAdvancement] = useState(()=>{try{const s=localStorage.getItem("nhl_adv");return s?JSON.parse(s):PLAYOFF_TEAMS.reduce((a,t)=>({...a,[t]:{winR1:0.5,winR2:0.25,winConf:0.125,winCup:0.0625}}),{});}catch{return PLAYOFF_TEAMS.reduce((a,t)=>({...a,[t]:{winR1:0.5,winR2:0.25,winConf:0.125,winCup:0.0625}}),{});}});
   const [allSeries,setAllSeries] = useState(()=>{
     try{const s=localStorage.getItem("nhl_s");return migrateSeries(s?JSON.parse(s):null);}
     catch{return defaultRoundedSeries();}
@@ -3574,9 +3574,10 @@ function AppInner() {
       const r1 = (autoR1ByTeam[p.team] != null && !adv.manualR1) ? autoR1ByTeam[p.team] : adv.winR1;
       const conf = ((autoConfByTeamFinal||{})[p.team] != null && !adv.manualConf) ? autoConfByTeamFinal[p.team] : adv.winConf;
       const cup = ((autoCupByTeamFinal||{})[p.team] != null && !adv.manualCup) ? autoCupByTeamFinal[p.team] : adv.winCup;
-      // P(wins R2) = P(makes R3): use autoR2ByTeam if available, else interpolate between r1 and conf.
+      // P(wins R2) = P(makes R3): use autoR2ByTeam if available, else stored manual R2, else interpolate.
       const autoR2 = (autoR2ByTeam||{})[p.team];
-      const r2 = (autoR2 != null && !adv.manualConf) ? autoR2 : Math.sqrt(Math.max(0, r1 * conf));
+      const r2 = (autoR2 != null && !adv.manualR2) ? autoR2
+               : (adv.winR2 != null ? adv.winR2 : Math.sqrt(Math.max(0, r1 * conf)));
       // v107: properly partition expTotal between REALIZED games (already played, fixed)
       //       and FUTURE expected games (driven by advancement probs).
       //       Old formula (v46) was 5.82*(1 + r1 + r2 + conf) which ALWAYS assumed every round
@@ -3796,7 +3797,7 @@ function AppInner() {
           lScope={lScope} setLScope={setLScope} lTopN={lTopN} setLTopN={setLTopN}
           showTrue={showTrue} setShowTrue={setShowTrue} showDec={showDec} dark={dark}
           allSeries={seriesForRound} allSeriesByRound={allSeries} simResultsBySeries={simResultsBySeries}
-          autoR1ByTeam={autoR1ByTeam} autoConfByTeam={autoConfByTeamFinal} autoCupByTeam={autoCupByTeamFinal}
+          autoR1ByTeam={autoR1ByTeam} autoR2ByTeam={autoR2ByTeam} autoConfByTeam={autoConfByTeamFinal} autoCupByTeam={autoCupByTeamFinal}
           currentRound={currentRound} setCurrentRound={setCurrentRound}
           linemates={linemates}/>}
         {tab==="series"&&<SeriesTab allSeries={seriesForRound} setAllSeries={setSeriesForRound}
@@ -4314,7 +4315,7 @@ function LazyNI({value, onCommit, min, max, step=0.01, style={}, tabIndex, showS
   </span>;
 }
 
-function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdvancement,globals,setGlobals,leaderMarket,STATS,lStat,setLStat,lScope,setLScope,lTopN,setLTopN,showTrue,setShowTrue,showDec,dark,allSeries,allSeriesByRound,simResultsBySeries,autoR1ByTeam,autoConfByTeam,autoCupByTeam,currentRound,setCurrentRound,linemates}) {
+function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdvancement,globals,setGlobals,leaderMarket,STATS,lStat,setLStat,lScope,setLScope,lTopN,setLTopN,showTrue,setShowTrue,showDec,dark,allSeries,allSeriesByRound,simResultsBySeries,autoR1ByTeam,autoR2ByTeam,autoConfByTeam,autoCupByTeam,currentRound,setCurrentRound,linemates}) {
   const [showR1,setShowR1]=useState(false);
   const [showAdv,setShowAdv]=useState(false);
   // v39: advancement table entry mode — "prob" (0..1) or "decimal" (decimal odds, 1.01..)
@@ -4470,15 +4471,17 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
           </label>
         </div>
         <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-          <TH cols={["Team", advEntryMode==="prob"?"P(Win R1)":"R1 Decimal", advEntryMode==="prob"?"P(Win Conf)":"Conf Decimal", advEntryMode==="prob"?"P(Win Cup)":"Cup Decimal"]}/>
+          <TH cols={["Team", advEntryMode==="prob"?"P(Win R1)":"R1 Decimal", advEntryMode==="prob"?"P(Win R2)":"R2 Decimal", advEntryMode==="prob"?"P(Win Conf)":"Conf Decimal", advEntryMode==="prob"?"P(Win Cup)":"Cup Decimal"]}/>
           <tbody>{PLAYOFF_TEAMS.map((t,rowIdx)=>{
-            const adv=advancement[t]||{winR1:0.5,winConf:0.25,winCup:0.1,manualR1:false,manualConf:false,manualCup:false};
+            const adv=advancement[t]||{winR1:0.5,winR2:0.25,winConf:0.125,winCup:0.0625,manualR1:false,manualR2:false,manualConf:false,manualCup:false};
             const autoR1 = autoR1ByTeam[t];
+            const autoR2 = (autoR2ByTeam||{})[t];
             const autoConf = (autoConfByTeam||{})[t];
             const autoCup = (autoCupByTeam||{})[t];
             // Manual flags — once user types, that field locks to stored value until unlocked
-            const useManR1 = !!adv.manualR1, useManConf = !!adv.manualConf, useManCup = !!adv.manualCup;
+            const useManR1 = !!adv.manualR1, useManR2 = !!adv.manualR2, useManConf = !!adv.manualConf, useManCup = !!adv.manualCup;
             const r1Prob = (autoR1 != null && !useManR1) ? autoR1 : adv.winR1;
+            const r2Prob = (autoR2 != null && !useManR2) ? autoR2 : (adv.winR2 != null ? adv.winR2 : 0.25);
             const confProb = (autoConf != null && !useManConf) ? autoConf : adv.winConf;
             const cupProb = (autoCup != null && !useManCup) ? autoCup : adv.winCup;
             const probToDec = (p) => p > 0.0001 ? +(1/p).toFixed(2) : 50000;
@@ -4487,8 +4490,9 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
             //      Adding 100 base to avoid conflict with other tabbable elements on the page.
             const N = PLAYOFF_TEAMS.length;
             const tabR1 = 101 + rowIdx;
-            const tabConf = 201 + rowIdx;
-            const tabCup = 301 + rowIdx;
+            const tabR2 = 201 + rowIdx;
+            const tabConf = 301 + rowIdx;
+            const tabCup = 401 + rowIdx;
             const renderCell = (probVal, autoAvail, useMan, fieldKey, manualKey, autoTitle, tabIdx) => {
               const isAuto = autoAvail && !useMan;
               const setProbAndLock = (newProb) => setAdvancement(p=>({
@@ -4526,13 +4530,14 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
               </td>
               {eliminatedTeams.has(t) ? (
                 <>
-                  <td colSpan={3} style={{padding:"3px 6px",textAlign:"right",fontSize:10,color:"var(--color-text-tertiary)",fontStyle:"italic"}}>
+                  <td colSpan={4} style={{padding:"3px 6px",textAlign:"right",fontSize:10,color:"var(--color-text-tertiary)",fontStyle:"italic"}}>
                     Lost series · all advancement = 0
                   </td>
                 </>
               ) : (
                 <>
                   <td style={{padding:"3px 6px",textAlign:"right"}}>{renderCell(r1Prob, autoR1!=null, useManR1, "winR1", "manualR1", "auto from Series Pricer", tabR1)}</td>
+                  <td style={{padding:"3px 6px",textAlign:"right"}}>{renderCell(r2Prob, autoR2!=null, useManR2, "winR2", "manualR2", "auto from R2 sim (Series Pricer)", tabR2)}</td>
                   <td style={{padding:"3px 6px",textAlign:"right"}}>{renderCell(confProb, autoConf!=null, useManConf, "winConf", "manualConf", "chained R1 → R2 → R3 (sim or xG)", tabConf)}</td>
                   <td style={{padding:"3px 6px",textAlign:"right"}}>{renderCell(cupProb, autoCup!=null, useManCup, "winCup", "manualCup", "chained R1 → R2 → R3 → F (sim or xG)", tabCup)}</td>
                 </>
