@@ -9821,7 +9821,7 @@ function LotteryTab({dark, margins}) {
                     <input type="text" inputMode="decimal" defaultValue={v ? v : ""}
                       onBlur={e=>setCell(i, j, e.target.value)}
                       placeholder="—"
-                      style={{width:36,fontSize:10,padding:"2px 3px",textAlign:"right",background:bg,border,borderRadius:2,color,fontFamily:"var(--font-mono)",textDecoration:isTraded?"line-through":"none"}}/>
+                      style={{width:36,fontSize:10,padding:"2px 3px",textAlign:"right",background:bg,border,borderRadius:2,color,fontFamily:"var(--font-mono)"}}/>
                   </td>;
                 })}
                 <td style={{padding:"3px 6px",textAlign:"right",color:sumOff?"#f59e0b":"var(--color-text-tertiary)",fontSize:9}}>{rowSum.toFixed(1)}</td>
@@ -9870,7 +9870,7 @@ function LotteryTab({dark, margins}) {
                   const cellBg = ep.traded ? "rgba(239,68,68,0.10)" : "transparent";
                   const cellColor = ep.traded ? "#fca5a5" : "var(--color-text-primary)";
                   return <td key={j} style={{padding:"3px 4px",textAlign:"center",fontFamily:"var(--font-mono)",fontSize:10,background:cellBg}} title={ep.traded?"Traded — pick lost if it lands here":""}>
-                    <div style={{fontWeight:500,color:cellColor,textDecoration:ep.traded?"line-through":"none"}}>{showDec ? fmtDec(adj) : fmtAmer(adj)}</div>
+                    <div style={{fontWeight:500,color:cellColor}}>{showDec ? fmtDec(adj) : fmtAmer(adj)}</div>
                     {showTrue && <div style={{fontSize:8,color:"var(--color-text-tertiary)"}}>{(ep.p*100).toFixed(1)}%</div>}
                   </td>;
                 })}
