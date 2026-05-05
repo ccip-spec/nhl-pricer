@@ -9576,7 +9576,7 @@ function RolesTab({players,setPlayers,dark}) {
 // So a team in lottery row N has a pre-lottery position of N+2 (worst possible outcome).
 // Movement up means landing at any position 1..N+1; keeping means landing at exactly N+2.
 function LotteryTab({dark, margins}) {
-  const STORAGE_KEY = "nhl_lottery_v4";  // v119: added trades matrix
+  const STORAGE_KEY = "nhl_lottery_v5";  // v122: DET unconditionally traded
   const ROWS = 16;
   const COLS = 16;
   // Default to the matrix the user provided (NHL 2025 lottery odds, %).
@@ -9602,12 +9602,18 @@ function LotteryTab({dark, margins}) {
     ],
     // v119: trades matrix — true means "if pick lands here, the team loses it (e.g. trade-conditional protection)".
     // For TOR: pick is conditionally owed if it falls outside top 5 — so picks #6 and #7 are trade outcomes.
+    // For DET (v122): pick is unconditionally owed to STL — every non-zero cell is traded.
     // Right-click any cell in the matrix to toggle.
     trades: (function(){
       const t = Array.from({length:16}, ()=>Array(16).fill(false));
       // TOR (row 5, i=4): picks 6 and 7 are traded
       t[4][5] = true; // pick #6
       t[4][6] = true; // pick #7
+      // DET (row 15, i=14): unconditionally traded — every possible landing is a "lose pick" outcome
+      t[14][4] = true; // pick #5
+      t[14][6] = true; // pick #7
+      t[14][14] = true; // pick #15
+      t[14][15] = true; // pick #16
       return t;
     })(),
   };
