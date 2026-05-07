@@ -7356,7 +7356,7 @@ function PlayerDetailPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalen
     // v104: effectiveRate respects per-player rate overrides
     const rr_base = effectiveRate(player, stat)*rm*rateDiscount*statRateMultiplier(stat);
     const roundGP = readActualGP(player, currentRound);
-    const remainingGames = remainingGamesForPlayer(p, s, expG, roundGP);
+    const remainingGames = remainingGamesForPlayer(player, s, expG, roundGP);
     const gEq = SCORING_STATS.has(stat) && gameEquivalentsFor
       ? gameEquivalentsFor(player.team, stat)
       : (gameEquivalents!=null && SCORING_STATS.has(stat)) ? gameEquivalents : remainingGames;
