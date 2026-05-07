@@ -1225,6 +1225,7 @@ function parseToiToSeconds(s) {
 function seasonTOIMinPerGame(p) {
   // p.toi is total season icetime in seconds (MoneyPuck) or seconds parsed from "mm:ss" (HR).
   if (!p || !p.gp || p.gp <= 0) return 0;
+  if (!Number.isFinite(p.toi) || p.toi <= 0) return 0;  // v131: handle missing/NaN p.toi
   return (p.toi / 60) / p.gp;
 }
 function playoffTOIStats(p, scope) {
@@ -1276,7 +1277,12 @@ function effectiveRateTOI(p, stat, scope) {
     const v = +p.rateOverrides[pgKey];
     if (Number.isFinite(v) && v >= 0) return v;
   }
-  const seasonMin = (p.toi || 0) / 60;       // total season minutes
+  // v131: if p.toi is missing/invalid, the TOI engine cannot compute anything useful.
+  //       Fall back to legacy per-game shrunk rate so the player still prices.
+  if (!Number.isFinite(p.toi) || p.toi <= 0) {
+    return shrinkRate(p[pgKey] || 0, p.gp || 0, stat, p.lineRole);
+  }
+  const seasonMin = p.toi / 60;
   const seasonStat = seasonStatTotal(p, stat);
   const seasonRatePerMin = seasonMin > 0 ? seasonStat / seasonMin : 0;
   // Playoff per-min rate, round-aware
