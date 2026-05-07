@@ -192,11 +192,54 @@ function normPlayerName(s) {
 // keeps the longer name (more complete spelling), prefers HR team over MoneyPuck team.
 // v50: SCRATCHED role sticks — if ANY duplicate is SCRATCHED, the merged player is SCRATCHED.
 //      Prefer non-empty role over empty, otherwise longer-name record wins.
+// v128: ALSO handle traded-player case where an upload-synthesized record (current team, no season
+//       stats) coexists with a master record (old team, full season stats). Pre-pass: for any
+//       _addedViaImport record, find a sibling master record with the same normalized name and
+//       valid season stats — merge season stats into the synth, then drop the master.
 function dedupePlayers(players) {
   if (!Array.isArray(players)) return players;
-  const byKey = new Map();
   const STAT_FIELDS = ["pGP","pG","pA","pPts","pSOG","pHIT","pBLK","pTK","pGV","pPIM","pTOI"];
+  const SEASON_FIELDS = ["gp","g","a","pts","sog","hit","blk","tk","pim","give","tsa","toi",
+    "g_pg","a_pg","pts_pg","sog_pg","hit_pg","blk_pg","take_pg","pim_pg","give_pg","tsa_pg","toi_pg",
+    "onIceF","onIceA","position","pos"];
+
+  // v128 PASS 0: traded-player reconciliation. For every synth record (gp<=1 + zero season rates +
+  // has pGames), search for a master record with same normalized name and valid season stats on a
+  // DIFFERENT team. If found, merge season stats into the synth and drop the master.
+  const isSynth = p => (p.gp || 0) <= 1 && !((p.g||0) + (p.a||0) + (p.sog||0)) && (p.pGames||[]).length > 0;
+  const isMaster = p => (p.gp || 0) > 4 && (p.toi || 0) > 0;
+  const synthByNormName = new Map();
   for (const p of players) {
+    if (isSynth(p)) {
+      const k = normPlayerName(p.name);
+      if (!synthByNormName.has(k)) synthByNormName.set(k, []);
+      synthByNormName.get(k).push(p);
+    }
+  }
+  const masterToDrop = new Set();
+  if (synthByNormName.size > 0) {
+    for (const m of players) {
+      if (!isMaster(m)) continue;
+      const k = normPlayerName(m.name);
+      const synths = synthByNormName.get(k);
+      if (!synths || !synths.length) continue;
+      // Migrate season stats from m into each synth (across teams)
+      for (const s of synths) {
+        if (s.team === m.team) continue; // same team — handled by normal dedupe
+        for (const f of SEASON_FIELDS) {
+          if (m[f] != null && (s[f] == null || s[f] === 0 || s[f] === "")) s[f] = m[f];
+        }
+        if (m.lineRole && (!s.lineRole || s.lineRole === "MID6")) s.lineRole = m.lineRole;
+        s._migratedFrom = m.team;
+      }
+      masterToDrop.add(m); // drop the master after migration
+    }
+  }
+  const filtered = players.filter(p => !masterToDrop.has(p));
+
+  // PASS 1: standard normName+team merging
+  const byKey = new Map();
+  for (const p of filtered) {
     const key = normPlayerName(p.name) + "|" + (p.team||"");
     const existing = byKey.get(key);
     if (!existing) {
@@ -219,7 +262,8 @@ function dedupePlayers(players) {
       if (!existing.team && p.team) existing.team = p.team;
     }
   }
-  return Array.from(byKey.values());
+  // Recompute rollups for any record whose pGames may have been merged.
+  return Array.from(byKey.values()).map(p => p.pGames ? withRollups(p) : p);
 }
 
 // ─── MATH ─────────────────────────────────────────────────────────────────────
@@ -8250,13 +8294,49 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
       sideUnmatched.forEach(u => {
         const decision = unmatchedDecisions[u.name+"|"+teamAbbr];
         if (decision === "add") {
-          // Synthesize a player record with default rates (zero baseline)
+          // v128: Look up existing master record by normalized name (any team) to inherit season
+          //       stats — handles cases like Stankoven (DAL season → CAR playoffs) where the
+          //       upload doesn't match because team differs. Without this, the synth record has
+          //       g_pg=0, gp=1, p.toi=undefined → all rate-based projections collapse to zero,
+          //       breaking leader markets for these mid-season-traded players.
+          const normU = normPlayerName(u.name);
+          const existingMaster = (players||[]).find(p =>
+            normPlayerName(p.name) === normU && (p.gp || 0) > 1 && (p.toi || 0) > 0
+          );
+          let baseFields;
+          if (existingMaster) {
+            // Inherit season stats but force current team
+            baseFields = {
+              name: existingMaster.name, // use master's clean spelling
+              team: teamAbbr,
+              position: existingMaster.position || "F",
+              gp: existingMaster.gp,
+              g: existingMaster.g||0, a: existingMaster.a||0, pts: existingMaster.pts||0,
+              sog: existingMaster.sog||0, hit: existingMaster.hit||0, blk: existingMaster.blk||0,
+              tk: existingMaster.tk||0, pim: existingMaster.pim||0, give: existingMaster.give||0,
+              tsa: existingMaster.tsa||0,
+              toi: existingMaster.toi||0,
+              g_pg: existingMaster.g_pg||0, a_pg: existingMaster.a_pg||0,
+              sog_pg: existingMaster.sog_pg||0, hit_pg: existingMaster.hit_pg||0,
+              blk_pg: existingMaster.blk_pg||0, take_pg: existingMaster.take_pg||0,
+              pim_pg: existingMaster.pim_pg||0, give_pg: existingMaster.give_pg||0,
+              pts_pg: existingMaster.pts_pg||0, tsa_pg: existingMaster.tsa_pg||0,
+              onIceF: existingMaster.onIceF||0, onIceA: existingMaster.onIceA||0,
+              toi_pg: existingMaster.toi_pg||0,
+              lineRole: existingMaster.lineRole || "MID6",
+              _migratedFrom: existingMaster.team,
+            };
+          } else {
+            baseFields = {
+              name: u.name, team: teamAbbr, position: "F",
+              gp: 1, g_pg: 0, a_pg: 0, sog_pg: 0, hit_pg: 0, blk_pg: 0,
+              take_pg: 0, pim_pg: 0, give_pg: 0,
+              lineRole: "MID6",
+            };
+          }
           const newP = {
-            name: u.name, team: teamAbbr, position: "F",
-            gp: 1, g_pg: 0, a_pg: 0, sog_pg: 0, hit_pg: 0, blk_pg: 0,
-            take_pg: 0, pim_pg: 0, give_pg: 0,
+            ...baseFields,
             pG: 0, pA: 0, pSOG: 0, pHIT: 0, pBLK: 0, pTK: 0, pPIM: 0, pGIVE: 0, pGP: 0,
-            lineRole: "MID6",
             _addedViaImport: true,
             pGames: [{
               round: currentRoundNum, game: gameNum,
@@ -8268,7 +8348,7 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
           const rolled = withRollups(newP);
           playersById.set(rolled.name+"|"+rolled.team, rolled);
           deltaPlayers.push({name:rolled.name, team:rolled.team, round:currentRoundNum, game:gameNum, _added:true});
-          unmatchedAdded.push(rolled.name);
+          unmatchedAdded.push(rolled.name + (existingMaster ? " (migrated from " + existingMaster.team + ")" : ""));
         }
       });
     };
