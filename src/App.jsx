@@ -3378,38 +3378,24 @@ function AppInner() {
     // P(team wins r2 series i | in it) — needs an estimate. Cleanest pre-matchup:
     //   - If user has set up an r2 series (sr.homeAbbr/awayAbbr filled), use the actual sim/closed-form.
     //   - Otherwise, fallback to xG-strength matchup vs each potential r2 opponent.
+    // v126: simpler — for each R2 series with teams set, contribute directly from seriesWinProbs.
+    //       (Was looping bracket.r2pairs which broke when user's R1/R2 mapping didn't match
+    //       the hardcoded [[0,1],[2,3],...] pattern.)
     const out = {};
-    for (let r2Idx = 0; r2Idx < (bracket.r2pairs||[]).length; r2Idx++) {
-      const [r1IdxA, r1IdxB] = bracket.r2pairs[r2Idx];
-      const winnersA = r1Winners[r1IdxA] || {};
-      const winnersB = r1Winners[r1IdxB] || {};
-      const r2Series = (allSeries.r2||[])[r2Idx];
-      const r2WP = r2Series ? seriesWinProbs(r2Series, "r2") : null;
-      // For each candidate team (winner of A): they would face winner of B.
-      for (const [teamA, pA] of Object.entries(winnersA)) {
-        for (const [teamB, pB] of Object.entries(winnersB)) {
-          const pInR2 = pA * pB; // both must win to face each other
-          let pWinThisR2;
-          if (r2WP && r2Series.homeAbbr === teamA) pWinThisR2 = r2WP.hwp;
-          else if (r2WP && r2Series.awayAbbr === teamA) pWinThisR2 = r2WP.awp;
-          else if (r2WP && r2Series.homeAbbr === teamB) pWinThisR2 = r2WP.awp;
-          else if (r2WP && r2Series.awayAbbr === teamB) pWinThisR2 = r2WP.hwp;
-          else {
-            // Fall back to xG-strength matchup
-            const sA = computeTeamStrength(players, teamA);
-            const sB = computeTeamStrength(players, teamB);
-            pWinThisR2 = winProbFromStrength(sA, sB, 0, 1.0);
-            if (pWinThisR2 == null) pWinThisR2 = 0.5;
-          }
-          out[teamA] = (out[teamA] || 0) + pInR2 * pWinThisR2;
-          // And the inverse: team B winning vs team A
-          const pWinForB = 1 - pWinThisR2;
-          out[teamB] = (out[teamB] || 0) + pInR2 * pWinForB;
-        }
-      }
-    }
+    (allSeries.r2||[]).forEach((r2Series) => {
+      if (!r2Series || !r2Series.homeAbbr || !r2Series.awayAbbr) return;
+      const r2WP = seriesWinProbs(r2Series, "r2");
+      if (!r2WP) return;
+      // Weight by P(team won R1) — for teams already in R2, this is 1 if R1 over+won.
+      const homeR1 = autoR1ByTeam[r2Series.homeAbbr];
+      const awayR1 = autoR1ByTeam[r2Series.awayAbbr];
+      const homeWeight = homeR1 != null ? homeR1 : 1.0;
+      const awayWeight = awayR1 != null ? awayR1 : 1.0;
+      out[r2Series.homeAbbr] = (out[r2Series.homeAbbr] || 0) + homeWeight * r2WP.hwp;
+      out[r2Series.awayAbbr] = (out[r2Series.awayAbbr] || 0) + awayWeight * r2WP.awp;
+    });
     return out;
-  }, [allSeries.r1, allSeries.r2, simResultsBySeries, bracket, players]);
+  }, [allSeries.r1, allSeries.r2, simResultsBySeries, autoR1ByTeam]);
 
   // v38: P(team wins Cup) = P(team wins Conf) × P(team wins F | in it).
   // Conf final pairing = bracket.r3pairs / fpair chains. Cleanest approximation:
@@ -3430,29 +3416,25 @@ function AppInner() {
       return { [sr.homeAbbr]: wp.hwp, [sr.awayAbbr]: wp.awp };
     });
     // r2WinnerByR2Series[i] = { team: prob_wins_r2_series_i }
-    const r2WinnerByR2Series = (bracket.r2pairs||[]).map((pair, r2Idx) => {
-      const [a, b] = pair;
-      const wA = r1Winners[a] || {}, wB = r1Winners[b] || {};
-      const r2Series = (allSeries.r2||[])[r2Idx];
-      const r2WP = r2Series ? seriesWinProbs(r2Series, "r2") : null;
-      const dist = {};
-      for (const [tA, pA] of Object.entries(wA)) {
-        for (const [tB, pB] of Object.entries(wB)) {
-          const pBothThere = pA * pB;
-          let pAWins;
-          if (r2WP && r2Series.homeAbbr === tA) pAWins = r2WP.hwp;
-          else if (r2WP && r2Series.awayAbbr === tA) pAWins = r2WP.awp;
-          else {
-            const sA = computeTeamStrength(players, tA);
-            const sB = computeTeamStrength(players, tB);
-            pAWins = winProbFromStrength(sA, sB, 0, 1.0);
-            if (pAWins == null) pAWins = 0.5;
-          }
-          dist[tA] = (dist[tA] || 0) + pBothThere * pAWins;
-          dist[tB] = (dist[tB] || 0) + pBothThere * (1 - pAWins);
-        }
-      }
-      return dist;
+    // v126: simpler R2 distribution — for each R2 series with teams set, directly compute
+    //       P(home wins) and P(away wins). This bypasses the hardcoded bracket.r2pairs mapping
+    //       which was unreliable when user's actual R1 series indexes don't align with [[0,1],[2,3],...].
+    //       For a team that's CURRENTLY in an R2 series, their R2 win prob = the series winner prob.
+    //       (Even if their R1 series wasn't actually played at the bracket-expected index.)
+    const r2WinnerByR2Series = (allSeries.r2||[]).map((r2Series) => {
+      if (!r2Series || !r2Series.homeAbbr || !r2Series.awayAbbr) return {};
+      const wp = seriesWinProbs(r2Series, "r2");
+      if (!wp) return {};
+      // Weight by P(team won R1) — if R1 over and won, weight = 1; if eliminated, weight = 0.
+      // For teams already in an R2 series, R1 status is implicit (they advanced).
+      const homeR1 = autoR1ByTeam[r2Series.homeAbbr];
+      const awayR1 = autoR1ByTeam[r2Series.awayAbbr];
+      const homeWeight = homeR1 != null ? homeR1 : 1.0;
+      const awayWeight = awayR1 != null ? awayR1 : 1.0;
+      return {
+        [r2Series.homeAbbr]: homeWeight * wp.hwp,
+        [r2Series.awayAbbr]: awayWeight * wp.awp,
+      };
     });
     // r3WinnerByR3Series[i] = { team: prob } — conference champ
     const r3WinnerByR3Series = (bracket.r3pairs||[]).map((pair, r3Idx) => {
