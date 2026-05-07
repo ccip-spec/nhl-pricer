@@ -4890,8 +4890,13 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
   const goalieQualityFaced = effG.map((g,i) => {
     const hGoalie = goalieFor(s.awayAbbr, g); // home players face this goalie
     const aGoalie = goalieFor(s.homeAbbr, g); // away players face this goalie
-    const faceByHome = hGoalie ? 1/(hGoalie.quality ?? 1) : 1.0;
-    const faceByAway = aGoalie ? 1/(aGoalie.quality ?? 1) : 1.0;
+    // v129: ?? only catches null/undefined, NOT NaN. If a goalie record has quality=NaN
+    //       (legacy/corrupted data), 1/NaN = NaN propagates everywhere and breaks pricing.
+    //       Use Number.isFinite to enforce a clean numeric fallback.
+    const hQ = hGoalie && Number.isFinite(hGoalie.quality) ? hGoalie.quality : 1;
+    const aQ = aGoalie && Number.isFinite(aGoalie.quality) ? aGoalie.quality : 1;
+    const faceByHome = hGoalie ? 1/hQ : 1.0;
+    const faceByAway = aGoalie ? 1/aQ : 1.0;
     // Mutate the effG entry so closed-form consumers can use it
     g.faceByHome = faceByHome;
     g.faceByAway = faceByAway;
@@ -7585,7 +7590,16 @@ function SeriesLeaderPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalen
   const pool=useMemo(()=>{
     if(!players)return[];
     const teams=new Set([s.homeAbbr,s.awayAbbr].filter(Boolean));
-    let p = players.filter(p=>teams.has(p.team)&&!isOutForSeries(p, s));
+    // v129: filter goalies (STARTER/BACKUP) — they don't belong in skater leader markets.
+    //       roleMultiplier returns 0 for goalie roles, so they'd show λ≈0 in the table; but they
+    //       still pollute the pool, get listed, and split overround weight.
+    let p = players.filter(p=>{
+      if (!teams.has(p.team)) return false;
+      if (isOutForSeries(p, s)) return false;
+      const role = canonicalRole(p.lineRole);
+      if (role === "STARTER" || role === "BACKUP") return false;
+      return true;
+    });
     // v90: apply team filter
     if (teamFilter === "home" && s.homeAbbr) p = p.filter(x => x.team === s.homeAbbr);
     else if (teamFilter === "away" && s.awayAbbr) p = p.filter(x => x.team === s.awayAbbr);
