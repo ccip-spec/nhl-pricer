@@ -3326,24 +3326,17 @@ function AppInner() {
       if (hw >= 4) return { hwp: 1, awp: 0 };
       if (aw >= 4) return { hwp: 0, awp: 1 };
     }
-    // Try sim cache. Check freshness against current effG: if cache key doesn't match the
-    // current games array, the sim is stale and closed-form is more trustworthy.
-    const seriesKey = roundId + "|" + sr.homeAbbr + "|" + sr.awayAbbr;
-    const cached = (simResultsBySeries||{})[seriesKey] || (roundId === "r1" ? (simResultsBySeries||{})[sr.homeAbbr + "|" + sr.awayAbbr] : null);
-    if (cached && cached.result && cached.result.winnerProb && cached.key) {
-      // Freshness: cached.key looks like "${effKeyAtSimTime}|${roundId}|${homeAbbr}|${awayAbbr}".
-      // We can build a current effKey-equivalent for comparison:
-      const currentEffKey = JSON.stringify(sr.games || []) + "|" + seriesKey;
-      // If cached key matches what we'd compute now, sim is current; use it.
-      // (Loose check — the effKey in SeriesTab includes more state, but for routing winner probs
-      // close enough since clinch already handled above.)
-      if (cached.key.includes(JSON.stringify(sr.games || []))) {
-        return { hwp: cached.result.winnerProb.H, awp: cached.result.winnerProb.A };
-      }
-    }
-    // Closed-form fallback (always reflects realized state)
+    // v125: ALWAYS use closed-form (skip sim cache). The freshness check on the cache was unreliable —
+    //       it only compared sr.games shape, not winPct values, so editing per-game winPct in
+    //       Series Pricer wouldn't invalidate the cached sim results. Result: Advancement table
+    //       could show stale probabilities while Series Pricer Winner panel showed correct ones.
+    //       Closed-form is mathematically correct and uses live data, so use it unconditionally.
     if (sr.games && sr.games.length) {
-      const games = sr.games.map(g => ({...g, winPct: g.winPct ?? 0.5}));
+      const games = sr.games.map((g, i) => ({
+        ...g,
+        // Match SeriesTab's effG defaults so closed-form here matches Series Pricer Winner panel
+        winPct: g.winPct ?? (HOME_PATTERN[i+1] ? (sr.games[0].winPct || 0.55) : 1 - (sr.games[0].winPct || 0.55)),
+      }));
       try {
         const outcomes = computeOutcomes(games);
         const hwp = ["4-0","4-1","4-2","4-3"].reduce((a,k)=>a+(outcomes[k]||0), 0);
