@@ -436,7 +436,7 @@ function buildSimInputs(effG, homeAbbr, awayAbbr, players, globals, goalieQualit
     for (const stat of STATS) {
       // v53: role multiplier is stat-aware now (TOP6 +bump for scoring, -penalty for hits)
       const rm = roleMultiplier(p.lineRole, stat);
-      const shrunk = effectiveRate(p, stat);
+      const shrunk = effectiveRate(p, stat, currentRound);
       // v68: NO blend here. Sim drives N+ / O/U / 1+ markets — blend was over-weighting
       // playoff sample for those markets. Series Leader has its own blend at site 2.
       const rr = shrunk * rm * globals.rateDiscount * statRateMultiplier(stat);
@@ -1149,7 +1149,12 @@ function shrinkRate(rawRate, gp, stat, role) {
   // Small sample: shrink toward role-aware prior
   return (gp * (rawRate||0) + SHRINK_K * prior) / (gp + SHRINK_K);
 }
-function effectiveRate(p, stat) {
+function effectiveRate(p, stat, scope) {
+  // v127: TOI engine routing — when enabled in Settings, use per-minute rates × projected TOI.
+  //       Otherwise use legacy per-game rate with role-aware shrinkage.
+  if (typeof window !== "undefined" && window.__TOI_ENGINE_ENABLED__) {
+    return effectiveRateTOI(p, stat, scope);
+  }
   const pgKey = stat==="tk" ? "take_pg" : stat==="give" ? "give_pg" :
                 stat==="pim" ? "pim_pg" : stat==="tsa" ? "tsa_pg" : stat+"_pg";
   if (p && p.rateOverrides && p.rateOverrides[pgKey] != null && p.rateOverrides[pgKey] !== "") {
@@ -1158,6 +1163,91 @@ function effectiveRate(p, stat) {
   }
   // v105: pass role so shrinkage uses role-aware prior (TOP6 → 0.30 g/g, BOT6 → 0.10, etc.)
   return shrinkRate(p ? p[pgKey] : 0, p ? p.gp : 0, stat, p ? p.lineRole : null);
+}
+// v127: TOI-based rate engine. Uses per-minute rates × projected TOI per game instead of
+//       raw per-game rates. This handles role/TOI changes naturally — Foerster moving from
+//       TOP6 to BOT6 shows up as reduced realized playoff TOI, not via a manual role multiplier.
+//
+// Spec (locked w/ user):
+//   - 80/20 weighting (playoff/season) for both per-min rates AND projected TOI when pGP >= 4.
+//   - Season-only when pGP < 4 (insufficient playoff sample).
+//   - Output is a per-GAME rate (rate/min × proj TOI/game), so downstream callers don't change.
+function parseToiToSeconds(s) {
+  if (typeof s === "number") return s;
+  if (!s) return 0;
+  const m = String(s).match(/(\d+):(\d+)/);
+  return m ? parseInt(m[1])*60 + parseInt(m[2]) : 0;
+}
+function seasonTOIMinPerGame(p) {
+  // p.toi is total season icetime in seconds (MoneyPuck) or seconds parsed from "mm:ss" (HR).
+  if (!p || !p.gp || p.gp <= 0) return 0;
+  return (p.toi / 60) / p.gp;
+}
+function playoffTOIStats(p, scope) {
+  // Returns {totalMin, gp} for player's playoff icetime, scope-aware.
+  if (!p || !p.pGames || !Array.isArray(p.pGames)) return {totalMin: 0, gp: 0};
+  const roundNum = scope === "r1" ? 1 : scope === "r2" ? 2 : scope === "conf" ? 3 : scope === "cup" ? 4 : null;
+  let totalSec = 0, gp = 0;
+  for (const e of p.pGames) {
+    if (roundNum != null && e.round !== roundNum) continue;
+    totalSec += parseToiToSeconds(e.toi);
+    gp++;
+  }
+  return {totalMin: totalSec / 60, gp};
+}
+const TOI_BLEND_THRESHOLD_GP = 4;
+const TOI_BLEND_PLAYOFF_W = 0.80;
+function projTOIPerGame(p, scope) {
+  const seasonMin = seasonTOIMinPerGame(p);
+  const {totalMin: poMin, gp: poGP} = playoffTOIStats(p, scope);
+  if (poGP < TOI_BLEND_THRESHOLD_GP) return seasonMin;
+  const poAvg = poMin / poGP;
+  return TOI_BLEND_PLAYOFF_W * poAvg + (1 - TOI_BLEND_PLAYOFF_W) * seasonMin;
+}
+// Per-minute rates derived from season totals.
+// Stat keys map to player record fields.
+function seasonStatTotal(p, stat) {
+  const key = stat === "tk" ? "tk" : stat === "give" ? "give" : stat === "pim" ? "pim" :
+              stat === "tsa" ? "tsa" : stat;  // g, a, sog, hit, blk
+  return p ? (p[key] || 0) : 0;
+}
+function playoffStatTotal(p, stat, scope) {
+  if (!p || !p.pGames) return 0;
+  const roundNum = scope === "r1" ? 1 : scope === "r2" ? 2 : scope === "conf" ? 3 : scope === "cup" ? 4 : null;
+  const fld = stat === "tk" ? "tk" : stat === "give" ? "give" : stat === "pim" ? "pim" : stat;
+  let s = 0;
+  for (const e of p.pGames) {
+    if (roundNum != null && e.round !== roundNum) continue;
+    s += e[fld] || 0;
+  }
+  return s;
+}
+function effectiveRateTOI(p, stat, scope) {
+  // Returns per-game equivalent rate (so downstream lambda math is unchanged).
+  if (!p) return 0;
+  // Manual override stays valid in TOI mode too — user knows best.
+  const pgKey = stat==="tk" ? "take_pg" : stat==="give" ? "give_pg" :
+                stat==="pim" ? "pim_pg" : stat==="tsa" ? "tsa_pg" : stat+"_pg";
+  if (p.rateOverrides && p.rateOverrides[pgKey] != null && p.rateOverrides[pgKey] !== "") {
+    const v = +p.rateOverrides[pgKey];
+    if (Number.isFinite(v) && v >= 0) return v;
+  }
+  const seasonMin = (p.toi || 0) / 60;       // total season minutes
+  const seasonStat = seasonStatTotal(p, stat);
+  const seasonRatePerMin = seasonMin > 0 ? seasonStat / seasonMin : 0;
+  // Playoff per-min rate, round-aware
+  const {totalMin: poMin, gp: poGP} = playoffTOIStats(p, scope);
+  const poStat = playoffStatTotal(p, stat, scope);
+  let ratePerMin;
+  if (poGP >= TOI_BLEND_THRESHOLD_GP && poMin > 0) {
+    const poRatePerMin = poStat / poMin;
+    ratePerMin = TOI_BLEND_PLAYOFF_W * poRatePerMin + (1 - TOI_BLEND_PLAYOFF_W) * seasonRatePerMin;
+  } else {
+    ratePerMin = seasonRatePerMin;
+  }
+  // Projected TOI per game (also blended)
+  const projMin = projTOIPerGame(p, scope);
+  return ratePerMin * projMin;
 }
 // v66: recent-form blending. Blends regular-season rate with realized playoff per-game rate,
 // weighted by playoff sample size.
@@ -2569,7 +2659,7 @@ const DEFAULT_MARGINS = {
   seriesLeader:1.5, leaderR1:1.5, leaderFull:1.5,
   lottery:1.08, lotteryTopN:1.06,
 };
-const DEFAULT_GLOBALS = { overroundR1:1.15, overroundFull:1.15, powerFactor:1.20, rateDiscount:0.95, dispersion:1.2, seriesLeaderPF:1.15 };
+const DEFAULT_GLOBALS = { overroundR1:1.15, overroundFull:1.15, powerFactor:1.20, rateDiscount:0.95, dispersion:1.2, seriesLeaderPF:1.15, toiEngine: false };
 
 // ─── PARSER ───────────────────────────────────────────────────────────────────
 
@@ -2899,6 +2989,10 @@ function AppInner() {
   const [dark,setDark] = useState(true);
   const [tab,setTab] = useState("leaders");
   const [globals,setGlobals] = useState(()=>{try{const s=localStorage.getItem("nhl_globals");return s?{...DEFAULT_GLOBALS,...JSON.parse(s)}:DEFAULT_GLOBALS;}catch{return DEFAULT_GLOBALS;}});
+  // v127: sync TOI engine flag to window for effectiveRate to read (free-function context).
+  useEffect(()=>{
+    if (typeof window !== "undefined") window.__TOI_ENGINE_ENABLED__ = !!globals.toiEngine;
+  }, [globals.toiEngine]);
   const [margins,setMargins] = useState(()=>{
     try{
       const s=localStorage.getItem("nhl_margins");
@@ -3509,7 +3603,7 @@ function AppInner() {
     const pgKey=stat==="tk"?"take_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
     // v13: shrink rate with Bayesian prior for <20 GP (shrinkRate handles threshold internally)
     // v104: effectiveRate respects per-player rate overrides for cases like Martone
-    const shrunk = effectiveRate(p, stat);
+    const shrunk = effectiveRate(p, stat, scope);
     // v66: blend with playoff per-game rate (scoring stats only)
     // v99: scope-aware blend — was using cumulative pG/pGP, now filters by round
     const blended = blendedRate(p, stat, shrunk, scope);
@@ -6070,7 +6164,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             // Players who already scored an OT goal in this series are settled YES (sent to bottom, ✓).
             // Everyone else: priced as P(any OT goal among remaining games) × team OT-share × goal share.
             const eligibleRoles = new Set(["TOP6","MID6","BOT6","ACTIVE","ON_ROSTER","D1","D2","D3"]);
-            const shrunkGoalRate = (p) => effectiveRate(p, "g"); // v104: respects per-player rate overrides
+            const shrunkGoalRate = (p) => effectiveRate(p, "g", currentRound); // v104: respects per-player rate overrides; v127: TOI-aware via currentRound
             const teamGoalRate = (team) => {
               const pool = (players||[]).filter(p => p.team === team && eligibleRoles.has(p.lineRole));
               return pool.reduce((s,p) => s + shrunkGoalRate(p), 0) || 1;
@@ -6159,7 +6253,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             // (including "No OT in series") is settled NO.
             // If no OT yet: standard market with "No OT scored" option = P(zero future OT).
             const eligibleRoles = new Set(["TOP6","MID6","BOT6","ACTIVE","ON_ROSTER","D1","D2","D3"]);
-            const shrunkGoalRate = (p) => effectiveRate(p, "g"); // v104: respects per-player rate overrides
+            const shrunkGoalRate = (p) => effectiveRate(p, "g", currentRound); // v104: respects per-player rate overrides; v127: TOI-aware via currentRound
             const teamGoalRate = (team) => {
               const pool = (players||[]).filter(p => p.team === team && eligibleRoles.has(p.lineRole));
               return pool.reduce((s,p) => s + shrunkGoalRate(p), 0) || 1;
@@ -6328,7 +6422,7 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             const rows = pool.map(p => {
               const role = effectiveRole(p, s);
               const rm = roleMultiplier(role, "g");
-              const goalRateShrunk = effectiveRate(p, "g"); // v104: respects per-player rate overrides
+              const goalRateShrunk = effectiveRate(p, "g", currentRound); // v104: respects per-player rate overrides
               const perGameLam = goalRateShrunk * rm * rateDiscount * statRateMultiplier("g");
               const roundGP = readActualGP(p, currentRound);
               const remainingGames = remainingGamesForPlayer(p, s, expG, roundGP);
@@ -6620,7 +6714,7 @@ function PropsPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,p
       const pgKey=stat==="tk"?"take_pg":stat==="pim"?"pim_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
       // v13: shrink rate for <20 GP; scratched already filtered out above
       // v104: effectiveRate respects per-player rate overrides
-      const shrunk=effectiveRate(p,stat);
+      const shrunk=effectiveRate(p,stat,currentRound);
       // v68: NO blend in Props. Goal is market-consensus matching; v67 blend caused
       // 200+ cent gaps on N+ markets (Kapanen 4+ -676 vs FD -115).
       // v21: stat-category rate adjustment (physical stats go up, scoring stays at baseline discount)
@@ -6876,7 +6970,7 @@ function PropCombosPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalents
       const rm = roleMultiplier(p.lineRole, stat);
       if (rm === 0) return {p, stat, futureLam:0.0001, actual:0, r, lam:0.0001};
       const pgKey = stat==="tk"?"take_pg":stat==="pim"?"pim_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
-      const shrunk = effectiveRate(p, stat); // v104: respects per-player rate overrides
+      const shrunk = effectiveRate(p, stat, currentRound); // v104: respects per-player rate overrides
       const rm_rate_disc = shrunk*rm*rateDiscount*statRateMultiplier(stat);
       const roundGP = readActualGP(p, currentRound);
       const remainingGames = remainingGamesForPlayer(p, s, expG, roundGP);
@@ -7329,7 +7423,7 @@ function PlayerDetailPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalen
     const pgKey = stat==="tk"?"take_pg":stat==="pim"?"pim_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
     // v68: NO blend in Player Detail (alt-line table for N+ markets). Same reasoning as Props.
     // v104: effectiveRate respects per-player rate overrides
-    const rr_base = effectiveRate(player, stat)*rm*rateDiscount*statRateMultiplier(stat);
+    const rr_base = effectiveRate(player, stat, currentRound)*rm*rateDiscount*statRateMultiplier(stat);
     const roundGP = readActualGP(player, currentRound);
     const remainingGames = remainingGamesForPlayer(player, s, expG, roundGP);
     const gEq = SCORING_STATS.has(stat) && gameEquivalentsFor
@@ -7466,7 +7560,7 @@ function SeriesLeaderPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalen
     const entries=pool.map(p=>{
       const rm=roleMultiplier(p.lineRole, stat);
       const pgKey=stat==="tk"?"take_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat==="pim"?"pim_pg":stat+"_pg";
-      const rr_base=effectiveRate(p,stat)*rm*rateDiscount*statRateMultiplier(stat); // v104: respects per-player rate overrides
+      const rr_base=effectiveRate(p,stat,currentRound)*rm*rateDiscount*statRateMultiplier(stat); // v104: respects per-player rate overrides
       const roundGP = readActualGP(p, currentRound);
       const remainingGames = remainingGamesForPlayer(p, s, expG, roundGP);
       const gEq = SCORING_STATS.has(stat) && gameEquivalentsFor
@@ -10248,6 +10342,12 @@ function SettingsTab({globals,setGlobals,margins,setMargins,showTrue,setShowTrue
           <div style={{display:"flex",flexDirection:"column",gap:8}}>
             <Toggle label="Show true probabilities" checked={showTrue} onChange={setShowTrue}/>
             <Toggle label="Show decimal odds" checked={showDec} onChange={setShowDec}/>
+          </div>
+        </div>
+        <div style={{marginTop:14,paddingTop:12,borderTop:"0.5px solid var(--color-border-tertiary)"}}>
+          <SH title="Pricing Engine" sub="EXPERIMENTAL — uses per-minute rates × projected TOI instead of role-based per-game rates. Affects all leader markets, props, and series pricing. 80/20 weighting (playoff/season) for both rates and TOI when player has 4+ playoff games."/>
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            <Toggle label="Use TOI-based rate engine" checked={!!globals.toiEngine} onChange={v=>setGlobals(g=>({...g,toiEngine:v}))}/>
           </div>
         </div>
       </Card>
