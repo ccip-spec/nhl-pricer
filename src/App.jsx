@@ -1194,11 +1194,10 @@ function shrinkRate(rawRate, gp, stat, role) {
   return (gp * (rawRate||0) + SHRINK_K * prior) / (gp + SHRINK_K);
 }
 function effectiveRate(p, stat, scope) {
-  // v127: TOI engine routing — when enabled in Settings, use per-minute rates × projected TOI.
-  //       Otherwise use legacy per-game rate with role-aware shrinkage.
-  if (typeof window !== "undefined" && window.__TOI_ENGINE_ENABLED__) {
-    return effectiveRateTOI(p, stat, scope);
-  }
+  // v132 REVERT: TOI engine disabled. The window flag check + effectiveRateTOI path introduced
+  //              cascading NaN bugs (missing p.toi, NaN goalie quality, stale unified sim cache)
+  //              that broke leader markets even with toggle off. Restoring original behavior.
+  //              The third arg `scope` is accepted but unused — kept so callers don't break.
   const pgKey = stat==="tk" ? "take_pg" : stat==="give" ? "give_pg" :
                 stat==="pim" ? "pim_pg" : stat==="tsa" ? "tsa_pg" : stat+"_pg";
   if (p && p.rateOverrides && p.rateOverrides[pgKey] != null && p.rateOverrides[pgKey] !== "") {
@@ -7624,30 +7623,15 @@ function SeriesLeaderPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalen
     const entries=pool.map(p=>{
       const rm=roleMultiplier(p.lineRole, stat);
       const pgKey=stat==="tk"?"take_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat==="pim"?"pim_pg":stat+"_pg";
-      const eff = effectiveRate(p,stat,currentRound);
-      const rr_base=eff*rm*rateDiscount*statRateMultiplier(stat);
+      const rr_base=effectiveRate(p,stat,currentRound)*rm*rateDiscount*statRateMultiplier(stat); // v104: respects per-player rate overrides
       const roundGP = readActualGP(p, currentRound);
       const remainingGames = remainingGamesForPlayer(p, s, expG, roundGP);
       const gEq = SCORING_STATS.has(stat) && gameEquivalentsFor
         ? gameEquivalentsFor(p.team, stat)
         : (gameEquivalents!=null && SCORING_STATS.has(stat)) ? gameEquivalents : remainingGames;
       const actual = readActual(p, stat, currentRound);
-      let futureLam = Math.max(0.0001, rr_base*gEq);
-      // v130: defensive — if anything upstream produced NaN, log diagnostic and fall back to prior-based estimate.
-      if (!Number.isFinite(futureLam) || !Number.isFinite(actual)) {
-        if (typeof window !== "undefined" && !window.__NAN_LOGGED__) {
-          window.__NAN_LOGGED__ = true;
-          // eslint-disable-next-line no-console
-          console.warn("[SeriesLeader NaN]", p.name, p.team, p.lineRole, "stat=",stat,
-            "eff=",eff, "rm=",rm, "rd=",rateDiscount, "stMult=",statRateMultiplier(stat),
-            "gEq=",gEq, "actual=",actual, "p.toi=",p.toi, "p.gp=",p.gp, "p.pGames=",(p.pGames||[]).length);
-        }
-        // Salvage with role-aware prior so the row still prices reasonably.
-        const fallbackRate = priorForStat(stat, p.lineRole) * rm * rateDiscount * statRateMultiplier(stat);
-        futureLam = Math.max(0.0001, fallbackRate * (Number.isFinite(remainingGames) ? remainingGames : 5));
-      }
-      const safeActual = Number.isFinite(actual) ? actual : 0;
-      return {actual: safeActual, futureLam, lam: safeActual+futureLam};
+      const futureLam = Math.max(0.0001, rr_base*gEq);
+      return {actual, futureLam, lam: actual+futureLam};
     });
 
     let raw;
@@ -10457,12 +10441,6 @@ function SettingsTab({globals,setGlobals,margins,setMargins,showTrue,setShowTrue
           <div style={{display:"flex",flexDirection:"column",gap:8}}>
             <Toggle label="Show true probabilities" checked={showTrue} onChange={setShowTrue}/>
             <Toggle label="Show decimal odds" checked={showDec} onChange={setShowDec}/>
-          </div>
-        </div>
-        <div style={{marginTop:14,paddingTop:12,borderTop:"0.5px solid var(--color-border-tertiary)"}}>
-          <SH title="Pricing Engine" sub="EXPERIMENTAL — uses per-minute rates × projected TOI instead of role-based per-game rates. Affects all leader markets, props, and series pricing. 80/20 weighting (playoff/season) for both rates and TOI when player has 4+ playoff games."/>
-          <div style={{display:"flex",flexDirection:"column",gap:8}}>
-            <Toggle label="Use TOI-based rate engine" checked={!!globals.toiEngine} onChange={v=>setGlobals(g=>({...g,toiEngine:v}))}/>
           </div>
         </div>
       </Card>
