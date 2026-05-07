@@ -7618,15 +7618,30 @@ function SeriesLeaderPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalen
     const entries=pool.map(p=>{
       const rm=roleMultiplier(p.lineRole, stat);
       const pgKey=stat==="tk"?"take_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat==="pim"?"pim_pg":stat+"_pg";
-      const rr_base=effectiveRate(p,stat,currentRound)*rm*rateDiscount*statRateMultiplier(stat); // v104: respects per-player rate overrides
+      const eff = effectiveRate(p,stat,currentRound);
+      const rr_base=eff*rm*rateDiscount*statRateMultiplier(stat);
       const roundGP = readActualGP(p, currentRound);
       const remainingGames = remainingGamesForPlayer(p, s, expG, roundGP);
       const gEq = SCORING_STATS.has(stat) && gameEquivalentsFor
         ? gameEquivalentsFor(p.team, stat)
         : (gameEquivalents!=null && SCORING_STATS.has(stat)) ? gameEquivalents : remainingGames;
       const actual = readActual(p, stat, currentRound);
-      const futureLam = Math.max(0.0001, rr_base*gEq);
-      return {actual, futureLam, lam: actual+futureLam};
+      let futureLam = Math.max(0.0001, rr_base*gEq);
+      // v130: defensive — if anything upstream produced NaN, log diagnostic and fall back to prior-based estimate.
+      if (!Number.isFinite(futureLam) || !Number.isFinite(actual)) {
+        if (typeof window !== "undefined" && !window.__NAN_LOGGED__) {
+          window.__NAN_LOGGED__ = true;
+          // eslint-disable-next-line no-console
+          console.warn("[SeriesLeader NaN]", p.name, p.team, p.lineRole, "stat=",stat,
+            "eff=",eff, "rm=",rm, "rd=",rateDiscount, "stMult=",statRateMultiplier(stat),
+            "gEq=",gEq, "actual=",actual, "p.toi=",p.toi, "p.gp=",p.gp, "p.pGames=",(p.pGames||[]).length);
+        }
+        // Salvage with role-aware prior so the row still prices reasonably.
+        const fallbackRate = priorForStat(stat, p.lineRole) * rm * rateDiscount * statRateMultiplier(stat);
+        futureLam = Math.max(0.0001, fallbackRate * (Number.isFinite(remainingGames) ? remainingGames : 5));
+      }
+      const safeActual = Number.isFinite(actual) ? actual : 0;
+      return {actual: safeActual, futureLam, lam: safeActual+futureLam};
     });
 
     let raw;
