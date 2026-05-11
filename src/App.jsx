@@ -901,7 +901,8 @@ function readActual(p, stat, roundFilter) {
   // which makes "Now" columns wrong in per-series and R1-scope leader markets once R2 starts.
   if (roundFilter && p.pGames && roundFilter !== "full") {
     const roundNum = roundFilter === "r1" ? 1 : roundFilter === "r2" ? 2 :
-                     roundFilter === "conf" ? 3 : roundFilter === "cup" ? 4 : null;
+                     (roundFilter === "r3" || roundFilter === "conf") ? 3 :
+                     (roundFilter === "f"  || roundFilter === "cup")  ? 4 : null;
     if (roundNum != null) {
       let total = 0;
       for (const e of p.pGames) {
@@ -940,7 +941,8 @@ function readActualGP(p, roundFilter) {
   if (!p) return 0;
   if (!roundFilter || roundFilter === "full" || !p.pGames) return p.pGP || 0;
   const roundNum = roundFilter === "r1" ? 1 : roundFilter === "r2" ? 2 :
-                   roundFilter === "conf" ? 3 : roundFilter === "cup" ? 4 : null;
+                   (roundFilter === "r3" || roundFilter === "conf") ? 3 :
+                   (roundFilter === "f"  || roundFilter === "cup")  ? 4 : null;
   if (roundNum == null) return p.pGP || 0;
   let gp = 0;
   for (const e of p.pGames) if (e.round === roundNum) gp++;
@@ -1230,7 +1232,9 @@ function seasonTOIMinPerGame(p) {
 function playoffTOIStats(p, scope) {
   // Returns {totalMin, gp} for player's playoff icetime, scope-aware.
   if (!p || !p.pGames || !Array.isArray(p.pGames)) return {totalMin: 0, gp: 0};
-  const roundNum = scope === "r1" ? 1 : scope === "r2" ? 2 : scope === "conf" ? 3 : scope === "cup" ? 4 : null;
+  const roundNum = scope === "r1" ? 1 : scope === "r2" ? 2 :
+                   (scope === "r3" || scope === "conf") ? 3 :
+                   (scope === "f"  || scope === "cup")  ? 4 : null;
   let totalSec = 0, gp = 0;
   for (const e of p.pGames) {
     if (roundNum != null && e.round !== roundNum) continue;
@@ -1257,7 +1261,9 @@ function seasonStatTotal(p, stat) {
 }
 function playoffStatTotal(p, stat, scope) {
   if (!p || !p.pGames) return 0;
-  const roundNum = scope === "r1" ? 1 : scope === "r2" ? 2 : scope === "conf" ? 3 : scope === "cup" ? 4 : null;
+  const roundNum = scope === "r1" ? 1 : scope === "r2" ? 2 :
+                   (scope === "r3" || scope === "conf") ? 3 :
+                   (scope === "f"  || scope === "cup")  ? 4 : null;
   const fld = stat === "tk" ? "tk" : stat === "give" ? "give" : stat === "pim" ? "pim" : stat;
   let s = 0;
   for (const e of p.pGames) {
@@ -3414,6 +3420,27 @@ function AppInner() {
     return m;
   },[matchups.r2, allSeries.r2]);
 
+  // v134: R3 (Conference Final) expected games per team.
+  const teamExpGR3 = useMemo(()=>{
+    const m={};
+    for(const x of (matchups.r3||[])){if(x.homeAbbr)m[x.homeAbbr]=(m[x.homeAbbr]||0)+x.expGames;if(x.awayAbbr)m[x.awayAbbr]=(m[x.awayAbbr]||0)+x.expGames;}
+    for (const sr of (allSeries.r3 || [])) {
+      if (!sr || !sr.homeAbbr || !sr.awayAbbr) continue;
+      if (m[sr.homeAbbr] != null && m[sr.awayAbbr] != null) continue;
+      const wp = (sr.games && sr.games[0] && sr.games[0].winPct) || 0.55;
+      const hw = wp, aw = 1 - wp;
+      const p4 = Math.pow(hw,4) + Math.pow(aw,4);
+      const p5 = 4 * (Math.pow(hw,4)*aw + Math.pow(aw,4)*hw);
+      const p6 = 10 * (Math.pow(hw,4)*aw*aw + Math.pow(aw,4)*hw*hw);
+      const p7 = 20 * (Math.pow(hw,4)*aw*aw*aw + Math.pow(aw,4)*hw*hw*hw);
+      const tot = p4+p5+p6+p7;
+      const expG = tot > 0 ? (4*p4+5*p5+6*p6+7*p7)/tot : 5.82;
+      if (m[sr.homeAbbr] == null) m[sr.homeAbbr] = expG;
+      if (m[sr.awayAbbr] == null) m[sr.awayAbbr] = expG;
+    }
+    return m;
+  },[matchups.r3, allSeries.r3]);
+
   // v73: detect teams whose R1 series is decided. Used to zero out future games for
   // eliminated players in leader markets (so a guy whose series ended 4-1 doesn't keep
   // accumulating expected goals as if there were ~3.27 more games to play).
@@ -3452,6 +3479,24 @@ function AppInner() {
     }
     return map;
   }, [allSeries.r2]);
+
+  // v134: R3 (Conference Final) status — same shape as R1/R2.
+  const teamR3Status = useMemo(()=>{
+    const map = {};
+    for (const s of (allSeries.r3 || [])) {
+      if (!s || !s.games || !s.homeAbbr || !s.awayAbbr) continue;
+      let hw=0, aw=0;
+      for (const g of s.games) {
+        if (g.result === "home") hw++;
+        else if (g.result === "away") aw++;
+      }
+      const played = hw + aw;
+      const over = (hw >= 4 || aw >= 4);
+      map[s.homeAbbr] = { over, gamesPlayed: played, won: hw >= 4 };
+      map[s.awayAbbr] = { over, gamesPlayed: played, won: aw >= 4 };
+    }
+    return map;
+  }, [allSeries.r3]);
 
   // v38: helper to compute one series' (hwp, awp) from sim cache or closed-form.
   // Round-aware: sim cache key now includes round prefix.
@@ -3579,53 +3624,44 @@ function AppInner() {
         [r2Series.awayAbbr]: awayWeight * wp.awp,
       };
     });
-    // r3WinnerByR3Series[i] = { team: prob } — conference champ
-    const r3WinnerByR3Series = (bracket.r3pairs||[]).map((pair, r3Idx) => {
-      const [a, b] = pair;
-      const wA = r2WinnerByR2Series[a] || {}, wB = r2WinnerByR2Series[b] || {};
-      const r3Series = (allSeries.r3||[])[r3Idx];
-      const r3WP = r3Series ? seriesWinProbs(r3Series, "r3") : null;
-      const dist = {};
-      for (const [tA, pA] of Object.entries(wA)) {
-        for (const [tB, pB] of Object.entries(wB)) {
-          const pBothThere = pA * pB;
-          let pAWins;
-          if (r3WP && r3Series.homeAbbr === tA) pAWins = r3WP.hwp;
-          else if (r3WP && r3Series.awayAbbr === tA) pAWins = r3WP.awp;
-          else {
-            const sA = computeTeamStrength(players, tA);
-            const sB = computeTeamStrength(players, tB);
-            pAWins = winProbFromStrength(sA, sB, 0, 1.0);
-            if (pAWins == null) pAWins = 0.5;
-          }
-          dist[tA] = (dist[tA] || 0) + pBothThere * pAWins;
-          dist[tB] = (dist[tB] || 0) + pBothThere * (1 - pAWins);
-        }
-      }
-      return dist;
+    // v135: r3WinnerByR3Series — derived directly from each R3 series setup, NOT bracket.r3pairs.
+    //       Same logic as the v126 fix for R2: a team that's CURRENTLY in an R3 series gets their
+    //       R3 win prob from seriesWinProbs(r3Series), weighted by P(they won R2). For teams already
+    //       in R3, the R2 weight is implicit (they advanced), but autoConfByTeam[t] still gives the
+    //       correct chained probability for upstream uncertainty.
+    const r3WinnerByR3Series = (allSeries.r3||[]).map((r3Series) => {
+      if (!r3Series || !r3Series.homeAbbr || !r3Series.awayAbbr) return {};
+      const wp = seriesWinProbs(r3Series, "r3");
+      if (!wp) return {};
+      // Weight by P(team won R2) — combine R1 win × R2 win probabilities.
+      const homeR2 = (autoConfByTeam||{})[r3Series.homeAbbr];
+      const awayR2 = (autoConfByTeam||{})[r3Series.awayAbbr];
+      const homeWeight = homeR2 != null ? homeR2 : 1.0;
+      const awayWeight = awayR2 != null ? awayR2 : 1.0;
+      return {
+        [r3Series.homeAbbr]: homeWeight * wp.hwp,
+        [r3Series.awayAbbr]: awayWeight * wp.awp,
+      };
     });
-    // Final (Cup): bracket.fpair = [r3IdxA, r3IdxB]
+    // v135: Final (Cup) — derived directly from F series setup, NOT bracket.fpair.
+    //       Same fix pattern as v126/v135 R2/R3.
     const cupDist = {};
-    if (bracket.fpair && bracket.fpair.length === 2) {
-      const [a, b] = bracket.fpair;
-      const wA = r3WinnerByR3Series[a] || {}, wB = r3WinnerByR3Series[b] || {};
-      const fSeries = (allSeries.f||[])[0];
-      const fWP = fSeries ? seriesWinProbs(fSeries, "f") : null;
-      for (const [tA, pA] of Object.entries(wA)) {
-        for (const [tB, pB] of Object.entries(wB)) {
-          const pBothThere = pA * pB;
-          let pAWins;
-          if (fWP && fSeries.homeAbbr === tA) pAWins = fWP.hwp;
-          else if (fWP && fSeries.awayAbbr === tA) pAWins = fWP.awp;
-          else {
-            const sA = computeTeamStrength(players, tA);
-            const sB = computeTeamStrength(players, tB);
-            pAWins = winProbFromStrength(sA, sB, 0, 1.0);
-            if (pAWins == null) pAWins = 0.5;
-          }
-          cupDist[tA] = (cupDist[tA] || 0) + pBothThere * pAWins;
-          cupDist[tB] = (cupDist[tB] || 0) + pBothThere * (1 - pAWins);
+    const fSeries = (allSeries.f||[])[0];
+    if (fSeries && fSeries.homeAbbr && fSeries.awayAbbr) {
+      const fWP = seriesWinProbs(fSeries, "f");
+      if (fWP) {
+        // confDist is built below; for the Final chain we need P(team wins Conference) per team.
+        // We compute confDist next (line ~3678), so re-derive it inline here for the F calc to avoid order issues.
+        const tmpConfDist = {};
+        for (const dist of r3WinnerByR3Series) {
+          for (const [t, p] of Object.entries(dist)) tmpConfDist[t] = (tmpConfDist[t] || 0) + p;
         }
+        const homeConf = tmpConfDist[fSeries.homeAbbr];
+        const awayConf = tmpConfDist[fSeries.awayAbbr];
+        const homeWeight = homeConf != null ? homeConf : 1.0;
+        const awayWeight = awayConf != null ? awayConf : 1.0;
+        cupDist[fSeries.homeAbbr] = homeWeight * fWP.hwp;
+        cupDist[fSeries.awayAbbr] = awayWeight * fWP.awp;
       }
     }
     // Conference winners = sum over r3 series (a team appears in only one)
@@ -3686,6 +3722,18 @@ function AppInner() {
       }
       actualGP = readActualGP(p, "r2");
     }
+    else if(scope==="r3"){
+      // v134: R3 (Conference Final) scope — same pattern as R1/R2.
+      const r3status = teamR3Status[p.team];
+      if (r3status && r3status.over) {
+        expTotal = r3status.gamesPlayed;
+      } else if (teamExpGR3[p.team] != null) {
+        expTotal = teamExpGR3[p.team];
+      } else {
+        expTotal = readActualGP(p, "r3");
+      }
+      actualGP = readActualGP(p, "r3");
+    }
     else{
       const adv=advancement[p.team]||{winR1:0.5,winConf:0.25,winCup:0.1,manualR1:false,manualConf:false,manualCup:false};
       // v40: respect per-field manual override flag — if set, use stored value; else use auto.
@@ -3712,13 +3760,23 @@ function AppInner() {
         // R2 contribution: if R2 over and won, use r2.gamesPlayed + project R3/F. Else project full R2.
         const r1G = r1status.gamesPlayed;
         if (r2status && r2status.over && r2status.won) {
-          // In R3 (or beyond). R1+R2 realized; R3 contributes 5.82 (in it) × P(in R3 | won R2)=1, R3 win prob = conf, F win prob = cup.
+          // R2 done & won → in R3 or beyond. Need to check R3 status too.
           const r2G = r2status.gamesPlayed;
-          // From here: in R3 with prob 1, win R3 with prob conf, win F with prob cup.
-          // expTotal = r1G + r2G + 5.82 (R3 played) + 5.82 × conf (F if win R3)
-          expTotal = r1G + r2G + 5.82 * (1 + conf);
+          const r3status = teamR3Status[p.team];
+          if (r3status && r3status.over && !r3status.won) {
+            // v135: Eliminated in R3 — total = R1 + R2 + R3 (all realized, no future).
+            expTotal = r1G + r2G + r3status.gamesPlayed;
+          } else if (r3status && r3status.over && r3status.won) {
+            // v135: R3 done & won → in Final. R1+R2+R3 realized; Final contributes 5.82 (in it).
+            expTotal = r1G + r2G + r3status.gamesPlayed + 5.82;
+          } else {
+            // R3 in progress (or not yet started). R3 contributes 5.82 (they're in it).
+            // F contributes 5.82 × conf (P(win R3 → advance to Final)).
+            expTotal = r1G + r2G + 5.82 * (1 + conf);
+          }
         } else {
-          // In R2. R2 contributes 5.82 (they're in it). R3 contributes 5.82 × r2 (P(advance)). F contributes 5.82 × conf.
+          // In R2 (R2 not yet over). R2 contributes 5.82 (they're in it). R3 contributes 5.82 × r2.
+          // F contributes 5.82 × conf.
           expTotal = r1G + 5.82 * (1 + r2 + conf);
         }
       } else {
@@ -3729,7 +3787,7 @@ function AppInner() {
       actualGP=p.pGP||0;
     }
     // v76/77: actual stat for R1 scope is R1-only; R2 is R2-only; full scope is cumulative.
-    const actual = readActual(p, stat, scope==="r1" ? "r1" : scope==="r2" ? "r2" : "full");
+    const actual = readActual(p, stat, scope==="r1" ? "r1" : scope==="r2" ? "r2" : scope==="r3" ? "r3" : "full");
     // v111: participation-rate weighted future games.
     //       Old code: `futureLam = rr * (expTotal - actualGP)` assumed every healthy/active player
     //       plays every remaining game in the playoff. That dramatically inflates lambdas for
@@ -3756,7 +3814,7 @@ function AppInner() {
     const futureLam = Math.max(0.0001, rr * playerFutureGames);
     const lam = Math.max(0.0001, actual + futureLam);
     return {actual, futureLam, lam};
-  },[globals.rateDiscount,teamExpGR1,teamExpGR2,teamR1Status,teamR2Status,advancement,autoR1ByTeam,autoConfByTeamFinal,autoCupByTeamFinal,autoR2ByTeam]);
+  },[globals.rateDiscount,teamExpGR1,teamExpGR2,teamExpGR3,teamR1Status,teamR2Status,teamR3Status,advancement,autoR1ByTeam,autoConfByTeamFinal,autoCupByTeamFinal,autoR2ByTeam]);
 
   // v24 Phase E Pt3: Per-matchup series sims. Cached by matchups + globals + players.
   // Stat-independent — running all 9 stats per sim gives us PMFs for every leader market.
@@ -3834,7 +3892,7 @@ function AppInner() {
     if (tab !== "leaders" && tab !== "compare") return [];
     // v24 Phase E Pt3: prefer unified R1 market when in R1 scope and it's computable
     if (lScope === "r1" && r1LeaderMarket) return r1LeaderMarket;
-    const or=lScope==="r1"?globals.overroundR1:lScope==="r2"?globals.overroundR1:globals.overroundFull;
+    const or=lScope==="r1"?globals.overroundR1:lScope==="r2"?globals.overroundR1:lScope==="r3"?globals.overroundR1:globals.overroundFull;
     const pf=globals.powerFactor;
     const r = globals.dispersion;
     let pool=players.filter(p=>roleMultiplier(p.lineRole)>0);
@@ -3847,6 +3905,19 @@ function AppInner() {
         if (m.awayAbbr) active.add(m.awayAbbr);
       }
       for (const sr of (allSeries.r2||[])) {
+        if (sr.homeAbbr) active.add(sr.homeAbbr);
+        if (sr.awayAbbr) active.add(sr.awayAbbr);
+      }
+      if (active.size>0) pool = pool.filter(p=>active.has(p.team));
+    }
+    // v134: R3 (Conference Final) scope — same pattern as R2.
+    if(lScope==="r3"){
+      const active = new Set();
+      for (const m of (matchups.r3||[])) {
+        if (m.homeAbbr) active.add(m.homeAbbr);
+        if (m.awayAbbr) active.add(m.awayAbbr);
+      }
+      for (const sr of (allSeries.r3||[])) {
         if (sr.homeAbbr) active.add(sr.homeAbbr);
         if (sr.awayAbbr) active.add(sr.awayAbbr);
       }
@@ -4503,7 +4574,7 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
         ))}
       </div>
       <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",marginBottom:14}}>
-        <Seg options={[{id:"r1",label:"Round 1"},{id:"r2",label:"Round 2"},{id:"full",label:"Full Playoff"}]} value={lScope} onChange={setLScope}/>
+        <Seg options={[{id:"r1",label:"Round 1"},{id:"r2",label:"Round 2"},{id:"r3",label:"Round 3"},{id:"full",label:"Full Playoff"}]} value={lScope} onChange={setLScope}/>
         <Seg options={STATS} value={lStat} onChange={setLStat} accent="#1d4ed8"/>
         <select value={filterTeam} onChange={e=>setFilterTeam(e.target.value)} style={SEL}>
           <option value="ALL">All Teams</option>
@@ -4520,7 +4591,7 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
 
       <div style={{display:"flex",gap:14,marginBottom:12,flexWrap:"wrap",alignItems:"center",padding:"7px 12px",
         background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-tertiary)"}}>
-        {[{k:lScope==="r1"?"overroundR1":"overroundFull",l:"Overround",min:1,max:1.5,step:0.01},{k:"powerFactor",l:"Power Factor",min:0.5,max:2,step:0.05},{k:"rateDiscount",l:"Rate Discount",min:0.5,max:1,step:0.01}].map(({k,l,min,max,step})=>(
+        {[{k:(lScope==="r1"||lScope==="r2"||lScope==="r3")?"overroundR1":"overroundFull",l:"Overround",min:1,max:1.5,step:0.01},{k:"powerFactor",l:"Power Factor",min:0.5,max:2,step:0.05},{k:"rateDiscount",l:"Rate Discount",min:0.5,max:1,step:0.01}].map(({k,l,min,max,step})=>(
           <label key={k} style={{fontSize:11,color:"var(--color-text-secondary)",display:"flex",gap:5,alignItems:"center"}}>
             {l}: <LazyNI value={globals[k]} onCommit={v=>setGlobals(g=>({...g,[k]:v}))} min={min} max={max} step={step} style={{width:56}}/>
           </label>
@@ -6443,7 +6514,8 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
             //       Comparing them directly never matches → realized hat tricks always showed 0.
             //       Convert currentRound to round number for comparison.
             const _curRoundNum = currentRound === "r1" ? 1 : currentRound === "r2" ? 2 :
-                                 currentRound === "conf" ? 3 : currentRound === "cup" ? 4 : null;
+                       (currentRound === "r3" || currentRound === "conf") ? 3 :
+                       (currentRound === "f"  || currentRound === "cup")  ? 4 : null;
             const realizedHatByPlayer = {};
             const realizedAnyHat = (()=>{
               let any = false;
@@ -7335,7 +7407,8 @@ function GoalieSavesPanel({s,expG,goalies,margins,showTrue,dark,currentRound}) {
   // v102: round-aware goalie stats. Previously used cumulative g.pGP / g.pSaves,
   //       which bled R1 starts and saves into R2 series totals.
   const _curRoundNum = currentRound === "r1" ? 1 : currentRound === "r2" ? 2 :
-                       currentRound === "conf" ? 3 : currentRound === "cup" ? 4 : null;
+                       (currentRound === "r3" || currentRound === "conf") ? 3 :
+                       (currentRound === "f"  || currentRound === "cup")  ? 4 : null;
   const roundGoalieStats = (g) => {
     if (!Array.isArray(g.pGames) || _curRoundNum == null) {
       return { pGP: g.pGP || 0, pSaves: g.pSaves || 0 };
@@ -7617,7 +7690,19 @@ function SeriesLeaderPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalen
     // v24 Phase E: if unified sim is available AND this stat is simulated, use its leader probs (correct teammate correlation).
     // Otherwise fall back to independent-player MC (simulateLeader).
     const simStats = new Set(["g","a","pts","sog","hit","blk","tk","pim","give"]);
-    const useUnified = simResult && !simStale && simResult.leaderProb && simStats.has(stat);
+    // v133: detect a corrupted unified sim cache. The TOI-engine experiment in v127-v131 may have
+    //       populated simResult.leaderProb with NaN/zero values. If the cached probs for this stat
+    //       are degenerate (all zero, single 100%, or contain NaN), treat the sim as unusable and
+    //       fall through to the independent-MC closed-form path.
+    let cacheLooksValid = simResult && !simStale && simResult.leaderProb && simStats.has(stat);
+    if (cacheLooksValid) {
+      const probs = simResult.leaderProb[stat] || [];
+      const finiteCount = probs.filter(p => Number.isFinite(p) && p > 0).length;
+      const hasNaN = probs.some(p => !Number.isFinite(p));
+      // Healthy: at least 3 players with positive prob, no NaN
+      if (hasNaN || finiteCount < 3) cacheLooksValid = false;
+    }
+    const useUnified = cacheLooksValid;
 
     // Build per-player lambda (for display), actual (for Now column), futureLam (for fallback)
     const entries=pool.map(p=>{
@@ -7876,7 +7961,7 @@ function CompareTab({leaderMarket,STATS,lStat,setLStat,lScope,setLScope,dark}) {
       {/* Book selector + controls */}
       <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:12}}>
         <div style={{display:"flex",borderRadius:"var(--border-radius-md)",overflow:"hidden",border:"0.5px solid var(--color-border-secondary)"}}>
-          {[{id:"r1",label:"Round 1"},{id:"r2",label:"Round 2"},{id:"full",label:"Full Playoff"}].map(s=>(
+          {[{id:"r1",label:"Round 1"},{id:"r2",label:"Round 2"},{id:"r3",label:"Round 3"},{id:"full",label:"Full Playoff"}].map(s=>(
             <button key={s.id} onClick={()=>setLScope(s.id)} style={{padding:"5px 12px",fontSize:11,border:"none",cursor:"pointer",
               background:lScope===s.id?"#3b82f6":"var(--color-background-secondary)",color:lScope===s.id?"white":"var(--color-text-secondary)"}}>
               {s.label}
@@ -8138,7 +8223,8 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
   //       NOTE: allSeries here is ALREADY the round-scoped flat array (parent passes seriesForRound).
   //       setAllSeries here is setSeriesForRound — it handles the round-keyed dict update transparently.
   const currentRoundNum = currentRound === "r1" ? 1 : currentRound === "r2" ? 2 :
-                          currentRound === "conf" ? 3 : currentRound === "cup" ? 4 : 1;
+                       (currentRound === "r3" || currentRound === "conf") ? 3 :
+                       (currentRound === "f"  || currentRound === "cup")  ? 4 : 1;
   const [paste,setPaste]=useState("");
   const [preview,setPreview]=useState(null); // parsed preview before commit
   const [overrideGame,setOverrideGame]=useState(null); // null = use auto-detected
@@ -9327,7 +9413,7 @@ function PlayerStatsTab({players,setPlayers,dark}) {
     <Card style={{marginBottom:12}}>
       <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
         <SH title="Player Stats" sub={`Round ${round} · ${rows.length} players`}/>
-        <Seg options={[{id:1,label:"R1"},{id:2,label:"R2"},{id:3,label:"R3"},{id:4,label:"R4"}]} value={round} onChange={setRound} accent="#3b82f6"/>
+        <Seg options={[{id:1,label:"R1"},{id:2,label:"R2"},{id:3,label:"R3"},{id:4,label:"Final"}]} value={round} onChange={setRound} accent="#3b82f6"/>
         <select value={filterTeam} onChange={e=>setFilterTeam(e.target.value)}
           style={{fontSize:11,padding:"4px 8px",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:4,color:"var(--color-text-primary)"}}>
           <option value="ALL">All Teams</option>
