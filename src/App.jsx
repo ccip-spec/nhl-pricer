@@ -3717,8 +3717,11 @@ function AppInner() {
       } else if (teamExpGR2[p.team] != null) {
         expTotal = teamExpGR2[p.team];
       } else {
-        // Team not in R2 — no future games in this scope.
-        expTotal = readActualGP(p, "r2");
+        // v136: team is in R2 pool (matchups.r2 has them) but no allSeries.r2 setup yet — project
+        //       a default series length so the player still gets future production credit.
+        //       Was: expTotal = readActualGP(p, "r2") which locked at games played and zeroed futureLam.
+        const r2GP = readActualGP(p, "r2");
+        expTotal = Math.max(r2GP, 5.82);
       }
       actualGP = readActualGP(p, "r2");
     }
@@ -3730,7 +3733,9 @@ function AppInner() {
       } else if (teamExpGR3[p.team] != null) {
         expTotal = teamExpGR3[p.team];
       } else {
-        expTotal = readActualGP(p, "r3");
+        // v136: same fallback as R2 — default to 5.82 if no R3 setup yet.
+        const r3GP = readActualGP(p, "r3");
+        expTotal = Math.max(r3GP, 5.82);
       }
       actualGP = readActualGP(p, "r3");
     }
@@ -3957,7 +3962,7 @@ function AppInner() {
     {id:"sog",label:"SOG"},{id:"hit",label:"Hits"},{id:"blk",label:"Blocks"},
     {id:"tk",label:"TK"},{id:"give",label:"GV"},
   ];
-  const NAV=[{id:"leaders",l:"Leader Markets"},{id:"series",l:"Series Pricer"},{id:"parlay",l:"Series Parlay Pricer"},{id:"lottery",l:"Draft Lottery"},{id:"compare",l:"Line Compare"},{id:"upload",l:"Upload Stats"},{id:"stats",l:"Player Stats"},{id:"roles",l:"Roles"},{id:"settings",l:"Settings"}];
+  const NAV=[{id:"leaders",l:"Leader Markets"},{id:"series",l:"Series Pricer"},{id:"parlay",l:"Series Parlay Pricer"},{id:"compare",l:"Line Compare"},{id:"upload",l:"Upload Stats"},{id:"stats",l:"Player Stats"},{id:"roles",l:"Roles"},{id:"settings",l:"Settings"}];
   const [gameModal,setGameModal] = useState(null);
 
   return (
@@ -3997,7 +4002,6 @@ function AppInner() {
           simResultsBySeries={simResultsBySeries} setSimForSeries={setSimForSeries}
           currentRound={currentRound} setCurrentRound={setCurrentRound}/>}
         {tab==="parlay"&&<ParlayTab allSeries={seriesForRound} currentRound={currentRound} margins={margins} dark={dark}/>}
-        {tab==="lottery"&&<LotteryTab dark={dark} margins={margins}/>}
         {tab==="upload"&&<UploadTab players={players} setPlayers={setP} goalies={goalies} setGoalies={setG}
           linemates={linemates} setLinemates={setLinemates}
           exportState={exportState} importState={importState} syncStatus={syncStatus}
@@ -10458,6 +10462,8 @@ function ParlayTab({allSeries, currentRound, margins, dark}) {
 // SETTINGS TAB
 // ═══════════════════════════════════════════════════════════════════════════════
 function SettingsTab({globals,setGlobals,margins,setMargins,showTrue,setShowTrue,showDec,setShowDec,doPush,doPull,doVerify,lastPushedAt,lastPulledAt,cloudInfo,syncStatus,dark}) {
+  // v136: side tab for Settings vs Lottery (lottery moved from main nav).
+  const [subTab, setSubTab] = useState("settings");
   // v52: Cloud sync config (URL, key, device label) lives in localStorage via getSbConfig/setSbConfig.
   const [cfg, setCfg] = useState(() => getSbConfig());
   const [status, setStatus] = useState(null);
@@ -10513,7 +10519,21 @@ function SettingsTab({globals,setGlobals,margins,setMargins,showTrue,setShowTrue
   const cloudNewer = cloudInfo && lastPulledAt && new Date(cloudInfo.updated_at) > new Date(lastPulledAt);
   const enabled = isSbEnabled();
   return (
-    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:16,alignItems:"start"}}>
+    <div style={{display:"grid",gridTemplateColumns:"160px 1fr",gap:16,alignItems:"start"}}>
+      <div style={{display:"flex",flexDirection:"column",gap:4,position:"sticky",top:12}}>
+        {[{id:"settings",label:"Settings"},{id:"lottery",label:"Draft Lottery"}].map(t=>(
+          <button key={t.id} onClick={()=>setSubTab(t.id)} style={{
+            padding:"8px 12px",fontSize:12,fontWeight:500,textAlign:"left",cursor:"pointer",
+            borderRadius:"var(--border-radius-md)",border:"0.5px solid",
+            borderColor: subTab===t.id ? "#3b82f6" : "var(--color-border-secondary)",
+            background: subTab===t.id ? "rgba(59,130,246,0.15)" : "var(--color-background-secondary)",
+            color: subTab===t.id ? "#60a5fa" : "var(--color-text-secondary)",
+          }}>{t.label}</button>
+        ))}
+      </div>
+      <div>
+        {subTab==="lottery" ? <LotteryTab dark={dark} margins={margins}/> :
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:16,alignItems:"start"}}>
       <Card>
         <SH title="Global Controls"/>
         {[{k:"overroundR1",l:"R1 Leader Overround",min:1,max:1.5,step:0.01},{k:"overroundFull",l:"Full Playoff Overround",min:1,max:1.5,step:0.01},{k:"powerFactor",l:"Power Factor",min:0.5,max:2,step:0.05},{k:"rateDiscount",l:"Rate Discount",min:0.5,max:1,step:0.01},{k:"dispersion",l:"NB Dispersion (r)",min:1,max:5,step:0.1}].map(({k,l,min,max,step})=>(
@@ -10638,6 +10658,8 @@ CREATE POLICY "anon_rw" ON pricer_state
           </div>
         </details>
       </Card>
+    </div>}
+      </div>
     </div>
   );
 }
