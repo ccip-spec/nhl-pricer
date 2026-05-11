@@ -1323,7 +1323,9 @@ function blendedRate(p, stat, seasonRate, scope) {
   if (!p || !BLEND_STATS.has(stat)) return seasonRate;
   let pGP, poTotal;
   if (scope && scope !== "full" && Array.isArray(p.pGames)) {
-    const roundNum = scope === "r1" ? 1 : scope === "r2" ? 2 : scope === "conf" ? 3 : scope === "cup" ? 4 : null;
+    const roundNum = scope === "r1" ? 1 : scope === "r2" ? 2 :
+                     (scope === "r3" || scope === "conf") ? 3 :
+                     (scope === "f"  || scope === "cup")  ? 4 : null;
     if (roundNum != null) {
       pGP = 0; poTotal = 0;
       for (const e of p.pGames) {
@@ -4752,7 +4754,7 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
       </Card>:<Card>
         <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:10}}>
           <span style={{fontSize:10,fontWeight:500,textTransform:"uppercase",letterSpacing:"0.08em",color:"var(--color-text-secondary)"}}>
-            {lScope==="r1"?"R1":lScope==="r2"?"R2":"Playoff"} {STATS.find(s=>s.id===lStat)?.label} Leader
+            {lScope==="r1"?"R1":lScope==="r2"?"R2":lScope==="r3"?"R3":lScope==="f"?"Final":"Playoff"} {STATS.find(s=>s.id===lStat)?.label} Leader
           </span>
           <span style={{fontSize:10,color:"var(--color-text-tertiary)"}}>{displayed.length} shown</span>
         </div>
@@ -8082,7 +8084,7 @@ function CompareTab({leaderMarket,STATS,lStat,setLStat,lScope,setLScope,dark}) {
       {/* Comparison table */}
       <Card>
         <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:10,flexWrap:"wrap"}}>
-          <SH title={`${lScope==="r1"?"R1":lScope==="r2"?"R2":"Playoff"} ${STATS.find(s=>s.id===lStat)?.label||""} — ${activeBook} vs Our Price`}
+          <SH title={`${lScope==="r1"?"R1":lScope==="r2"?"R2":lScope==="r3"?"R3":lScope==="f"?"Final":"Playoff"} ${STATS.find(s=>s.id===lStat)?.label||""} — ${activeBook} vs Our Price`}
             sub={withOdds.length?`${withOdds.length} players with ${activeBook} odds · ${displayed.length} shown`:"Paste odds above to populate"}/>
           <div style={{marginLeft:"auto",display:"flex",gap:8,alignItems:"center"}}>
             <select value={filterTeam} onChange={e=>setFilterTeam(e.target.value)} style={SEL}>
