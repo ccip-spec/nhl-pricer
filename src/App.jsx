@@ -4754,7 +4754,7 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
             <TH cols={["#","Player","Team","Role","Now","λ",...(showTrue?["True%"]:[]),"Adj%","American",...(showDec?["Dec"]:[])]}/>
             <tbody>{displayed.map((p,i)=>{
               const rank=leaderMarket.indexOf(p)+1,a=toAmer(p.adjProb);
-              const now=readActual(p, lStat, lScope==="r1" ? "r1" : lScope==="r2" ? "r2" : "full");
+              const now=readActual(p, lStat, lScope==="r1" ? "r1" : lScope==="r2" ? "r2" : lScope==="r3" ? "r3" : lScope==="f" ? "f" : "full");
               return <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)")}}>
                 <td style={{padding:"4px 8px",color:"var(--color-text-tertiary)",fontSize:10,width:28}}>{rank}</td>
                 <td style={{padding:"4px 8px",fontWeight:rank<=3?500:400}}>{p.name}</td>
