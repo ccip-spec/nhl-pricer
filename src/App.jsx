@@ -3801,12 +3801,19 @@ function AppInner() {
     //       New: estimate participation = (player_pGP) / (team_pGP_total). Apply that rate to
     //       remaining games. If the player has 0 pGP we keep the old "100%" logic since we have
     //       no signal yet (e.g. healthy starter who hasn't played because his series hasn't started).
+    // v138: teamPGPTotal must match scope. Was always R1+R2 cumulative — but for R2 scope,
+    //       expTotal is R2-only (~5.82). With teamPGPTotal=10+ across rounds, remainingTeamGames
+    //       went to 0 → futureLam=0 → every R2 leader player's λ collapsed to actual.
     let teamPGPTotal = 0;
     {
       const r1G = (teamR1Status[p.team] && teamR1Status[p.team].over) ? (teamR1Status[p.team].gamesPlayed || 0)
                 : (teamR1Status[p.team] && teamR1Status[p.team].gamesPlayed) || 0;
       const r2G = (teamR2Status[p.team] && teamR2Status[p.team].gamesPlayed) || 0;
-      teamPGPTotal = r1G + r2G;  // (extend later for conf/cup as those start)
+      const r3G = (teamR3Status[p.team] && teamR3Status[p.team].gamesPlayed) || 0;
+      if (scope === "r1") teamPGPTotal = r1G;
+      else if (scope === "r2") teamPGPTotal = r2G;
+      else if (scope === "r3") teamPGPTotal = r3G;
+      else teamPGPTotal = r1G + r2G + r3G;  // full playoff scope
     }
     const remainingTeamGames = Math.max(0, expTotal - teamPGPTotal);
     let participationRate = 1.0;
