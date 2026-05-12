@@ -4004,7 +4004,8 @@ function AppInner() {
           currentRound={currentRound} setCurrentRound={setCurrentRound}
           linemates={linemates}/>}
         {tab==="series"&&<SeriesTab allSeries={seriesForRound} setAllSeries={setSeriesForRound}
-          players={players} goalies={goalies} margins={margins} setMargins={setMargins}
+          players={players} setPlayers={setP} goalies={goalies} setGoalies={setG}
+          margins={margins} setMargins={setMargins}
           linemates={linemates}
           globals={globals} showTrue={showTrue} dark={dark} onEnterGame={setGameModal}
           gameUploadCounter={gameUploadCounter}
@@ -4787,7 +4788,7 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
 // ═══════════════════════════════════════════════════════════════════════════════
 // SERIES TAB
 // ═══════════════════════════════════════════════════════════════════════════════
-function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,globals,showTrue,dark,onEnterGame,gameUploadCounter,simResultsBySeries,setSimForSeries,currentRound,setCurrentRound,linemates}) {
+function SeriesTab({allSeries,setAllSeries,players,setPlayers,goalies,setGoalies,margins,setMargins,globals,showTrue,dark,onEnterGame,gameUploadCounter,simResultsBySeries,setSimForSeries,currentRound,setCurrentRound,linemates}) {
   const [si,setSi]=useState(0);
   // v38: reset to series 0 when round changes (different rounds have different series counts)
   useEffect(()=>{
@@ -5574,6 +5575,46 @@ function SeriesTab({allSeries,setAllSeries,players,goalies,margins,setMargins,gl
           background:showIRPanel?"#dc262620":"var(--color-background-secondary)",border:showIRPanel?"0.5px solid #ef4444":"0.5px solid var(--color-border-secondary)",
           color:showIRPanel?"#f87171":"var(--color-text-secondary)"}}>
           🚑 IR / Status{(()=>{const c=Object.keys(s.roleOverrides||{}).length;return c>0?` (${c})`:"";})()}
+        </button>
+        {/* v140: Wipe Series Games — deletes all pGames entries (and series.games results) for this series so user can re-upload from scratch. */}
+        <button onClick={()=>{
+          if (!s.homeAbbr || !s.awayAbbr) return;
+          const roundNum = currentRound==="r1"?1:currentRound==="r2"?2:currentRound==="r3"?3:currentRound==="f"?4:1;
+          const label = `${s.homeAbbr} vs ${s.awayAbbr} (${ROUND_LABELS[currentRound]||currentRound.toUpperCase()})`;
+          if (!confirm(`Wipe ALL game stats for ${label}?\n\nThis deletes every pGames entry for this round where either team is ${s.homeAbbr} or ${s.awayAbbr}, AND clears the series game results.\n\nAfter wiping you can re-upload each game cleanly. This cannot be undone.`)) return;
+          // 1. Strip pGames entries for this round + either team from all players
+          if (setPlayers) {
+            setPlayers(prev => prev.map(p => {
+              if (p.team !== s.homeAbbr && p.team !== s.awayAbbr) return p;
+              if (!Array.isArray(p.pGames)) return p;
+              const kept = p.pGames.filter(e => !(e.round === roundNum));
+              if (kept.length === p.pGames.length) return p;
+              return withRollups({...p, pGames: kept});
+            }));
+          }
+          // 2. Strip pGames entries for goalies on either team for this round
+          if (setGoalies) {
+            setGoalies(prev => prev.map(g => {
+              if (g.team !== s.homeAbbr && g.team !== s.awayAbbr) return g;
+              if (!Array.isArray(g.pGames)) return g;
+              const kept = g.pGames.filter(e => !(e.round === roundNum));
+              if (kept.length === g.pGames.length) return g;
+              // Recompute goalie rollups
+              let pGP=0,pSV=0,pGA=0,pSA=0,pSO=0;
+              for (const e of kept) { pGP++; pSV+=e.sv||0; pGA+=e.ga||0; pSA+=e.sa||0; if (e.so) pSO++; }
+              return {...g, pGames: kept, pGP, pSV, pGA, pSA, pSO};
+            }));
+          }
+          // 3. Clear all game results in this series
+          setAllSeries(p=>{
+            const u=[...p];
+            const games = (u[safeSi].games||[]).map(g => ({...g, result: null, score_h: null, score_a: null, wentOT: false, ot: false, otScorer: null}));
+            u[safeSi] = {...u[safeSi], games};
+            return u;
+          });
+        }} style={{padding:"4px 10px",fontSize:11,borderRadius:"var(--border-radius-md)",cursor:"pointer",
+          background:"var(--color-background-secondary)",border:"0.5px solid #ef4444",color:"#f87171"}}>
+          🗑 Wipe Series
         </button>
       </div>
 
