@@ -8440,10 +8440,24 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
 
     const hash = hashStr(paste.trim());
     // v108: dup check now includes round so R1G1 and R2G1 are tracked separately
+    // v142: ALSO verify the pGames actually contain entries for this round+game. If the ledger
+    //       claims an import but no player has a matching pGames entry (e.g. user wiped via the
+    //       Series Pricer Wipe button, or manually deleted entries), the ledger row is stale and
+    //       should not block re-import.
     const dup = imports.find(x => x.seriesIdx===seriesIdx && x.game===gameNum && (x.round||1)===currentRoundNum);
     if (dup) {
-      setErr(`R${currentRoundNum}G${gameNum} already imported for ${sr.homeAbbr} vs ${sr.awayAbbr} at ${dup.ts}. Undo it first to re-import.`);
-      return;
+      // Check whether any player on either team has pGames evidence of this game.
+      const teams = new Set([sr.homeAbbr, sr.awayAbbr].filter(Boolean));
+      const hasEvidence = (players||[]).some(p =>
+        teams.has(p.team) && Array.isArray(p.pGames) &&
+        p.pGames.some(e => (e.round||1) === currentRoundNum && e.game === gameNum)
+      );
+      if (hasEvidence) {
+        setErr(`R${currentRoundNum}G${gameNum} already imported for ${sr.homeAbbr} vs ${sr.awayAbbr} at ${dup.ts}. Undo it first to re-import.`);
+        return;
+      }
+      // No evidence — stale ledger row. Strip it and continue.
+      setImports(prev => prev.filter(x => x.id !== dup.id));
     }
 
     // Build skater pGames updates
