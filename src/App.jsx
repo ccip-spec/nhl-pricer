@@ -5612,6 +5612,25 @@ function SeriesTab({allSeries,setAllSeries,players,setPlayers,goalies,setGoalies
             u[safeSi] = {...u[safeSi], games};
             return u;
           });
+          // 4. v141: clear matching entries in the upload ledger so games can be re-imported.
+          //    The ledger lives in localStorage as nhl_imports_v28; it's loaded by UploadTab on mount,
+          //    and read by the upload dedup check via `imports.find(...)`. Strip any entry that
+          //    matches this round AND either side equals current series teams.
+          try {
+            const raw = localStorage.getItem("nhl_imports_v28");
+            if (raw) {
+              const arr = JSON.parse(raw);
+              const filtered = arr.filter(x => {
+                if ((x.round||1) !== roundNum) return true;
+                const matchesTeams = (x.homeAbbr === s.homeAbbr && x.awayAbbr === s.awayAbbr)
+                                  || (x.homeAbbr === s.awayAbbr && x.awayAbbr === s.homeAbbr);
+                return !matchesTeams;
+              });
+              localStorage.setItem("nhl_imports_v28", JSON.stringify(filtered));
+              // Notify any listener (UploadTab) to re-read imports
+              window.dispatchEvent(new CustomEvent("nhl-imports-changed"));
+            }
+          } catch {}
         }} style={{padding:"4px 10px",fontSize:11,borderRadius:"var(--border-radius-md)",cursor:"pointer",
           background:"var(--color-background-secondary)",border:"0.5px solid #ef4444",color:"#f87171"}}>
           🗑 Wipe Series
@@ -8294,6 +8313,12 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
   //          awayScore, homeScore, ot, matched, unmatched, deltaPlayers, deltaGoalies}
   const [imports,setImports] = useState(()=>{try{const s=localStorage.getItem("nhl_imports_v28");return s?JSON.parse(s):[];}catch{return[];}});
   useEffect(()=>{try{localStorage.setItem("nhl_imports_v28",JSON.stringify(imports));}catch{}},[imports]);
+  // v141: re-read imports when SeriesTab's Wipe button clears matching entries.
+  useEffect(()=>{
+    const reload = ()=>{try{const s=localStorage.getItem("nhl_imports_v28");setImports(s?JSON.parse(s):[]);}catch{}};
+    window.addEventListener("nhl-imports-changed", reload);
+    return ()=>window.removeEventListener("nhl-imports-changed", reload);
+  },[]);
 
   function hashStr(str){let h=0;for(let i=0;i<str.length;i++){h=((h<<5)-h)+str.charCodeAt(i);h|=0;}return (h>>>0).toString(36);}
   // v28.1: NFD-normalize then strip combining diacritics (ö → o, č → c, ü → u, etc.)
