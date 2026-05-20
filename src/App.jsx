@@ -2029,6 +2029,10 @@ function parseHRFullPage(text) {
       name:col(["Player","Skater"]),
       g:col(["G"]), a:col(["A"]), pim:col(["PIM"]),
       sog:col(["S","Shots","SOG"]),
+      hit:col(["HIT","Hits"]),
+      blk:col(["BLK","Blocks","BS"]),
+      tk:col(["TK","Takeaways","TAKE"]),
+      give:col(["GV","Giveaways","GIVE"]),
       toi:col(["TOI"]),
     };
     const players = [];
@@ -2053,13 +2057,19 @@ function parseHRFullPage(text) {
       const a = cm.a>=0 ? parseInt(cells[cm.a])||0 : 0;
       const sog = cm.sog>=0 ? parseInt(cells[cm.sog])||0 : 0;
       const pim = cm.pim>=0 ? parseInt(cells[cm.pim])||0 : 0;
+      // v145: HR box scores include HIT/BLK (and sometimes TK/GV). Previously hardcoded to 0,
+      //       silently dropping realized hits/blocks from every HR upload.
+      const hit = cm.hit>=0 ? parseInt(cells[cm.hit])||0 : 0;
+      const blk = cm.blk>=0 ? parseInt(cells[cm.blk])||0 : 0;
+      const tk  = cm.tk>=0  ? parseInt(cells[cm.tk])||0  : 0;
+      const give= cm.give>=0? parseInt(cells[cm.give])||0: 0;
       // TOI parse "MM:SS" → seconds
       let toi = 0;
       if (cm.toi>=0 && cells[cm.toi]) {
         const m = cells[cm.toi].match(/(\d+):(\d+)/);
         if (m) toi = parseInt(m[1])*60 + parseInt(m[2]);
       }
-      players.push({name, g, a, sog, pim, toi, hit:0, blk:0, tk:0, give:0});
+      players.push({name, g, a, sog, pim, toi, hit, blk, tk, give});
     }
     return {players, endLine};
   }
@@ -3555,7 +3565,9 @@ function AppInner() {
   // P(team is in r2 series i) = P(team wins one of those R1 series).
   // P(team wins r2 series i | in it) = avg over R1 opponents weighted by their R1 win prob.
   // Opponent in r2 = winner of the OTHER r1 series in the pair.
-  const autoConfByTeam = useMemo(()=>{
+  // B2 (v146): renamed from autoConfByTeam. This holds P(team WINS R2), NOT P(wins Conference).
+  //            The actual conference-win prob is autoConfByTeamFinal (= autoCupByTeam.conf).
+  const autoR2WinByTeam = useMemo(()=>{
     // First, build R1 winner distributions per series: r1Winners[seriesIdx] = { teamAbbr: prob }
     const r1Winners = (allSeries.r1||[]).map((sr, i) => {
       const wp = seriesWinProbs(sr, "r1");
@@ -3629,15 +3641,15 @@ function AppInner() {
     // v135: r3WinnerByR3Series — derived directly from each R3 series setup, NOT bracket.r3pairs.
     //       Same logic as the v126 fix for R2: a team that's CURRENTLY in an R3 series gets their
     //       R3 win prob from seriesWinProbs(r3Series), weighted by P(they won R2). For teams already
-    //       in R3, the R2 weight is implicit (they advanced), but autoConfByTeam[t] still gives the
+    //       in R3, the R2 weight is implicit (they advanced), but autoR2WinByTeam[t] still gives the
     //       correct chained probability for upstream uncertainty.
     const r3WinnerByR3Series = (allSeries.r3||[]).map((r3Series) => {
       if (!r3Series || !r3Series.homeAbbr || !r3Series.awayAbbr) return {};
       const wp = seriesWinProbs(r3Series, "r3");
       if (!wp) return {};
       // Weight by P(team won R2) — combine R1 win × R2 win probabilities.
-      const homeR2 = (autoConfByTeam||{})[r3Series.homeAbbr];
-      const awayR2 = (autoConfByTeam||{})[r3Series.awayAbbr];
+      const homeR2 = (autoR2WinByTeam||{})[r3Series.homeAbbr];
+      const awayR2 = (autoR2WinByTeam||{})[r3Series.awayAbbr];
       const homeWeight = homeR2 != null ? homeR2 : 1.0;
       const awayWeight = awayR2 != null ? awayR2 : 1.0;
       return {
@@ -6490,14 +6502,10 @@ function SeriesTab({allSeries,setAllSeries,players,setPlayers,goalies,setGoalies
             const playerRows = pool.map(p => {
               const teamRate = p.team === s.homeAbbr ? homeG : awayG;
               const share = teamRate > 0 ? shrunkGoalRate(p) / teamRate : 0;
-              const roleMult =
-                p.lineRole === "TOP6"   ? 1.20 :
-                p.lineRole === "MID6"   ? 0.95 :
-                p.lineRole === "BOT6"   ? 0.70 :
-                p.lineRole === "ACTIVE" ? 0.85 :
-                p.lineRole === "D1"     ? 1.00 :
-                p.lineRole === "D2"     ? 0.75 :
-                p.lineRole === "D3"     ? 0.55 : 0.60;
+              // v145: use canonical roleMultiplier(role,"g") — was a stale hardcoded table
+              //       (TOP6 1.20/BOT6 0.70/ACTIVE 0.85) inconsistent with the rest of the model
+              //       (canonical TOP6 1.12/BOT6 0.75/ACTIVE 0.20). Same fix as v120 for OT Scorer.
+              const roleMult = roleMultiplier(p.lineRole, "g");
               // P(this player scores the first OT goal) = P(any future OT) × P(this team gets it) × player goal share within team.
               const teamShareOfOT = p.team === s.homeAbbr ? homeShareOfOT : awayShareOfOT;
               const rawP = pAnyFutureOT * teamShareOfOT * share * roleMult;
@@ -6797,8 +6805,8 @@ function SeriesTab({allSeries,setAllSeries,players,setPlayers,goalies,setGoalies
 
           {mkt==="props"&&<PropsPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={effMargins} showTrue={showTrue} dark={dark} mode="ou" simResult={simResult} currentRound={currentRound}/>}
           {mkt==="binary"&&<PropsPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={effMargins} showTrue={showTrue} dark={dark} mode="binary" simResult={simResult} currentRound={currentRound}/>}
-          {mkt==="propcombos"&&<PropCombosPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={effMargins} showTrue={showTrue} dark={dark} currentRound={currentRound}/>}
-          {mkt==="goaliesaves"&&<GoalieSavesPanel s={s} expG={expG} goalies={goalies} margins={effMargins} showTrue={showTrue} dark={dark} currentRound={currentRound}/>}
+          {mkt==="propcombos"&&<PropCombosPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={effMargins} showTrue={showTrue} dark={dark} currentRound={currentRound} simResult={simResult}/>}
+          {mkt==="goaliesaves"&&<GoalieSavesPanel s={s} expG={expG} goalies={goalies} players={players} margins={effMargins} showTrue={showTrue} dark={dark} currentRound={currentRound}/>}
           {mkt==="playerdetail"&&<PlayerDetailPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={effMargins} showTrue={showTrue} dark={dark} currentRound={currentRound}/>}
           {mkt==="seriesleader"&&<SeriesLeaderPanel s={s} expG={expG} gameGoalScale={gameGoalScale} gameEquivalents={gameEquivalents} gameEquivalentsFor={gameEquivalentsFor} players={players} globals={globals} margins={effMargins} showTrue={showTrue} dark={dark} simResult={simResult} simStale={simStale} currentRound={currentRound}/>}
         </div>
@@ -6979,10 +6987,16 @@ function PropsPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,p
           }
         }
       }
+      // v144: for assists/points, the closed-form rate×games over-projects because assists
+      //       aren't independent of team scoring. Prefer the sim's coupled prob as PRIMARY
+      //       when the sim is available; fall back to closed-form otherwise.
+      const SIM_PRIMARY_STAT = (stat === "a" || stat === "pts");
+      let pPrimary = pOver;
+      if (SIM_PRIMARY_STAT && pSim != null && !settled) pPrimary = pSim;
       // Apply margin only to uncertain events
-      const [adjO,adjU]= settled || pOver>=0.9999 ? [pOver, 1-pOver] :
-                         pOver<=0.0001 ? [0,1] : applyMargin([pOver,1-pOver],statMargin);
-      return {...p,lam,futureLam,actual,effectiveLine,needMore,pYes:pOver,pSim,adjYes:adjO,adjNo:adjU,settled,settledYes,settledNo,remainingGames};
+      const [adjO,adjU]= settled || pPrimary>=0.9999 ? [pPrimary, 1-pPrimary] :
+                         pPrimary<=0.0001 ? [0,1] : applyMargin([pPrimary,1-pPrimary],statMargin);
+      return {...p,lam,futureLam,actual,effectiveLine,needMore,pYes:pPrimary,pClosed:pOver,pSim,adjYes:adjO,adjNo:adjU,settled,settledYes,settledNo,remainingGames};
     }).sort((a,b)=>{
       // v49: settled rows drop to bottom; unsettled sort by adjYes desc
       if (!!a.settled !== !!b.settled) return a.settled ? 1 : -1;
@@ -7124,7 +7138,7 @@ function PropsPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,p
 // 2-3 player combos with AND / OR / MORE operators across any stat with configurable thresholds.
 // Independence assumption between players (simple, fine for first version per CC).
 // MORE is 2-player only and supports 2-way (strict A>B) or 3-way with push (A>B / B>A / tie).
-function PropCombosPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,players,globals,margins,showTrue,dark,currentRound}) {
+function PropCombosPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalentsFor,players,globals,margins,showTrue,dark,currentRound,simResult}) {
   const STATS=[
     {id:"g",label:"Goals",mk:"propsGoals"},{id:"a",label:"Assists",mk:"propsAssists"},
     {id:"pts",label:"Points",mk:"propsPoints"},{id:"sog",label:"SOG",mk:"propsSOG"},
@@ -7158,6 +7172,7 @@ function PropCombosPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalents
   };
 
   // Per-slot lambda + PMF computation. Mirrors PropsPanel logic.
+  const simIdx = useMemo(()=> simResult ? new Map(simResult.pool.map((sp,i)=>[sp.name+"|"+sp.team, i])) : null, [simResult]);
   const slotData = useMemo(()=>{
     const {rateDiscount,dispersion}=globals;
     return slots.map(slot => {
@@ -7167,7 +7182,7 @@ function PropCombosPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalents
       const stat = slot.stat;
       const r = dispersionFor(stat, dispersion);
       const rm = roleMultiplier(p.lineRole, stat);
-      if (rm === 0) return {p, stat, futureLam:0.0001, actual:0, r, lam:0.0001};
+      if (rm === 0) return {p, stat, futureLam:0.0001, actual:0, r, lam:0.0001, simPMF:null};
       const pgKey = stat==="tk"?"take_pg":stat==="pim"?"pim_pg":stat==="give"?"give_pg":stat==="tsa"?"tsa_pg":stat+"_pg";
       const shrunk = effectiveRate(p, stat, currentRound); // v104: respects per-player rate overrides
       const rm_rate_disc = shrunk*rm*rateDiscount*statRateMultiplier(stat);
@@ -7179,15 +7194,40 @@ function PropCombosPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalents
         : (gameEquivalents!=null && SCORING_STATS.has(stat)) ? gameEquivalents : remainingGames;
       const futureLam = Math.max(0.0001, rm_rate_disc*gEq);
       const lam = Math.max(0.0001, actual + futureLam);
-      return {p, stat, futureLam, actual, r, lam};
+      // v144: attach the unified-sim TOTAL PMF for this player+stat when available.
+      //       For assists/points the closed-form rate×games over-projects (assists aren't
+      //       independent of team scoring); the sim couples them correctly per-goal.
+      //       PMF is indexed by SERIES TOTAL (already includes realized `actual`).
+      let simPMF = null;
+      if (simIdx && simResult.playerPMF) {
+        const idx = simIdx.get(p.name+"|"+p.team);
+        if (idx != null) {
+          if (stat === "pts") {
+            const gPMF = simResult.playerPMF[idx].g;
+            const aPMF = simResult.playerPMF[idx].a;
+            if (gPMF && aPMF) simPMF = convolve(gPMF, aPMF, gPMF.length+aPMF.length-2);
+          } else if (simResult.playerPMF[idx][stat]) {
+            simPMF = simResult.playerPMF[idx][stat];
+          }
+        }
+      }
+      return {p, stat, futureLam, actual, r, lam, simPMF};
     });
-  }, [slots, pool, globals, expG, gameEquivalents, gameEquivalentsFor, currentRound]);
+  }, [slots, pool, globals, expG, gameEquivalents, gameEquivalentsFor, currentRound, simIdx, simResult]);
 
-  // Per-slot P(X >= line) using NB CDF on FUTURE lambda
+  // Per-slot P(X >= line). v144: for assists/points use the sim PMF (coupled to team scoring)
+  //   when available; otherwise fall back to closed-form NB on future lambda.
+  const SIM_PRIMARY = new Set(["a","pts"]);
   const slotProbs = slotData.map((d, i) => {
     if (!d) return null;
     const line = slots[i].line;
     const lineInt = Math.ceil(line - 0.001);
+    // sim PMF path (assists/points): PMF is indexed by series total (incl. realized)
+    if (SIM_PRIMARY.has(d.stat) && d.simPMF) {
+      let sTail = 0;
+      for (let k = lineInt; k < d.simPMF.length; k++) sTail += d.simPMF[k];
+      return Math.max(0, Math.min(1, sTail));
+    }
     const needMore = Math.max(0, lineInt - d.actual);
     if (needMore === 0) return 1; // already has it
     return 1 - nbCDF(needMore - 1, d.futureLam, d.r);
@@ -7197,6 +7237,8 @@ function PropCombosPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalents
   // Future is NB(futureLam, r); total = actual + future. Truncate at 30 for compute speed.
   const slotPMFs = slotData.map(d => {
     if (!d) return null;
+    // v144: for assists/points, prefer the sim PMF (coupled to team scoring) for H2H comparisons.
+    if (SIM_PRIMARY.has(d.stat) && d.simPMF) return d.simPMF;
     const KMAX = 30;
     const pmf = new Array(KMAX+1).fill(0);
     for (let k = 0; k <= KMAX; k++) {
@@ -7377,6 +7419,9 @@ function PropCombosPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalents
           {slotData[i] && <span style={{fontSize:10,color:"var(--color-text-tertiary)",marginLeft:6,fontFamily:"var(--font-mono)"}}>
             λ {slotData[i].lam.toFixed(2)} (now {slotData[i].actual})
             {op !== "H2H" && slotProbs[i]!=null && ` · ${(slotProbs[i]*100).toFixed(1)}%`}
+            {SIM_PRIMARY.has(slotData[i].stat) && (slotData[i].simPMF
+              ? <span style={{color:"#10b981"}}> · SIM</span>
+              : <span style={{color:"#f59e0b"}}> · CF (run sim)</span>)}
           </span>}
           {slots.length > 2 && <button onClick={()=>removeSlot(i)} style={{
             padding:"2px 8px",fontSize:11,background:"transparent",
@@ -7475,7 +7520,7 @@ function PropCombosPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalents
 // ─── GOALIE SAVES PANEL ──────────────────────────────────────────────────────
 // Model: lambda = starter_share × saves_pg × expGames (Poisson O/U)
 // Line auto-set to round(lambda) - 0.5 (nearest under). Matches Goalie Series Props sheet.
-function GoalieSavesPanel({s,expG,goalies,margins,showTrue,dark,currentRound}) {
+function GoalieSavesPanel({s,expG,goalies,players,margins,showTrue,dark,currentRound}) {
   const or = margins.propsGoals||1.05; // reuse saves margin setting
   // v102: round-aware goalie stats. Previously used cumulative g.pGP / g.pSaves,
   //       which bled R1 starts and saves into R2 series totals.
@@ -7484,16 +7529,56 @@ function GoalieSavesPanel({s,expG,goalies,margins,showTrue,dark,currentRound}) {
                        (currentRound === "f"  || currentRound === "cup")  ? 4 : null;
   const roundGoalieStats = (g) => {
     if (!Array.isArray(g.pGames) || _curRoundNum == null) {
-      return { pGP: g.pGP || 0, pSaves: g.pSaves || 0 };
+      return { pGP: g.pGP || 0, pSaves: g.pSaves || 0, pSA: 0 };
     }
-    let pGP = 0, pSaves = 0;
+    let pGP = 0, pSaves = 0, pSA = 0;
     for (const e of g.pGames) {
       if (e.round !== _curRoundNum) continue;
       pGP++;
       pSaves += e.sv || 0;
+      pSA += e.sa || 0;  // v148: realized shots-against for playoff shot-volume blend
     }
-    return { pGP, pSaves };
+    return { pGP, pSaves, pSA };
   };
+
+  // v147: matchup-based goalie saves. A sharp prices saves as SHOTS FACED × SAVE%, where both
+  //       terms reflect the actual matchup — not a flat season saves_pg.
+  //
+  //       Shots faced this series ≈ opponent's shot generation, modulated by the goalie's team's
+  //       shot suppression. We estimate:
+  //         projShotsFaced/game = leagueAvgSA × (oppSOGfor / leagueAvgSOGfor) × (ownSAagainst / leagueAvgSA)
+  //       i.e. start from league-average volume, scale UP by how much the opponent shoots and by how
+  //       leaky the goalie's own team is. Both ratios clamp so one extreme team can't dominate.
+  //
+  //       Save% comes from the goalie's own record (already shot-quality aware via the season sample).
+  //       Saves/game = projShotsFaced × save%.   Fallback to saves_pg if data is missing.
+  const LEAGUE_TEAM_SOG_FOR = 27.9;   // league avg team SOG-for/game (from skaters.csv)
+  const LEAGUE_TEAM_SA      = 26.2;   // league avg team SOG-against/game (from goalies.csv)
+  // Opponent SOG-for per game (sum of opponent skaters' sog_pg).
+  const teamSOGForPerGame = useMemo(()=>{
+    const m = {};
+    if (!players) return m;
+    for (const p of players) {
+      if (!p.team) continue;
+      const role = canonicalRole(p.lineRole);
+      if (role === "STARTER" || role === "BACKUP" || role === "IR" || role === "CUT") continue;
+      m[p.team] = (m[p.team] || 0) + (p.sog_pg || 0);
+    }
+    return m;
+  }, [players]);
+  // Own-team SOG-against per game (sum of the team's goalies' sa_pg, weighted by games).
+  const teamSAPerGame = useMemo(()=>{
+    const sa = {}, gp = {};
+    if (!goalies) return {};
+    for (const g of goalies) {
+      if (!g.team) continue;
+      sa[g.team] = (sa[g.team]||0) + (g.sa_pg||0) * (g.gp||0);
+      gp[g.team] = (gp[g.team]||0) + (g.gp||0);
+    }
+    const m = {};
+    for (const t of Object.keys(sa)) m[t] = gp[t] > 0 ? sa[t]/gp[t] : LEAGUE_TEAM_SA;
+    return m;
+  }, [goalies]);
 
   const seriesGoalies = useMemo(()=>{
     if(!goalies) return [];
@@ -7512,6 +7597,16 @@ function GoalieSavesPanel({s,expG,goalies,margins,showTrue,dark,currentRound}) {
         teamHasRoles[g.team] = true;
       }
     }
+    // v147: matchup shots-faced projector. Returns projected SOG faced per game for a goalie's team.
+    const projShotsFacedPerGame = (goalieTeam) => {
+      const oppTeam = goalieTeam === s.homeAbbr ? s.awayAbbr : s.homeAbbr;
+      const oppSOG = teamSOGForPerGame[oppTeam];
+      const ownSA  = teamSAPerGame[goalieTeam];
+      // Opponent offense ratio (clamped) and own-defense ratio (clamped).
+      const offRatio = (oppSOG && oppSOG > 0) ? Math.max(0.82, Math.min(1.20, oppSOG / LEAGUE_TEAM_SOG_FOR)) : 1.0;
+      const defRatio = (ownSA && ownSA > 0)  ? Math.max(0.82, Math.min(1.20, ownSA / LEAGUE_TEAM_SA)) : 1.0;
+      return LEAGUE_TEAM_SA * offRatio * defRatio;
+    };
     return goalies
       .filter(g => teams.has(g.team))
       .map(g => {
@@ -7528,29 +7623,41 @@ function GoalieSavesPanel({s,expG,goalies,margins,showTrue,dark,currentRound}) {
           // No roles set — use regular-season share as proxy
           effectiveShare = g.starter_share;
         }
-        // v61: account for realized playoff saves + only project future saves from remaining games.
-        //      Previously we always used `share * saves_pg * expG` which ignored saves already banked.
-        //      Now: lam = realized_saves + (share * saves_pg * remainingGames_this_goalie)
-        //      where remainingGames_this_goalie = expG - (g.pGP || 0)  [goalie has played pGP of the series already]
-        // v102: pull round-filtered stats so R1 saves don't seed R2 series.
-        const { pGP: roundGP, pSaves: roundSaves } = roundGoalieStats(g);
+        // v61: realized playoff saves + future projection over remaining games (round-filtered).
+        const { pGP: roundGP, pSaves: roundSaves, pSA: roundSA } = roundGoalieStats(g);
         const realizedSaves = roundSaves;
         const remainingGoalieGames = Math.max(0, expG - roundGP);
-        const futureLam = Math.max(0, effectiveShare * (g.saves_pg || 0) * remainingGoalieGames);
+        // v147: matchup shots faced/game = league avg scaled by opp offense × own defense.
+        const matchupShots = projShotsFacedPerGame(g.team);
+        // v148: blend in this round's realized shots-faced/game. Weight grows with playoff games
+        //       played (caps at a modest ceiling so a couple of noisy games don't dominate the
+        //       season+matchup prior). w = roundGP / (roundGP + K), K=4 → 50% weight at 4 GP.
+        const PO_SHOTS_K = 4;
+        let projShots = matchupShots;
+        if (roundGP > 0 && roundSA > 0) {
+          const poShotsPerGame = roundSA / roundGP;
+          const w = roundGP / (roundGP + PO_SHOTS_K);
+          projShots = w * poShotsPerGame + (1 - w) * matchupShots;
+        }
+        const savePct = (g.save_pct && g.save_pct > 0.5) ? g.save_pct : 0.905;
+        const savesPerGame = (g.save_pct && projShots > 0) ? projShots * savePct : (g.saves_pg || 0);
+        const futureLam = Math.max(0, effectiveShare * savesPerGame * remainingGoalieGames);
         const lam = Math.max(0.0001, realizedSaves + futureLam);
         const autoLine = Math.max(0.5, Math.round(lam) - 0.5);
-        return {...g, effectiveShare, lam, futureLam, realizedSaves, autoLine};
+        // Display helpers
+        const sogMult = LEAGUE_TEAM_SA > 0 ? +(projShots / LEAGUE_TEAM_SA).toFixed(2) : 1.0;
+        return {...g, effectiveShare, lam, futureLam, realizedSaves, autoLine, sogMult, projShots:+projShots.toFixed(1), savePctUsed:savePct, savesPerGameUsed:+savesPerGame.toFixed(2)};
       })
       .filter(g => g.effectiveShare > 0 || g.realizedSaves > 0)  // v61: also show goalies with realized saves even if role=0 now
       .sort((a,b) => b.lam - a.lam);
-  },[goalies, s.homeAbbr, s.awayAbbr, expG, currentRound]);
+  },[goalies, players, teamSOGForPerGame, teamSAPerGame, s.homeAbbr, s.awayAbbr, expG, currentRound]);
 
   if(!goalies) return <Card><div style={{color:"var(--color-text-secondary)",fontSize:12}}>Load goalies CSV in Upload tab to enable goalie saves props</div></Card>;
   if(!s.homeAbbr||!s.awayAbbr) return <Card><div style={{color:"var(--color-text-secondary)",fontSize:12}}>Set team abbreviations to load goalie props</div></Card>;
   if(!seriesGoalies.length) return <Card><div style={{color:"var(--color-text-secondary)",fontSize:12}}>No goalies found for {s.homeAbbr} / {s.awayAbbr} — check team abbreviations match goalies CSV</div></Card>;
 
   return <Card>
-    <SH title="Goalie Saves O/U" sub={`λ = starter_share × saves_pg × expGames · OR: ${or}x`}/>
+    <SH title="Goalie Saves O/U" sub={`λ = share × (proj shots faced × Sv%) × expGames · shots faced = matchup of opp offense & own defense · OR: ${or}x`}/>
     <div style={{fontSize:10,color:"var(--color-text-tertiary)",marginBottom:10}}>
       Exp series games: <strong style={{color:"var(--color-text-primary)"}}>{expG.toFixed(2)}</strong> · Line auto-set to round(λ)−0.5
     </div>
@@ -7561,7 +7668,7 @@ function GoalieSavesPanel({s,expG,goalies,margins,showTrue,dark,currentRound}) {
         <div key={abbr} style={{marginBottom:20}}>
           <div style={{fontSize:10,fontWeight:500,color:"var(--color-text-secondary)",marginBottom:6,textTransform:"uppercase",letterSpacing:"0.08em"}}>{abbr} — {TEAM_NAMES[abbr]||abbr}</div>
           <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-            <TH cols={["Goalie","Share","Sv/G","λ","Line",...(showTrue?["P(O)"]:[]),"Ov Adj%","Over","Under"]}/>
+            <TH cols={["Goalie","Share","Sv%","Sh/G","Sv/G","λ","Line",...(showTrue?["P(O)"]:[]),"Ov Adj%","Over","Under"]}/>
             <tbody>{teamGoalies.map((g,i)=>{
               const [ao,au] = applyMargin([1-poissonCDF(Math.ceil(g.autoLine-0.001)-1,g.lam), poissonCDF(Math.ceil(g.autoLine-0.001)-1,g.lam)], or);
               const pOver = 1-poissonCDF(Math.ceil(g.autoLine-0.001)-1, g.lam);
@@ -7569,7 +7676,9 @@ function GoalieSavesPanel({s,expG,goalies,margins,showTrue,dark,currentRound}) {
                 <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)"),opacity:g.starter_share<0.05?0.45:1}}>
                   <td style={{padding:"4px 8px",fontWeight:g.starter_share>0.4?500:400}}>{g.name}</td>
                   <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(g.starter_share*100).toFixed(1)}%</td>
-                  <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{g.saves_pg.toFixed(1)}</td>
+                  <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{g.savePctUsed!=null?(g.savePctUsed*100).toFixed(1):"—"}</td>
+                  <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:g.sogMult>1.02?"#4ade80":g.sogMult<0.98?"#fca5a5":"var(--color-text-tertiary)"}}>{g.projShots!=null?g.projShots.toFixed(1):"—"}</td>
+                  <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{g.savesPerGameUsed!=null?g.savesPerGameUsed.toFixed(1):g.saves_pg.toFixed(1)}</td>
                   <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{g.lam.toFixed(1)}</td>
                   <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontWeight:500}}>{g.autoLine.toFixed(1)}</td>
                   {showTrue&&<td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(pOver*100).toFixed(1)}%</td>}
@@ -8438,6 +8547,19 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
     const sr = allSeries?.[seriesIdx];
     if (!sr) { setErr("Series not found."); return; }
 
+    // v143: prevent silent data loss when unmatched players are ignored. If ANY parsed player
+    //       failed to match a roster record and the user hasn't explicitly chosen skip/add for
+    //       each one, abort. Previously these rows were dropped silently, leading to "missing
+    //       stats" bugs (e.g. Howden's 2 R1G4 goals not counted).
+    const unresolved = [
+      ...(preview.awayUnmatched||[]).map(u=>({...u, team: preview.awayAbbr})),
+      ...(preview.homeUnmatched||[]).map(u=>({...u, team: preview.homeAbbr})),
+    ].filter(u => !unmatchedDecisions[u.name+"|"+u.team]);
+    if (unresolved.length > 0) {
+      const names = unresolved.map(u=>`${u.name} (${u.team})`).join(", ");
+      setErr(`Unmatched player${unresolved.length>1?"s":""} need decision (skip or add): ${names}. Use the dropdowns below to resolve before committing.`);
+      return;
+    }
     const hash = hashStr(paste.trim());
     // v108: dup check now includes round so R1G1 and R2G1 are tracked separately
     // v142: ALSO verify the pGames actually contain entries for this round+game. If the ledger
@@ -8783,15 +8905,17 @@ function GameStatImporter({players,setPlayers,goalies,setGoalies,allSeries,setAl
           {[...preview.awayUnmatched.map(u=>({u,team:preview.awayAbbr})),
             ...preview.homeUnmatched.map(u=>({u,team:preview.homeAbbr}))].map(({u,team},i)=>{
             const key = u.name+"|"+team;
-            const decision = unmatchedDecisions[key] || "skip";
+            const decision = unmatchedDecisions[key] || "";
+            const isUnset = !decision;
             return <div key={i} style={{display:"flex",gap:8,alignItems:"center",fontSize:10,padding:"2px 0"}}>
               <span style={{minWidth:140}}>{u.name} <span style={{color:"var(--color-text-tertiary)"}}>({team})</span></span>
               <span style={{color:"var(--color-text-secondary)",fontFamily:"var(--font-mono)",minWidth:120}}>
                 {u.g}G {u.a}A · {u.sog}S · {u.hit}H {u.blk}B
               </span>
               <select value={decision} onChange={e=>setUnmatchedDecisions(prev=>({...prev,[key]:e.target.value}))}
-                style={{padding:"2px 6px",fontSize:10,background:"var(--color-background-secondary)",
-                  border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:"var(--color-text-primary)"}}>
+                style={{padding:"2px 6px",fontSize:10,background:isUnset?"rgba(245,158,11,0.15)":"var(--color-background-secondary)",
+                  border:isUnset?"0.5px solid #f59e0b":"0.5px solid var(--color-border-secondary)",borderRadius:3,color:isUnset?"#f59e0b":"var(--color-text-primary)"}}>
+                {isUnset && <option value="">⚠ Choose…</option>}
                 <option value="skip">Skip</option>
                 <option value="add">Add as new player</option>
               </select>
@@ -9210,6 +9334,10 @@ function UploadTab({players,setPlayers,goalies,setGoalies,linemates,setLinemates
             quality = +(1 + w * (rawQuality - 1)).toFixed(3);
           }
           rawGoalies.push({name,team,gp:Math.round(gp),saves,saves_pg:+(saves/gp).toFixed(4),
+                          // v147: save% and shots-against/game enable a matchup-based saves model
+                          //        (saves = projected_shots_faced × save%), instead of a flat saves_pg.
+                          save_pct:+(ongoal>0?(saves/ongoal):0.905).toFixed(4),
+                          sa_pg:+(ongoal/gp).toFixed(2),
                           xGoals:+xGoals.toFixed(2),goals:+goals.toFixed(1),quality});
         }
         const teamGP={};
@@ -10062,7 +10190,12 @@ function LotteryTab({dark, margins}) {
       if (lotteryRow > 1) {
         for (let j = 0; j < lotteryRow - 1; j++) moveUp += keptProb(j);
       }
-      return {teamName, lotteryRow, exactPicks, top2, top3, top4, top5, moveUp, keep, losePick, rowSum};
+      // B6 (v146): Move down — lands at any pick numerically HIGHER than lotteryRow (pushed back
+      //            by a team behind winning the lottery). Excludes traded landings.
+      //            moveUp + keep + moveDown + losePick should = rowSum.
+      let moveDown = 0;
+      for (let j = lotteryRow; j < probs.length; j++) moveDown += keptProb(j);
+      return {teamName, lotteryRow, exactPicks, top2, top3, top4, top5, moveUp, keep, moveDown, losePick, rowSum};
     });
   }, [data]);
 
@@ -10269,7 +10402,7 @@ function LotteryTab({dark, margins}) {
 
     {/* Move Up / Keep Markets */}
     {activeMarket==="move" && <Card>
-      <SH title="Move Up / Keep / Lose the Pick" sub={`OR: ${lotteryTopOR}x — Keep = lands at lottery row & not traded. Move Up = lands higher than lottery row & not traded. Lose Pick = lands at any traded outcome.`}/>
+      <SH title="Move Up / Keep / Move Down / Lose the Pick" sub={`OR: ${lotteryTopOR}x — Keep = lands at lottery row & not traded. Move Up = lands higher (better) & not traded. Move Down = lands lower (worse, pushed back by a lottery winner) & not traded. Lose Pick = lands at any traded outcome.`}/>
       <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
         <thead><tr style={{borderBottom:"0.5px solid var(--color-border-secondary)"}}>
           <th style={{padding:"6px 10px",textAlign:"left",fontWeight:500,fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4}}>TEAM</th>
@@ -10278,6 +10411,8 @@ function LotteryTab({dark, margins}) {
           {showTrue && <th style={{padding:"6px 4px",textAlign:"right",fontWeight:500,fontSize:8,color:"var(--color-text-tertiary)"}}>True%</th>}
           <th style={{padding:"6px 8px",textAlign:"right",fontWeight:500,fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4}}>Keep</th>
           {showTrue && <th style={{padding:"6px 4px",textAlign:"right",fontWeight:500,fontSize:8,color:"var(--color-text-tertiary)"}}>True%</th>}
+          <th style={{padding:"6px 8px",textAlign:"right",fontWeight:500,fontSize:9,color:"var(--color-text-tertiary)",letterSpacing:0.4}}>Move Down</th>
+          {showTrue && <th style={{padding:"6px 4px",textAlign:"right",fontWeight:500,fontSize:8,color:"var(--color-text-tertiary)"}}>True%</th>}
           <th style={{padding:"6px 8px",textAlign:"right",fontWeight:500,fontSize:9,color:"#fca5a5",letterSpacing:0.4}}>Lose Pick</th>
           {showTrue && <th style={{padding:"6px 4px",textAlign:"right",fontWeight:500,fontSize:8,color:"var(--color-text-tertiary)"}}>True%</th>}
         </tr></thead>
@@ -10285,6 +10420,7 @@ function LotteryTab({dark, margins}) {
           {teamPrices.map((tp, i) => {
             const muAdj = applyTwoWay(tp.moveUp, lotteryTopOR);
             const kAdj = applyTwoWay(tp.keep, lotteryTopOR);
+            const mdAdj = applyTwoWay(tp.moveDown, lotteryTopOR);
             const lpAdj = applyTwoWay(tp.losePick, lotteryTopOR);
             return <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
               <td style={{padding:"5px 10px",fontWeight:500}}>{tp.teamName}</td>
@@ -10293,6 +10429,8 @@ function LotteryTab({dark, margins}) {
               {showTrue && <td style={{padding:"5px 4px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:9,color:"var(--color-text-tertiary)"}}>{tp.moveUp>0?(tp.moveUp*100).toFixed(1)+"%":"—"}</td>}
               <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{tp.keep>0 ? (showDec ? fmtDec(kAdj) : fmtAmer(kAdj)) : "—"}</td>
               {showTrue && <td style={{padding:"5px 4px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:9,color:"var(--color-text-tertiary)"}}>{tp.keep>0?(tp.keep*100).toFixed(1)+"%":"—"}</td>}
+              <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500}}>{tp.moveDown>0 ? (showDec ? fmtDec(mdAdj) : fmtAmer(mdAdj)) : "—"}</td>
+              {showTrue && <td style={{padding:"5px 4px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:9,color:"var(--color-text-tertiary)"}}>{tp.moveDown>0?(tp.moveDown*100).toFixed(1)+"%":"—"}</td>}
               <td style={{padding:"5px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500,color:tp.losePick>0?"#fca5a5":"var(--color-text-tertiary)"}}>{tp.losePick>0 ? (showDec ? fmtDec(lpAdj) : fmtAmer(lpAdj)) : "—"}</td>
               {showTrue && <td style={{padding:"5px 4px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:9,color:"var(--color-text-tertiary)"}}>{tp.losePick>0?(tp.losePick*100).toFixed(1)+"%":"—"}</td>}
             </tr>;
