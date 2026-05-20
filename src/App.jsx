@@ -7597,6 +7597,78 @@ function GoalieSavesPanel({s,expG,goalies,players,margins,showTrue,dark,currentR
         teamHasRoles[g.team] = true;
       }
     }
+    // v149: PRIMARY source of who-starts = the Per-Game Goalie selection in Series Pricer.
+    //       Each game's homeGoalie/awayGoalie names the projected starter. We count each goalie's
+    //       projected starts across FUTURE (unplayed) games + their realized starts, weighted by
+    //       the probability each game is played (pGamePlayed). Share = expected starts / expected games.
+    //       This beats role/season-share because it reflects exactly what the user set per game.
+    const perGameShareByName = {};   // "name|team" → expected start share for the series
+    const teamHasPerGame = {};       // team → true if any per-game goalie is set
+    {
+      const games = s.games || [];
+      // v149: compute the auto-default starter per team (STARTER role, else highest starter_share),
+      //       matching the Per-Game Goalie section's pickAuto. When a game's homeGoalie/awayGoalie is
+      //       null, the displayed (and effective) starter is this auto-default — so we use it here too.
+      const projects = (gg) => {
+        const r = canonicalRole(gg.lineRole);
+        if (r === "IR" || r === "CUT") return false;
+        if (r === "STARTER") return true;
+        return (gg.starter_share || 0) >= 0.05;
+      };
+      const pickAuto = (teamAbbr) => {
+        const pool = goalies.filter(gg => gg.team === teamAbbr && projects(gg));
+        const starter = pool.find(gg => canonicalRole(gg.lineRole) === "STARTER");
+        if (starter) return starter.name;
+        const best = pool.reduce((b,gg)=>(!b||gg.starter_share>b.starter_share)?gg:b, null);
+        return best ? best.name : null;
+      };
+      const autoHome = s.homeAbbr ? pickAuto(s.homeAbbr) : null;
+      const autoAway = s.awayAbbr ? pickAuto(s.awayAbbr) : null;
+      const PLAY_W = [1, 1, 1, 1, 0.88, 0.62, 0.31];
+      const teamTally = {};
+      const ensure = (t) => { if (!teamTally[t]) teamTally[t] = {_total:0}; return teamTally[t]; };
+      for (let i = 0; i < 7; i++) {
+        const g = games[i];
+        if (!g) continue;
+        const played = !!g.result;
+        const w = played ? 1 : (PLAY_W[i] ?? 0);
+        if (w <= 0) continue;
+        if (s.homeAbbr) {
+          const tt = ensure(s.homeAbbr);
+          tt._total += w;
+          const gn = g.homeGoalie || autoHome;   // effective starter (stored OR auto)
+          if (gn) { tt[gn] = (tt[gn]||0) + w; teamHasPerGame[s.homeAbbr] = true; }
+        }
+        if (s.awayAbbr) {
+          const tt = ensure(s.awayAbbr);
+          tt._total += w;
+          const gn = g.awayGoalie || autoAway;
+          if (gn) { tt[gn] = (tt[gn]||0) + w; teamHasPerGame[s.awayAbbr] = true; }
+        }
+      }
+      for (const t of Object.keys(teamTally)) {
+        const tt = teamTally[t];
+        const total = tt._total || 1;
+        for (const k of Object.keys(tt)) {
+          if (k === "_total") continue;
+          perGameShareByName[k + "|" + t] = (tt[k] || 0) / total;
+        }
+      }
+    }
+    // Helper: match a goalie record to a per-game share entry by exact name or last-name.
+    const lastName = (n) => (n||"").trim().split(/\s+/).pop().toLowerCase();
+    const perGameShareFor = (g) => {
+      if (!teamHasPerGame[g.team]) return null;
+      // exact
+      if (perGameShareByName[g.name + "|" + g.team] != null) return perGameShareByName[g.name + "|" + g.team];
+      // last-name match against any per-game key for this team
+      const ln = lastName(g.name);
+      for (const key of Object.keys(perGameShareByName)) {
+        const [nm, tm] = key.split("|");
+        if (tm === g.team && lastName(nm) === ln) return perGameShareByName[key];
+      }
+      return 0; // team has per-game set, but this goalie isn't named in any game → 0 share
+    };
     // v147: matchup shots-faced projector. Returns projected SOG faced per game for a goalie's team.
     const projShotsFacedPerGame = (goalieTeam) => {
       const oppTeam = goalieTeam === s.homeAbbr ? s.awayAbbr : s.homeAbbr;
@@ -7611,7 +7683,11 @@ function GoalieSavesPanel({s,expG,goalies,players,margins,showTrue,dark,currentR
       .filter(g => teams.has(g.team))
       .map(g => {
         let effectiveShare;
-        if (teamHasRoles[g.team]) {
+        // v149: per-game goalie selection takes priority over roles/season-share.
+        const pgShare = perGameShareFor(g);
+        if (pgShare != null) {
+          effectiveShare = pgShare;
+        } else if (teamHasRoles[g.team]) {
           // User set roles for this team — honor them strictly
           if (g.lineRole === "STARTER") {
             // Split equally if multiple STARTERs; else full 1.0
@@ -7639,8 +7715,14 @@ function GoalieSavesPanel({s,expG,goalies,players,margins,showTrue,dark,currentR
           const w = roundGP / (roundGP + PO_SHOTS_K);
           projShots = w * poShotsPerGame + (1 - w) * matchupShots;
         }
-        const savePct = (g.save_pct && g.save_pct > 0.5) ? g.save_pct : 0.905;
-        const savesPerGame = (g.save_pct && projShots > 0) ? projShots * savePct : (g.saves_pg || 0);
+        // v149: self-heal save% for goalie records loaded before v147 (no save_pct field).
+        //       shots faced = saves + goals → save% = saves/(saves+goals). Falls back to .905.
+        let savePct = (g.save_pct && g.save_pct > 0.5) ? g.save_pct : null;
+        if (savePct == null) {
+          const sv = g.saves || 0, ga = g.goals || 0;
+          savePct = (sv + ga) > 0 ? sv / (sv + ga) : 0.905;
+        }
+        const savesPerGame = (savePct && projShots > 0) ? projShots * savePct : (g.saves_pg || 0);
         const futureLam = Math.max(0, effectiveShare * savesPerGame * remainingGoalieGames);
         const lam = Math.max(0.0001, realizedSaves + futureLam);
         const autoLine = Math.max(0.5, Math.round(lam) - 0.5);
@@ -7650,7 +7732,7 @@ function GoalieSavesPanel({s,expG,goalies,players,margins,showTrue,dark,currentR
       })
       .filter(g => g.effectiveShare > 0 || g.realizedSaves > 0)  // v61: also show goalies with realized saves even if role=0 now
       .sort((a,b) => b.lam - a.lam);
-  },[goalies, players, teamSOGForPerGame, teamSAPerGame, s.homeAbbr, s.awayAbbr, expG, currentRound]);
+  },[goalies, players, teamSOGForPerGame, teamSAPerGame, s.homeAbbr, s.awayAbbr, s.games, expG, currentRound]);
 
   if(!goalies) return <Card><div style={{color:"var(--color-text-secondary)",fontSize:12}}>Load goalies CSV in Upload tab to enable goalie saves props</div></Card>;
   if(!s.homeAbbr||!s.awayAbbr) return <Card><div style={{color:"var(--color-text-secondary)",fontSize:12}}>Set team abbreviations to load goalie props</div></Card>;
