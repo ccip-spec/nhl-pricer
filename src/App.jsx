@@ -7522,6 +7522,7 @@ function PropCombosPanel({s,expG,gameGoalScale=1,gameEquivalents,gameEquivalents
 // Line auto-set to round(lambda) - 0.5 (nearest under). Matches Goalie Series Props sheet.
 function GoalieSavesPanel({s,expG,goalies,players,margins,showTrue,dark,currentRound}) {
   const or = margins.propsGoals||1.05; // reuse saves margin setting
+  const [expandedAlt, setExpandedAlt] = useState(null); // v150: which goalie's alt-lines ladder is open
   // v102: round-aware goalie stats. Previously used cumulative g.pGP / g.pSaves,
   //       which bled R1 starts and saves into R2 series totals.
   const _curRoundNum = currentRound === "r1" ? 1 : currentRound === "r2" ? 2 :
@@ -7715,12 +7716,22 @@ function GoalieSavesPanel({s,expG,goalies,players,margins,showTrue,dark,currentR
           const w = roundGP / (roundGP + PO_SHOTS_K);
           projShots = w * poShotsPerGame + (1 - w) * matchupShots;
         }
-        // v149: self-heal save% for goalie records loaded before v147 (no save_pct field).
-        //       shots faced = saves + goals → save% = saves/(saves+goals). Falls back to .905.
-        let savePct = (g.save_pct && g.save_pct > 0.5) ? g.save_pct : null;
-        if (savePct == null) {
-          const sv = g.saves || 0, ga = g.goals || 0;
-          savePct = (sv + ga) > 0 ? sv / (sv + ga) : 0.905;
+        // v150: robust save%. Many goalie records have a broken save_pct (=1.0 because goals=0 at
+        //       parse time) which made every goalie show 100% Sv% and absurd save totals. Derive
+        //       save% defensively:
+        //         1. If save_pct is present AND plausible (0.5–0.97), trust it.
+        //         2. Else if goals>0, compute saves/(saves+goals).
+        //         3. Else estimate from goalie `quality` (GSAx-based): league-avg .905 nudged by
+        //            quality (>1 = elite → higher save%). quality 0.80→~.892, 1.0→.905, 1.20→.918.
+        const LEAGUE_SVPCT = 0.905;
+        let savePct = null;
+        if (g.save_pct && g.save_pct >= 0.5 && g.save_pct <= 0.97) {
+          savePct = g.save_pct;
+        } else if ((g.goals || 0) > 0 && (g.saves || 0) > 0) {
+          savePct = g.saves / (g.saves + g.goals);
+        } else {
+          const q = Number.isFinite(g.quality) ? g.quality : 1.0;
+          savePct = Math.max(0.86, Math.min(0.925, LEAGUE_SVPCT + (q - 1.0) * 0.065));
         }
         const savesPerGame = (savePct && projShots > 0) ? projShots * savePct : (g.saves_pg || 0);
         const futureLam = Math.max(0, effectiveShare * savesPerGame * remainingGoalieGames);
@@ -7754,10 +7765,22 @@ function GoalieSavesPanel({s,expG,goalies,players,margins,showTrue,dark,currentR
             <tbody>{teamGoalies.map((g,i)=>{
               const [ao,au] = applyMargin([1-poissonCDF(Math.ceil(g.autoLine-0.001)-1,g.lam), poissonCDF(Math.ceil(g.autoLine-0.001)-1,g.lam)], or);
               const pOver = 1-poissonCDF(Math.ceil(g.autoLine-0.001)-1, g.lam);
+              const gKey = g.name+"|"+g.team;
+              const isExpanded = expandedAlt === gKey;
+              // v150: alternate saves ladder. Build half-integer lines spanning ±~1.5σ around λ.
+              const sd = Math.sqrt(g.lam);
+              const lo = Math.max(0.5, Math.round(g.lam - 2.2*sd) - 0.5);
+              const hi = Math.round(g.lam + 2.2*sd) + 0.5;
+              const altLines = [];
+              for (let L = lo; L <= hi; L += 1) altLines.push(L);
               return (
-                <tr key={i} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)"),opacity:g.starter_share<0.05?0.45:1}}>
-                  <td style={{padding:"4px 8px",fontWeight:g.starter_share>0.4?500:400}}>{g.name}</td>
-                  <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(g.starter_share*100).toFixed(1)}%</td>
+              <Fragment key={i}>
+                <tr style={{borderBottom:isExpanded?"none":"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":(dark?"rgba(255,255,255,0.018)":"rgba(0,0,0,0.012)"),opacity:g.starter_share<0.05?0.45:1,cursor:"pointer"}}
+                    onClick={()=>setExpandedAlt(isExpanded?null:gKey)}>
+                  <td style={{padding:"4px 8px",fontWeight:g.starter_share>0.4?500:400}}>
+                    <span style={{display:"inline-block",width:10,color:"var(--color-text-tertiary)",fontSize:9}}>{isExpanded?"▾":"▸"}</span> {g.name}
+                  </td>
+                  <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{(g.effectiveShare*100).toFixed(1)}%</td>
                   <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{g.savePctUsed!=null?(g.savePctUsed*100).toFixed(1):"—"}</td>
                   <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:g.sogMult>1.02?"#4ade80":g.sogMult<0.98?"#fca5a5":"var(--color-text-tertiary)"}}>{g.projShots!=null?g.projShots.toFixed(1):"—"}</td>
                   <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:10,color:"var(--color-text-secondary)"}}>{g.savesPerGameUsed!=null?g.savesPerGameUsed.toFixed(1):g.saves_pg.toFixed(1)}</td>
@@ -7768,6 +7791,31 @@ function GoalieSavesPanel({s,expG,goalies,players,margins,showTrue,dark,currentR
                   <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,fontWeight:500,color:ao>=0.5?"#4ade80":"var(--color-text-primary)"}}>{fmt(ao)}</td>
                   <td style={{padding:"4px 8px",textAlign:"right",fontFamily:"var(--font-mono)",fontSize:11,color:"var(--color-text-secondary)"}}>{fmt(au)}</td>
                 </tr>
+                {isExpanded && <tr style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                  <td colSpan={showTrue?11:10} style={{padding:"6px 10px 10px 24px",background:dark?"rgba(59,130,246,0.04)":"rgba(59,130,246,0.03)"}}>
+                    <div style={{fontSize:9,color:"var(--color-text-tertiary)",marginBottom:4,textTransform:"uppercase",letterSpacing:"0.06em"}}>Alternate Lines — {g.name} (λ={g.lam.toFixed(1)})</div>
+                    <table style={{width:"100%",borderCollapse:"collapse",fontSize:10}}>
+                      <thead><tr style={{color:"var(--color-text-tertiary)",fontSize:9}}>
+                        <th style={{textAlign:"left",padding:"2px 6px"}}>Line</th>
+                        {showTrue&&<th style={{textAlign:"right",padding:"2px 6px"}}>P(Over)</th>}
+                        <th style={{textAlign:"right",padding:"2px 6px"}}>Over</th>
+                        <th style={{textAlign:"right",padding:"2px 6px"}}>Under</th>
+                      </tr></thead>
+                      <tbody>{altLines.map(L=>{
+                        const pO = 1-poissonCDF(Math.ceil(L-0.001)-1, g.lam);
+                        const [aO,aU] = applyMargin([pO, 1-pO], or);
+                        const isMain = Math.abs(L - g.autoLine) < 0.01;
+                        return <tr key={L} style={{background:isMain?(dark?"rgba(74,222,128,0.08)":"rgba(74,222,128,0.06)"):"transparent"}}>
+                          <td style={{padding:"2px 6px",fontFamily:"var(--font-mono)",fontWeight:isMain?600:400}}>{L.toFixed(1)}{isMain?" ★":""}</td>
+                          {showTrue&&<td style={{padding:"2px 6px",textAlign:"right",fontFamily:"var(--font-mono)",color:"var(--color-text-tertiary)"}}>{(pO*100).toFixed(1)}%</td>}
+                          <td style={{padding:"2px 6px",textAlign:"right",fontFamily:"var(--font-mono)",color:aO>=0.5?"#4ade80":"var(--color-text-primary)"}}>{fmt(aO)}</td>
+                          <td style={{padding:"2px 6px",textAlign:"right",fontFamily:"var(--font-mono)",color:aU>=0.5?"#4ade80":"var(--color-text-secondary)"}}>{fmt(aU)}</td>
+                        </tr>;
+                      })}</tbody>
+                    </table>
+                  </td>
+                </tr>}
+              </Fragment>
               );
             })}</tbody>
           </table>
