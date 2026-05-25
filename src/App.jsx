@@ -3908,72 +3908,54 @@ function AppInner() {
     }).sort((a,b)=>b.adjProb-a.adjProb).slice(0, lTopN);
   }, [r1MatchupSims, lStat, lTopN, globals.overroundR1, globals.powerFactor, players]);
 
+  // v151: split the heavy leader computation. The pool filter + computeLambda over every player is
+  //       the expensive part (advancement chain per player). Memoize it on the inputs that actually
+  //       change the lambdas (players, stat, scope, series/advancement state). The sim + overround
+  //       (cheaper, but still 10k trials) is a second memo keyed off the lambdas + tuning knobs.
+  const leaderComputed = useMemo(()=>{
+    if(!players||!players.length)return null;
+    if (tab !== "leaders" && tab !== "compare") return null;
+    if (lScope === "r1" && r1LeaderMarket) return {viaR1:true};
+    let pool=players.filter(p=>roleMultiplier(p.lineRole)>0);
+    if(lScope==="r1"){const r1m=matchups.r1||[];const active=new Set([...r1m.filter(m=>m.homeAbbr).map(m=>m.homeAbbr),...r1m.filter(m=>m.awayAbbr).map(m=>m.awayAbbr)]);if(active.size>0)pool=pool.filter(p=>active.has(p.team));}
+    if(lScope==="r2"){
+      const active = new Set();
+      for (const m of (matchups.r2||[])) { if (m.homeAbbr) active.add(m.homeAbbr); if (m.awayAbbr) active.add(m.awayAbbr); }
+      for (const sr of (allSeries.r2||[])) { if (sr.homeAbbr) active.add(sr.homeAbbr); if (sr.awayAbbr) active.add(sr.awayAbbr); }
+      if (active.size>0) pool = pool.filter(p=>active.has(p.team));
+    }
+    if(lScope==="r3"){
+      const active = new Set();
+      for (const m of (matchups.r3||[])) { if (m.homeAbbr) active.add(m.homeAbbr); if (m.awayAbbr) active.add(m.awayAbbr); }
+      for (const sr of (allSeries.r3||[])) { if (sr.homeAbbr) active.add(sr.homeAbbr); if (sr.awayAbbr) active.add(sr.awayAbbr); }
+      if (active.size>0) pool = pool.filter(p=>active.has(p.team));
+    }
+    if(lScope==="full"){
+      const active = new Set();
+      for (const r of ROUND_IDS) { for (const sr of (allSeries[r]||[])) { if (sr.homeAbbr) active.add(sr.homeAbbr); if (sr.awayAbbr) active.add(sr.awayAbbr); } }
+      for (const m of (matchups.r1||[])) { if (m.homeAbbr) active.add(m.homeAbbr); if (m.awayAbbr) active.add(m.awayAbbr); }
+      if (active.size > 0) pool = pool.filter(p=>active.has(p.team));
+    }
+    const computed = pool.map(p=>computeLambda(p,lStat,lScope));
+    return {pool, computed};
+  },[tab,players,lStat,lScope,computeLambda,matchups,allSeries,r1LeaderMarket]);
+
   const leaderMarket = useMemo(()=>{
     if(!players||!players.length)return[];
-    // v115: leader market is heavy (10k-trial sim over hundreds of players). Only the Leaders
-    //       and Compare tabs consume it — but it was running on EVERY render anywhere in the
-    //       app because its deps include allSeries (which changes when typing winPct etc on
-    //       the Series tab). Result: laggy typing on Series tab, especially R2 where the leader
-    //       deps cascade is fresh. Gate to relevant tabs.
     if (tab !== "leaders" && tab !== "compare") return [];
-    // v24 Phase E Pt3: prefer unified R1 market when in R1 scope and it's computable
     if (lScope === "r1" && r1LeaderMarket) return r1LeaderMarket;
+    if (!leaderComputed || !leaderComputed.pool) return [];
+    const {pool, computed} = leaderComputed;
     const or=lScope==="r1"?globals.overroundR1:lScope==="r2"?globals.overroundR1:lScope==="r3"?globals.overroundR1:globals.overroundFull;
     const pf=globals.powerFactor;
     const r = globals.dispersion;
-    let pool=players.filter(p=>roleMultiplier(p.lineRole)>0);
-    if(lScope==="r1"){const r1m=matchups.r1||[];const active=new Set([...r1m.filter(m=>m.homeAbbr).map(m=>m.homeAbbr),...r1m.filter(m=>m.awayAbbr).map(m=>m.awayAbbr)]);if(active.size>0)pool=pool.filter(p=>active.has(p.team));}
-    // v77: R2 scope — filter to teams that are in R2 (could be from matchups.r2 or allSeries.r2).
-    if(lScope==="r2"){
-      const active = new Set();
-      for (const m of (matchups.r2||[])) {
-        if (m.homeAbbr) active.add(m.homeAbbr);
-        if (m.awayAbbr) active.add(m.awayAbbr);
-      }
-      for (const sr of (allSeries.r2||[])) {
-        if (sr.homeAbbr) active.add(sr.homeAbbr);
-        if (sr.awayAbbr) active.add(sr.awayAbbr);
-      }
-      if (active.size>0) pool = pool.filter(p=>active.has(p.team));
-    }
-    // v134: R3 (Conference Final) scope — same pattern as R2.
-    if(lScope==="r3"){
-      const active = new Set();
-      for (const m of (matchups.r3||[])) {
-        if (m.homeAbbr) active.add(m.homeAbbr);
-        if (m.awayAbbr) active.add(m.awayAbbr);
-      }
-      for (const sr of (allSeries.r3||[])) {
-        if (sr.homeAbbr) active.add(sr.homeAbbr);
-        if (sr.awayAbbr) active.add(sr.awayAbbr);
-      }
-      if (active.size>0) pool = pool.filter(p=>active.has(p.team));
-    }
-    // v43: Full Playoff scope must also filter to playoff teams. Bug: previously included all players,
-    // so non-playoff teams (MTL, etc.) got default 50/25/10 advancement → ~10 expected playoff games each →
-    // Caufield-style false favourites. Build active set from any series in any round of allSeries.
-    if(lScope==="full"){
-      const active = new Set();
-      for (const r of ROUND_IDS) {
-        for (const sr of (allSeries[r]||[])) {
-          if (sr.homeAbbr) active.add(sr.homeAbbr);
-          if (sr.awayAbbr) active.add(sr.awayAbbr);
-        }
-      }
-      // Also fold in matchups.r1 in case user populated those instead of allSeries.r1
-      for (const m of (matchups.r1||[])) {
-        if (m.homeAbbr) active.add(m.homeAbbr);
-        if (m.awayAbbr) active.add(m.awayAbbr);
-      }
-      if (active.size > 0) pool = pool.filter(p=>active.has(p.team));
-    }
-    // v24: Monte Carlo leader probabilities. Handles ties correctly + uses NB dispersion consistent with props.
-    const computed = pool.map(p=>computeLambda(p,lStat,lScope));
     const entries = computed.map(c=>({futureLam:c.futureLam, actual:c.actual}));
-    const raw = entries.length ? simulateLeader(entries, r, 10000, 12345) : [];
+    // v151: trials scale down for big pools to keep the UI responsive (variance still fine for ranking).
+    const trials = entries.length > 120 ? 6000 : 10000;
+    const raw = entries.length ? simulateLeader(entries, r, trials, 12345) : [];
     const adj = applyLeaderOverround(raw, pf, or);
     return pool.map((p,i)=>({...p,lambda:computed[i].lam,futureLam:computed[i].futureLam,actualStat:computed[i].actual,trueProb:raw[i],adjProb:adj[i]})).sort((a,b)=>b.adjProb-a.adjProb).slice(0,lTopN);
-  },[tab,players,lStat,lScope,globals,computeLambda,matchups,advancement,lTopN,r1LeaderMarket,allSeries]);
+  },[tab,players,lScope,globals.overroundR1,globals.overroundFull,globals.powerFactor,globals.dispersion,leaderComputed,lTopN,r1LeaderMarket]);
 
   function exportState(){const s={players,goalies,matchups,allSeries,advancement,globals,margins,bracket};return JSON.stringify(s,null,2);}
   function importState(text){try{const s=JSON.parse(text);if(s.players){setPlayers(s.players);scheduleSync("players",s.players);}if(s.goalies){setGoalies(s.goalies);scheduleSync("goalies",s.goalies);}if(s.matchups){setMatchups(migrateMatchups(s.matchups));}if(s.allSeries){setAllSeries(migrateSeries(s.allSeries));}if(s.advancement){setAdvancement(s.advancement);}if(s.globals)setGlobals(s.globals);if(s.margins)setMargins(s.margins);if(s.bracket)setBracket(s.bracket);return{ok:true};}catch(e){return{ok:false,error:e.message};}}
@@ -4577,6 +4559,25 @@ function LeadersTab({players,setPlayers,matchups,setMatchups,advancement,setAdva
       return changed ? next : prev;
     });
   }, [eliminatedTeams, setAdvancement]);
+
+  // v151: once a team is actually IN an R3 (Conference Final) series, the Conf decimal should
+  //       come straight from the R3 series price (autoConfByTeamFinal), not a stale manual entry.
+  //       Auto-unlock manualConf for those teams one time so AUTO takes over.
+  useEffect(()=>{
+    const r3 = (allSeries && allSeries.r3) || [];
+    const inR3 = new Set();
+    for (const sr of r3) { if (sr && sr.homeAbbr) inR3.add(sr.homeAbbr); if (sr && sr.awayAbbr) inR3.add(sr.awayAbbr); }
+    if (inR3.size === 0) return;
+    setAdvancement(prev => {
+      let changed = false;
+      const next = {...prev};
+      for (const t of inR3) {
+        const cur = prev[t];
+        if (cur && cur.manualConf) { next[t] = {...cur, manualConf: false}; changed = true; }
+      }
+      return changed ? next : prev;
+    });
+  }, [allSeries, setAdvancement]);
 
   function updM(idx,f,v){setMatchups(prev=>{const u=[...prev];u[idx]={...u[idx],[f]:v};
     if(f==="homeWinPct"){const hw=v,aw=1-v;const p4=Math.pow(hw,4)+Math.pow(aw,4),p5=4*(Math.pow(hw,4)*aw+Math.pow(aw,4)*hw),p6=10*(Math.pow(hw,4)*aw*aw+Math.pow(aw,4)*hw*hw),p7=20*(Math.pow(hw,4)*aw*aw*aw+Math.pow(aw,4)*hw*hw*hw),tot=p4+p5+p6+p7;u[idx].expGames=tot>0?+((4*p4+5*p5+6*p6+7*p7)/tot).toFixed(2):5.82;}return u;});}
