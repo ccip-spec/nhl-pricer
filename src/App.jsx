@@ -2215,33 +2215,54 @@ function parseHRFullPage(text) {
     }
   }
 
-  // v89: best-effort OT scorer extraction from HR scoring summary.
-  // HR pages typically have a "Scoring Summary" or similar section with goal lines like:
-  //   "OT  - 0:42 - Mark Stone — Tomas Hertl, Shea Theodore"
-  // or:
-  //   "1st OT  Mark Stone (1)"
-  // Fallback: if game went to OT, scan after any "OT" period marker and grab the first
-  // "Name (goalNum)" pattern. If not found, leave null — user can set manually.
+  // v153: robust OT-scorer extraction. HR scoring summaries come in two main shapes:
+  //
+  //   (a) Tabular with period in first column (the common one):
+  //         1st  8:12   CAR   Aho (1) - Slavin, Burns   EV
+  //         2nd  3:45   VEG   Stone (3) - Hertl         EV
+  //         OT   2:31   CAR   Jarvis (2) - Aho          EV
+  //
+  //   (b) Period header line, then goal lines beneath it:
+  //         OT
+  //         2:31   CAR   Jarvis (2) - Aho
+  //
+  // We walk every line and classify it. A line that BOTH (i) contains an OT marker
+  // (^OT, "1st OT", " OT ") AND (ii) contains a "Name (goalNum)" pattern is case (a) —
+  // we grab the name from that line directly. Otherwise we track the "current period"
+  // header and assign the first "Name (goalNum)" seen under an OT header (case b).
+  //
+  // Crucially we NEVER fall back to "the last goal of the game" — that was the v89 bug
+  // that credited the wrong player.
   let otScorer = null;
   if (ot) {
-    let foundOTSection = false;
-    for (let i=0; i<lines.length; i++) {
+    const namePat = /([A-ZÁÄÉÍÓÖÚÜ][A-Za-záäéíóöúüñçÁÄÉÍÓÖÚÜ'\.\-]+(?:\s+[A-ZÁÄÉÍÓÖÚÜ][A-Za-záäéíóöúüñçÁÄÉÍÓÖÚÜ'\.\-]+)+)\s*\((\d+)\)/;
+    // OT marker = "OT" as a standalone token (start of line, end of line, or word-boundary token).
+    //             Also matches "1st OT", "2nd OT" prefixes; explicitly EXCLUDES inline mentions of
+    //             non-goal sentences (we require it to be near the START of the line, before any name).
+    const otTokenAtStart = /^\s*(1st\s+OT|2nd\s+OT|3rd\s+OT|OT)\b/i;
+    let currentIsOT = false;
+    for (let i = 0; i < lines.length; i++) {
       const L = lines[i];
-      // OT period header (HR uses "OT", "1st OT", etc.)
-      if (/^\s*(1st\s+|2nd\s+|3rd\s+|4th\s+)?OT\b/i.test(L) && !/^\s*OT\s*[:|]/.test(L)) {
-        foundOTSection = true;
-        // Look ahead 1-10 lines for "Name (goalNum)" pattern
-        for (let j=i; j<Math.min(i+10, lines.length); j++) {
-          const m = lines[j].match(/([A-ZÁÄÉÍÓÖÚÜ][a-záäéíóöúüñç'\.\-]+(?:\s+[A-ZÁÄÉÍÓÖÚÜ][a-záäéíóöúüñç'\.\-]+)+)\s*\(\d+\)/);
-          if (m) { otScorer = m[1].trim(); break; }
-        }
-        if (otScorer) break;
+      // Case (a): same line has OT marker + a Name (goal#) pattern → that's the OT scorer.
+      if (otTokenAtStart.test(L)) {
+        const m = L.match(namePat);
+        if (m) { otScorer = m[1].trim(); break; }
+        // Otherwise this line is a period-header (case b); flag and continue.
+        currentIsOT = true;
+        continue;
+      }
+      // Switching INTO a different period header resets the OT flag.
+      // Match standard period headers: "1st Period", "2nd Period", "3rd Period", "Shootout".
+      if (/^\s*(1st|2nd|3rd|shootout)\b/i.test(L) && !/OT/i.test(L)) {
+        currentIsOT = false;
+        continue;
+      }
+      // Case (b): we're under an OT header and this line has a Name(goal#) pattern → that's the OT scorer.
+      if (currentIsOT) {
+        const m = L.match(namePat);
+        if (m) { otScorer = m[1].trim(); break; }
       }
     }
-    // Fallback: HR's "Scoring Summary" block may format OT differently. We DELIBERATELY do NOT
-    // guess from "last goal of the game" — that's how we ended up crediting Mark Stone for Seth
-    // Jarvis's OT goal. Leave otScorer null when uncertain; user can set it manually on the
-    // Series Pricer per-game row (small "OT scorer" dropdown appears for completed OT games).
   }
 
   return {
@@ -5930,25 +5951,6 @@ function SeriesTab({allSeries,setAllSeries,players,setPlayers,goalies,setGoalies
                       <option value="home">{s.homeAbbr||"Home"} W</option>
                       <option value="away">{s.awayAbbr||"Away"} W</option>
                     </select>
-                    {/* v152: inline OT toggle + scorer selector when game is completed.
-                              Fixes the bug where parser misidentified the OT scorer; user can correct here. */}
-                    {g.result && (() => {
-                      const isOT = !!(g.wentOT || g.ot);
-                      // Eligible OT-scorers = skaters on either team in this series (no goalies)
-                      const otPool = (players||[]).filter(p => (p.team===s.homeAbbr || p.team===s.awayAbbr) && !["STARTER","BACKUP","CUT"].includes(canonicalRole(p.lineRole))).map(p=>p.name).sort();
-                      return <div style={{display:"flex",gap:3,alignItems:"center",marginTop:2,fontSize:9}}>
-                        <label style={{display:"flex",alignItems:"center",gap:2,color:"var(--color-text-tertiary)",cursor:"pointer"}}>
-                          <input type="checkbox" checked={isOT} onChange={e=>updG(i,"wentOT",e.target.checked)} style={{width:11,height:11,margin:0}}/>
-                          OT
-                        </label>
-                        {isOT && <select value={g.otScorer||""} onChange={e=>updG(i,"otScorer",e.target.value||null)}
-                          style={{fontSize:9,padding:"1px 2px",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:g.otScorer?"var(--color-text-primary)":"#f59e0b",width:90,maxWidth:90}}
-                          title="OT scorer — set/correct here if parser got it wrong">
-                          <option value="">scorer…</option>
-                          {otPool.map(n=><option key={n} value={n}>{n}</option>)}
-                        </select>}
-                      </div>;
-                    })()}
                   </td>
                 </tr>
                 );
