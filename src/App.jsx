@@ -1997,9 +1997,14 @@ function parseHRFullPage(text) {
   // ── 2. OT/SO DETECTION ──────────────────────────────────────────────────────
   // Look for "OT" or "Overtime" or "SO"/"Shootout" or "1st OT", "2nd OT" mentions.
   const fullText = text;
+  // v154: HR's scoring summary uses an "OT Summary" header (e.g. "OT Summary\tVGK\tCAR"). That header
+  //       lives far down the page (after all skater/goalie tables), so the old "first 40 lines" check
+  //       missed it and the game was never flagged OT → otScorer never extracted. Match the header
+  //       anywhere in the document.
   const ot = /\b(overtime|1st OT|2nd OT|3rd OT|4th OT)\b/i.test(fullText)
-          || /\bOT\b/.test(fullText.split("\n").slice(0,40).join(" ")); // OT mentioned in scoring summary
-  const so = /\b(shootout|^SO$)/im.test(fullText);
+          || /^\s*(1st\s+OT|2nd\s+OT|3rd\s+OT|OT)\s+Summary\b/im.test(fullText)
+          || /\bOT\b/.test(fullText.split("\n").slice(0,40).join(" ")); // OT mentioned near top
+  const so = /\b(shootout)\b/i.test(fullText) || /^\s*Shootout\s+Summary\b/im.test(fullText);
 
   // ── 3. DATE ─────────────────────────────────────────────────────────────────
   let dateISO = null;
