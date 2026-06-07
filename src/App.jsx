@@ -1917,24 +1917,38 @@ function parseESPNBoxScore(text) {
   }
   let ot = false, so = false;
   for (let i=scoringIdx; i<lines.length; i++) {
-    if (/\bOT\d?\b/.test(lines[i])) ot = true;
+    // v155: ESPN/HR hybrid pages use an "OT Summary" header. Match OT period markers and that header.
+    if (/\bOT\d?\b/.test(lines[i]) || /^\s*(1st\s+OT|2nd\s+OT|3rd\s+OT|OT)\s+Summary\b/i.test(lines[i])) ot = true;
     if (/\bShootout\b/i.test(lines[i])) so = true;
   }
 
-  // v89: extract OT scorer when game went to OT.
-  // ESPN scoring summary lines look like:  "2:45\t\tElmer Soderblom (1)"
-  // (tabs may be inconsistent — "<MM:SS><whitespace+><Name> (<goalNum>)").
-  // The last such line in the summary IS the OT winner when ot=true.
+  // v155: period-aware OT scorer extraction. Walk the scoring summary; track whether we're under an
+  //       OT header; the first "Name (goal#)" line under OT is the scorer. The name pattern allows a
+  //       trailing "(Power Play)" / "(Short Handed)" / "(Empty Net)" suffix after the "(goal#)" —
+  //       previously the regex required the line to END at "(num)", so lines like
+  //       "3:56  Seth Jarvis (4) (Power Play)" never matched and the parser fell back to the LAST
+  //       clean goal line in the summary (e.g. "Mark Stone (6)") → wrong scorer. No fallback now.
   let otScorer = null;
   if (ot) {
-    let lastGoalLine = null;
+    const namePat = /^\s*\d+:\d{2}\s+(?:VGK|CAR|[A-Z]{2,3})?\s*([A-ZÁÄÉÍÓÖÚÜ][A-Za-záäéíóöúüñçÁÄÉÍÓÖÚÜ'\.\-]+(?:\s+[A-ZÁÄÉÍÓÖÚÜ][A-Za-záäéíóöúüñçÁÄÉÍÓÖÚÜ'\.\-]+)+)\s*\(\d+\)/;
+    const otHeader = /^\s*(1st\s+OT|2nd\s+OT|3rd\s+OT|OT)\b/i;
+    const regPeriodHeader = /^\s*(1st|2nd|3rd|shootout)\b/i;
+    let inOT = false;
     for (let i=scoringIdx; i<lines.length; i++) {
       const L = lines[i];
-      // Match "<min>:<sec>" then whitespace then "<Name> (<num>)"
-      const m = L.match(/^\s*\d+:\d{2}\s+(.+?)\s*\(\d+\)\s*$/);
-      if (m) lastGoalLine = m[1].trim();
+      if (otHeader.test(L)) {
+        // same-line scorer? (tabular)
+        const m = L.match(namePat);
+        if (m) { otScorer = m[1].trim(); break; }
+        inOT = true;
+        continue;
+      }
+      if (regPeriodHeader.test(L) && !/OT/i.test(L)) { inOT = false; continue; }
+      if (inOT) {
+        const m = L.match(namePat);
+        if (m) { otScorer = m[1].trim(); break; }
+      }
     }
-    if (lastGoalLine) otScorer = lastGoalLine;
   }
 
   return {
