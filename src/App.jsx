@@ -2238,15 +2238,10 @@ function parseHRFullPage(text) {
         if (otScorer) break;
       }
     }
-    // Fallback: HR's "Scoring Summary" block may format OT differently — try last-goal-of-the-game heuristic.
-    if (!otScorer && foundOTSection === false) {
-      let lastName = null;
-      for (let i=0; i<lines.length; i++) {
-        const m = lines[i].match(/^\s*\d+:\d{2}\s+(.+?)\s*\(\d+\)/);
-        if (m) lastName = m[1].trim();
-      }
-      if (lastName) otScorer = lastName;
-    }
+    // Fallback: HR's "Scoring Summary" block may format OT differently. We DELIBERATELY do NOT
+    // guess from "last goal of the game" — that's how we ended up crediting Mark Stone for Seth
+    // Jarvis's OT goal. Leave otScorer null when uncertain; user can set it manually on the
+    // Series Pricer per-game row (small "OT scorer" dropdown appears for completed OT games).
   }
 
   return {
@@ -5935,6 +5930,25 @@ function SeriesTab({allSeries,setAllSeries,players,setPlayers,goalies,setGoalies
                       <option value="home">{s.homeAbbr||"Home"} W</option>
                       <option value="away">{s.awayAbbr||"Away"} W</option>
                     </select>
+                    {/* v152: inline OT toggle + scorer selector when game is completed.
+                              Fixes the bug where parser misidentified the OT scorer; user can correct here. */}
+                    {g.result && (() => {
+                      const isOT = !!(g.wentOT || g.ot);
+                      // Eligible OT-scorers = skaters on either team in this series (no goalies)
+                      const otPool = (players||[]).filter(p => (p.team===s.homeAbbr || p.team===s.awayAbbr) && !["STARTER","BACKUP","CUT"].includes(canonicalRole(p.lineRole))).map(p=>p.name).sort();
+                      return <div style={{display:"flex",gap:3,alignItems:"center",marginTop:2,fontSize:9}}>
+                        <label style={{display:"flex",alignItems:"center",gap:2,color:"var(--color-text-tertiary)",cursor:"pointer"}}>
+                          <input type="checkbox" checked={isOT} onChange={e=>updG(i,"wentOT",e.target.checked)} style={{width:11,height:11,margin:0}}/>
+                          OT
+                        </label>
+                        {isOT && <select value={g.otScorer||""} onChange={e=>updG(i,"otScorer",e.target.value||null)}
+                          style={{fontSize:9,padding:"1px 2px",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:3,color:g.otScorer?"var(--color-text-primary)":"#f59e0b",width:90,maxWidth:90}}
+                          title="OT scorer — set/correct here if parser got it wrong">
+                          <option value="">scorer…</option>
+                          {otPool.map(n=><option key={n} value={n}>{n}</option>)}
+                        </select>}
+                      </div>;
+                    })()}
                   </td>
                 </tr>
                 );
